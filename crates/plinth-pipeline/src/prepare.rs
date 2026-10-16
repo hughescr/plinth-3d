@@ -3813,15 +3813,17 @@ fn print_sweep_disclosure(
         // THE TIP COVER (lane tc, 2026-10-16): what the slides would have left
         // beyond the reach the placed tips gave, and how it was put back.
         let cover = &footprint.cover;
-        if cover.enabled {
+        if cover.enabled || cover.slides_holding_seat > 0 {
             println!(
-                "[sweep {model}] tip cover: {} reach walk(s) over the slid field; the slides as \
+                "[sweep {model}] tip cover: {} slide(s) whose ball still holds the seat it was \
+                 placed for (not walked); {} reach walk(s) over the slid field; the slides as \
                  first settled left {:.4} mm2 of model surface ({} cells, {} with what is built \
                  on them) beyond the placed reach, blamed on {} slide(s), worst U {:.3}; {} \
                  slide(s) taken back, {} re-search pass(es), {} candidate(s) passed over for \
                  not reaching the stranded cells; tips reseated on another slide that keeps the \
                  cover {:?}; slides undone (tip kept at its placed seat) {:?}; shortfalls left \
                  {}",
+                cover.slides_holding_seat,
                 cover.checks,
                 cover.found_surface_mm2,
                 cover.found_surface_cells,

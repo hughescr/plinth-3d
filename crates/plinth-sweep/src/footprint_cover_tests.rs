@@ -1,15 +1,21 @@
 //! **THE TIP COVER** ([`super::TipCover`], lane tc 2026-10-16) on a hand-made
 //! field: a flat slab 3 mm wide and 6 mm long, its underside at z 1.0 (layer
-//! 20), and one tip seated at the slab's edge so its contact disc hangs off
-//! the face. The footprint rule slides that tip inward along the face; the
-//! tests ask what the tip-cover check does with the slide.
+//! 20), a raster with a 1 mm margin on its -x side, and two tips:
+//!
+//! * the TEST tip, either seated 0.3 mm out past the slab's edge (its whole
+//!   disc over air: the footprint rule slides it in onto the face, further
+//!   than its ball reaches, so its ball lets go of the seat it was placed for
+//!   and the tip-cover check walks it), or seated over the slab's first
+//!   column (half its disc off: the slide is short and the ball still holds
+//!   its seat, so the check does not walk it);
+//! * a control tip well inside the face, never moved.
 //!
 //! The repair tests read a SCRIPTED walk (a closure that strands one cell
 //! whenever the slid root stands further than a set distance from it), so
-//! each repair rung is reached on purpose. The last test reads the REAL walk
-//! ([`crate::demand_replay::stranded_by_moves`]) on the same slab: the slide
-//! strands demand, the repair covers it, and the sabotage (the check off)
-//! leaves it stranded.
+//! each repair rung is reached on purpose; the planner's own walk
+//! ([`crate::demand_replay::stranded_by_moves`]) is held to hand-derived
+//! geometry in `demand_replay`'s tests, and to the Cylinder lid in the lane's
+//! model runs.
 
 use std::cell::RefCell;
 
@@ -17,21 +23,28 @@ use plinth_support::perception::{slice_stack, SliceSolid, SliceStackLimits};
 use plinth_support::SweepArm;
 
 use super::{apply, FootprintOutcome, MoveLimits, TipCover};
-use crate::demand_replay::{MovedSeat, ReplayContext, StrandedCell};
+use crate::demand_replay::{MovedSeat, StrandedCell};
 use crate::grid::{lay_out_at, Grid};
 use crate::head_carrier_tests::{straight, H};
 use crate::{Footprint, SweepStrut};
 
-const COLS: usize = 60;
+const COLS: usize = 80;
 const ROWS: usize = 120;
 const LAYERS: usize = 40;
+/// The raster's left edge: a 1 mm margin past the slab's edge at x 0.
+const ORIGIN_X: f64 = -1.0;
 /// The slab's underside, z 1.0, is the bottom of layer 20.
 const K_TOP: usize = 20;
-/// The edge tip's row: the slab's middle, y 3.025.
+/// The test tip's row: the slab's middle, y 3.025.
 const ROW: usize = 60;
+/// The test tip over air, 0.3 mm past the edge (x -0.275), and over the
+/// slab's first column (x 0.025).
+const OVER_AIR: usize = 17;
+const OVER_EDGE: usize = 20;
+const TIP_RADIUS_MM: f64 = 0.1;
 
 fn grid() -> Grid {
-    lay_out_at(0.0, 0.0, H, COLS, ROWS)
+    lay_out_at(ORIGIN_X, 0.0, H, COLS, ROWS)
 }
 
 /// The slab: x 0..3, y 0..6, z 1.0..1.5.
@@ -40,27 +53,19 @@ fn slab() -> plinth_mesh::Mesh {
     plinth_mesh::make_box([3.0, 6.0, 0.5], [1.5, 3.0, 1.0]).expect("a box")
 }
 
-fn planes() -> Vec<f64> {
-    (0..LAYERS).map(|layer| (f64::from(u32::try_from(layer).expect("small")) + 0.5) * H).collect()
+fn slices() -> Vec<Vec<SliceSolid>> {
+    let planes: Vec<f64> =
+        (0..LAYERS).map(|layer| (f64::from(u32::try_from(layer).expect("small")) + 0.5) * H).collect();
+    slice_stack(&slab(), &planes, SliceStackLimits::production()).expect("the slab slices")
 }
 
-fn slices(mesh: &plinth_mesh::Mesh) -> Vec<Vec<SliceSolid>> {
-    slice_stack(mesh, &planes(), SliceStackLimits::production()).expect("the slab slices")
-}
-
-/// The edge tip (member 0, over the slab's first column, its disc hanging
-/// off the face at x 0) and a control tip well inside the face (member 1).
-/// Fat tips ([`TIP_RADIUS_MM`]), so the edge tip's disc is wide and its slide
-/// moves its contact far enough to take its reach off cells it held (a 0.1 mm
-/// tip slides 0.15 mm, which no cell on the 0.05 mm lattice notices).
-fn field(grid: &Grid) -> Vec<SweepStrut> {
+/// The test tip (member 0) over column `col`, and the control (member 1).
+fn field(grid: &Grid, col: usize) -> Vec<SweepStrut> {
     vec![
-        straight(grid, 0, ROW, 0, K_TOP, TIP_RADIUS_MM),
-        straight(grid, 1, ROW, 40, K_TOP, TIP_RADIUS_MM),
+        straight(grid, 0, ROW, col, K_TOP, TIP_RADIUS_MM),
+        straight(grid, 1, ROW, 60, K_TOP, TIP_RADIUS_MM),
     ]
 }
-
-const TIP_RADIUS_MM: f64 = 0.8;
 
 fn arms(grid: &Grid, struts: &mut [SweepStrut]) -> Vec<SweepArm> {
     struts
@@ -73,12 +78,12 @@ fn arms(grid: &Grid, struts: &mut [SweepStrut]) -> Vec<SweepArm> {
         .collect()
 }
 
-/// The footprint rule over the field, with or without a tip-cover check.
-fn run(cover: Option<TipCover<'_>>) -> (FootprintOutcome, Vec<SweepStrut>) {
+/// The footprint rule over the field with the test tip over `col`, with or
+/// without a tip-cover check.
+fn run_at(col: usize, cover: Option<TipCover<'_>>) -> (FootprintOutcome, Vec<SweepStrut>) {
     let grid = grid();
-    let mesh = slab();
-    let slices = slices(&mesh);
-    let mut struts = field(&grid);
+    let slices = slices();
+    let mut struts = field(&grid, col);
     let arms = arms(&grid, &mut struts);
     let plan = plinth_core::LayerPlan::new(0.0, vec![H; LAYERS]).expect("a uniform plan");
     let keep_out = crate::drain::DrainKeepOut::none();
@@ -104,6 +109,10 @@ fn run(cover: Option<TipCover<'_>>) -> (FootprintOutcome, Vec<SweepStrut>) {
     (outcome, struts)
 }
 
+fn run(cover: Option<TipCover<'_>>) -> (FootprintOutcome, Vec<SweepStrut>) {
+    run_at(OVER_AIR, cover)
+}
+
 /// Where member 0's root stands: its column plus its slide.
 fn root(strut: &SweepStrut) -> [f64; 2] {
     let shift = if strut.seat_face.footprint == Footprint::MovedOntoFace {
@@ -118,17 +127,22 @@ fn distance(a: [f64; 2], b: [f64; 2]) -> f64 {
     (a[0] - b[0]).hypot(a[1] - b[1])
 }
 
-/// The slide the rule takes with no check: the field the scripted walks are
-/// set against. Anti-vacuity for every test below.
-fn unchecked() -> (FootprintOutcome, Vec<SweepStrut>) {
-    let (outcome, struts) = run(None);
+/// The slide the rule takes with no check, with the test tip over `col`:
+/// the field the scripted walks are set against. Anti-vacuity for every test
+/// below.
+fn unchecked_at(col: usize) -> (FootprintOutcome, Vec<SweepStrut>) {
+    let (outcome, struts) = run_at(col, None);
     assert_eq!(
         struts[0].seat_face.footprint,
         Footprint::MovedOntoFace,
-        "the fixture slides its edge tip: {outcome:?}"
+        "the fixture slides its test tip: {outcome:?}"
     );
     assert_eq!(struts[1].seat_face.footprint, Footprint::OnFace, "the control is on its face");
     (outcome, struts)
+}
+
+fn unchecked() -> (FootprintOutcome, Vec<SweepStrut>) {
+    unchecked_at(OVER_AIR)
 }
 
 /// A scripted walk: the cell at `target` is stranded, blamed on member 0,
@@ -159,8 +173,26 @@ fn scripted(
     }
 }
 
-/// A slide that keeps its cover is left alone: the check runs once, finds
-/// nothing, and the field is the field the rule leaves with no check.
+/// A slide whose ball still holds the seat it was placed for leaves the tip
+/// touching the cell it was rooted at: it is never walked, and the field is
+/// the field the rule leaves with no check. SABOTAGE: walking it anyway (the
+/// filter removed) asks the walk once.
+#[test]
+fn a_slide_that_still_holds_its_seat_is_not_walked() {
+    let (_, plain) = unchecked_at(OVER_EDGE);
+    let asked = RefCell::new(Vec::new());
+    let mut walk = scripted([2.9, 0.1], 0.0, &asked);
+    let (outcome, struts) =
+        run_at(OVER_EDGE, Some(TipCover { reach_mm: 2.13, passes: 2, stranded: &mut walk }));
+    assert!(asked.borrow().is_empty(), "walked: {:?}", asked.borrow());
+    assert_eq!(outcome.cover.slides_holding_seat, 1, "{:?}", outcome.cover);
+    assert!(!outcome.cover.enabled && outcome.cover.checks == 0);
+    assert_eq!(struts, plain, "the field is exactly the unchecked one");
+}
+
+/// A slide that lets go of its seat but keeps its cover is left alone: the
+/// check runs once, finds nothing, and the field is the field the rule leaves
+/// with no check.
 #[test]
 fn a_slide_that_keeps_its_cover_is_left_alone() {
     let (plain, plain_struts) = unchecked();
@@ -170,11 +202,12 @@ fn a_slide_that_keeps_its_cover_is_left_alone() {
         Vec::new()
     };
     let (outcome, struts) = run(Some(TipCover { reach_mm: 2.13, passes: 2, stranded: &mut walk }));
-    assert_eq!(asked.borrow().len(), 1, "one walk over the slid field");
+    assert_eq!(asked.borrow().len(), 1, "one walk over the slid field: {:?}", outcome.cover);
     assert_eq!(asked.borrow()[0].len(), 1, "the one slid tip was walked");
     assert_eq!(struts, plain_struts, "the field is exactly the unchecked one");
     let cover = &outcome.cover;
     assert!(cover.enabled && cover.checks == 1, "{cover:?}");
+    assert_eq!(cover.slides_holding_seat, 0, "the slide let go of its seat");
     assert_eq!(cover.found_cells, 0);
     assert!(cover.reseated.is_empty() && cover.undone.is_empty() && cover.left.is_empty());
     assert_eq!(
@@ -202,7 +235,7 @@ fn a_slide_that_strands_demand_is_reseated_where_it_covers_it() {
     assert_eq!(struts[0].seat_face.footprint, Footprint::MovedOntoFace, "{cover:?}");
     assert!(
         distance(root(&struts[0]), target) <= limit,
-        "the reseated root {:?} reaches the target {target:?}",
+        "the reseated root {:?} reaches the target {target:?}: {cover:?}",
         root(&struts[0])
     );
     assert_eq!(cover.reseated, vec![0], "{cover:?}");
@@ -215,7 +248,8 @@ fn a_slide_that_strands_demand_is_reseated_where_it_covers_it() {
 
 /// Repair (c): no slide anywhere reaches the cell, so after the passes the
 /// slide is undone; the tip, whose disc hung off its face, keeps its placed
-/// seat as a refused move (warned), never a refusal of the model.
+/// seat as a refused move (warned), never a refusal of the model. SABOTAGE:
+/// with the check off the stranding slide stands (the anti-vacuity run).
 #[test]
 fn a_slide_no_reseat_can_save_is_undone() {
     let (_, plain) = unchecked();
@@ -233,7 +267,12 @@ fn a_slide_no_reseat_can_save_is_undone() {
     assert_eq!(cover.undone, vec![0], "{cover:?}");
     assert!(cover.left.is_empty(), "nothing is left uncovered: {cover:?}");
     assert!(outcome.moves_refused.iter().any(|(arm, _)| *arm == 0), "warned as a refused move");
-    assert!(cover.checks <= 2 + 2, "bounded by the passes: {cover:?}");
+    // The first walk and at most one per re-search pass (here the prefilter
+    // passes over every candidate left, so none is walked); the undone field
+    // has no slide left to walk.
+    assert!((1..=1 + 2).contains(&cover.checks), "bounded by the passes: {cover:?}");
+    assert!(cover.candidates_refused > 0, "the re-search ran: {cover:?}");
+    assert_eq!(asked.borrow().len(), cover.checks);
     assert_eq!(struts[1], plain[1], "the control tip is untouched");
 }
 
@@ -257,101 +296,9 @@ fn the_repair_is_the_same_on_any_pool() {
         })
     };
     let one = once(1);
+    assert!(one.0.contains("reseated: [0]"), "anti-vacuity: the run repaired: {}", one.0);
     for _ in 0..3 {
         assert_eq!(once(8), one);
     }
     assert_eq!(once(1), one);
-}
-
-/// THE REAL WALK. The edge tip roots the slab's first layer out to 2.13 mm
-/// from its column; its inward slide moves that reach off the cells along the
-/// slab's edge about 2.1 mm either side of it. With the check, the walk finds
-/// them, the repair covers them, and a walk over the field as published
-/// strands nothing. SABOTAGE: with the check off the published field still
-/// strands them.
-#[test]
-fn the_real_walk_finds_a_stranding_slide_and_the_repair_covers_it() {
-    let grid = grid();
-    let mesh = slab();
-    let slices = slices(&mesh);
-    let planes = planes();
-    let births = crate::births::Births::none();
-    let context = ReplayContext {
-        grid: &grid,
-        slices: &slices,
-        layer_cache: None,
-        planes: &planes,
-        mesh: &mesh,
-        kappa: 2.13 / H,
-        layer_height_mm: H,
-        layers: LAYERS,
-        straight_reach: true,
-        creep_weight: false,
-        creep_overhang_cut: true,
-        overhang_centre_deg: 45.0,
-        overhang_transition_deg: 25.0,
-        max_restarts: 2,
-        first_loss_ratio: 2.592 / 2.130,
-        births: &births,
-    };
-    // What a published field leaves: every MovedOntoFace tip rooted where
-    // its contact moved to, its balls derived by the lowering as production
-    // derives them (the placed arm, and the arm with its seat slid).
-    let plan = plinth_core::LayerPlan::new(0.0, vec![H; LAYERS]).expect("a uniform plan");
-    let published = |struts: &[SweepStrut]| {
-        let mut placed_struts = field(&grid);
-        let placed = arms(&grid, &mut placed_struts);
-        let moved: Vec<MovedSeat> = struts
-            .iter()
-            .enumerate()
-            .filter(|(_, strut)| strut.seat_face.footprint == Footprint::MovedOntoFace)
-            .map(|(index, strut)| {
-                let shift = strut.seat_face.shift_mm;
-                let slid = SweepArm {
-                    seat_mm: geom_kernel::vec3::add(placed[index].seat_mm, shift),
-                    seat_face_point_mm: placed[index]
-                        .seat_face_point_mm
-                        .map(|point| geom_kernel::vec3::add(point, shift)),
-                    radius_profile_mm: Vec::new(),
-                    ..placed[index].clone()
-                };
-                let discs = plinth_support::tip_contact_discs(&[placed[index].clone(), slid], &plan)
-                    .expect("discs");
-                let ball = |disc: Option<&plinth_support::TipContactDisc>| {
-                    disc.map(|disc| super::Slid::of(disc).ungrown())
-                };
-                MovedSeat {
-                    index,
-                    xy_mm: root(strut),
-                    contact_radius_mm: discs[1].as_ref().map_or(0.0, |disc| disc.radius_mm),
-                    placed_ball: ball(discs[0].as_ref()),
-                    ball: ball(discs[1].as_ref()),
-                }
-            })
-            .collect();
-        crate::demand_replay::stranded_by_moves(&context, struts, &moved)
-    };
-    let (_, plain) = unchecked();
-    let sabotaged = published(&plain);
-    assert!(
-        !sabotaged.is_empty(),
-        "SABOTAGE: with the check off the slide ({:?}) strands demand",
-        plain[0].seat_face.shift_mm
-    );
-    let mut walk = |struts: &[SweepStrut], moved: &[MovedSeat]| {
-        crate::demand_replay::stranded_by_moves(&context, struts, moved)
-    };
-    let (outcome, struts) = run(Some(TipCover { reach_mm: 2.13, passes: 2, stranded: &mut walk }));
-    let cover = &outcome.cover;
-    println!(
-        "real walk: unchecked slide {:?} stranded {} cells; checked: {cover:?}, tip now {:?}",
-        plain[0].seat_face.shift_mm,
-        sabotaged.len(),
-        struts[0].seat_face
-    );
-    assert!(cover.found_cells > 0, "the check found what the slide stranded: {cover:?}");
-    assert_eq!(cover.found_slides, 1);
-    assert!(cover.left.is_empty(), "{cover:?}");
-    assert_eq!(cover.reseated.len() + cover.undone.len(), 1, "{cover:?}");
-    assert!(published(&struts).is_empty(), "the published field strands nothing: {cover:?}");
 }

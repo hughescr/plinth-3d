@@ -225,6 +225,10 @@ pub struct TipCoverOutcome {
     pub enabled: bool,
     /// Reach walks run over the moved field: the path hits.
     pub checks: usize,
+    /// Slides standing at the last check whose ball still holds the seat the
+    /// tip was placed for (`keeps_seat`'s first clause): their roots are
+    /// where they were, so they are not walked.
+    pub slides_holding_seat: usize,
     /// What the FIRST check found, before any repair: surface cells (a cell
     /// whose column was not stranded one layer down), all cells including
     /// the ones inheriting a stranded cell below, the surface area in mm², and
@@ -299,11 +303,15 @@ pub struct CoverShortfall {
 ///
 /// # The check
 ///
-/// After the slides have settled (`settle`), the up-sweep's own reach
-/// potential is walked over the field twice, placed roots against slid roots
+/// After the slides have settled (`settle`), every slide whose ball let go of
+/// the seat it was placed for (passed by [`keeps_seat`]'s no-climb clause
+/// alone: a slide whose ball still holds its seat, [`holds_seat`], leaves the
+/// tip touching the cell it was rooted at) is walked: the up-sweep's own reach
+/// potential over the field twice, placed roots against slid roots
 /// ([`crate::demand_replay::stranded_by_moves`]); every cell the placed roots
 /// rooted and the slid ones do not is blamed on the slide that was covering
-/// it. No new limit: the reach is the placement's own.
+/// it. No new limit: the reach is the placement's own. A field none of whose
+/// slides let go of its seat is not walked at all.
 ///
 /// # The repair, cheapest first
 ///
@@ -568,6 +576,9 @@ enum Verdict {
         /// The UNGROWN ball the file gets at the moved seat ([`Slid::ungrown`]):
         /// what the tip-cover walk roots the moved tip on ([`TipCover`]).
         ball: ([f64; 3], f64),
+        /// Whether that ball still holds the seat the tip was placed for
+        /// ([`holds_seat`]); a slide that does is never walked.
+        holds_seat: bool,
     },
 }
 
@@ -903,10 +914,19 @@ impl Slid {
 /// 1356 pixels it had held at 7.575 and 7.625 mm were left over nothing
 /// (`joint/out-fix/final`).
 fn keeps_seat(seat: [f64; 3], placed: Slid, moved: Slid, pitch: f64, height: f64) -> bool {
-    if geom_kernel::vec3::dist(seat, moved.ball_centre) <= moved.ball_radius + pitch {
+    if holds_seat(seat, moved, pitch) {
         return true;
     }
     moved.lowest_mm() <= placed.lowest_mm() + height
+}
+
+/// [`keeps_seat`]'s first clause: the moved ball still HOLDS the seat the tip
+/// was placed for, to within one pixel. Such a slide leaves the tip touching
+/// the cell the planner rooted it at, so its root is where it was and the
+/// tip-cover check ([`TipCover`]) never walks it; only a slide passed by the
+/// no-climb clause alone moves a root.
+fn holds_seat(seat: [f64; 3], moved: Slid, pitch: f64) -> bool {
+    geom_kernel::vec3::dist(seat, moved.ball_centre) <= moved.ball_radius + pitch
 }
 
 /// The cured model around ONE searched tip, as the ground check reads it
@@ -1810,6 +1830,9 @@ pub(crate) fn apply(
     // moved tip on it).
     let mut proposal_ball: Vec<Option<([f64; 3], f64)>> = vec![None; searches.len()];
     let mut accepted_ball: Vec<Option<([f64; 3], f64)>> = vec![None; searches.len()];
+    // And whether that ball still holds the placed seat ([`holds_seat`]).
+    let mut proposal_holds_seat = vec![false; searches.len()];
+    let mut accepted_holds_seat = vec![false; searches.len()];
     // THE MOVE CHECK's state: every member's drawn ends before any move, the
     // own seat moves accepted so far (by member), and which search slot, if
     // any, each member's own move belongs to.
@@ -2094,6 +2117,7 @@ pub(crate) fn apply(
                 shift: geom_kernel::vec3::sub(moved.seat_mm, arms[search.arm].seat_mm),
                 samples,
                 ball: Slid::of(&disc).ungrown(),
+                holds_seat: holds_seat(arms[search.arm].seat_mm, Slid::of(&disc), pitch),
             }
         };
         let verdicts: Vec<Verdict> = if proposals.len() >= PARALLEL_MIN_TIPS {
@@ -2122,8 +2146,9 @@ pub(crate) fn apply(
                     outcome.moves_refused_off_ground += 1;
                     refused_by_limits[slot] = true;
                 }
-                Verdict::Verify { shift, samples, ball } => {
+                Verdict::Verify { shift, samples, ball, holds_seat } => {
                     proposal_ball[slot] = Some(ball);
+                    proposal_holds_seat[slot] = holds_seat;
                     let first = verify_samples.len();
                     verify_samples.extend(samples);
                     verify_span.push((first, verify_samples.len()));
@@ -2171,6 +2196,7 @@ pub(crate) fn apply(
             accepted[slot] = Some(shift);
             accepted_normal[slot] = proposal_normal[slot];
             accepted_ball[slot] = proposal_ball[slot];
+            accepted_holds_seat[slot] = proposal_holds_seat[slot];
             own_accepted[searches[slot].arm] = Some(shift);
             resolved[slot] = true;
         }
@@ -2222,9 +2248,15 @@ pub(crate) fn apply(
     let Some(tip_cover) = cover.as_mut() else {
         break;
     };
+    // Only a slide whose ball let go of its placed seat (passed by the
+    // no-climb clause alone) moves a root; the others are not walked.
+    outcome.cover.slides_holding_seat = (0..accepted.len())
+        .filter(|&slot| accepted[slot].is_some() && accepted_holds_seat[slot])
+        .count();
     let moved: Vec<crate::demand_replay::MovedSeat> = accepted
         .iter()
         .enumerate()
+        .filter(|(slot, _)| !accepted_holds_seat[*slot])
         .filter_map(|(slot, shift)| {
             let shift = (*shift)?;
             let index = search_arms[slot];
