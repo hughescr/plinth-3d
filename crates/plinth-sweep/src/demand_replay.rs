@@ -1500,6 +1500,584 @@ impl TrialWalk<'_, '_> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The cover a seat move leaves (lane tc, tip cover, 2026-10-16)
+// ---------------------------------------------------------------------------
+
+/// **A tip whose seat the footprint rule slid** ([`crate::footprint`]): the
+/// member, where its contact now stands, and its contact disc's radius.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MovedSeat {
+    /// The member's index in the strut list.
+    pub index: usize,
+    /// The slid seat, in the plane (`center_mm` plus the slide).
+    pub xy_mm: [f64; 2],
+    /// The radius of the contact disc the moved ball cuts. Where the slid
+    /// seat's own column is not cover at the seat layer, the root is the
+    /// nearest cover cell inside this disc: the ball touches the model there.
+    pub contact_radius_mm: f64,
+    /// The UNGROWN balls before and after the slide (centre, radius), when
+    /// known: the root moves by as much as the centre of the cells the ball
+    /// HOLDS at the seat layer moved ([`moved_root_cell`]).
+    pub placed_ball: Option<([f64; 3], f64)>,
+    pub ball: Option<([f64; 3], f64)>,
+    /// The centre of the contact disc the lowering draws, before and after
+    /// the slide, in the plane: where the LOCAL check measures from
+    /// ([`stranded_locally`]).
+    pub placed_contact_xy: Option<[f64; 2]>,
+    pub contact_xy: Option<[f64; 2]>,
+}
+
+/// **The local tip-cover check** (the default; lane tc, 2026-10-16): each slid
+/// tip's OWN demand, the cells it rooted when it was placed (its
+/// `covered_demand` on its seat layer, and the cells of the births it holds by
+/// footprint), held against the straight reach of one lamina (`κ·h`,
+/// 2.13 mm) from the tips' drawn contacts.
+///
+/// A cell is stranded when it lay within reach of the slid tip's PLACED
+/// contact (the disc centre the lowering drew before the slide: the one point
+/// of its contact patch, as lane unroot's `SEEDCENTRE` rooting), and lies
+/// beyond reach of the FINAL contact of every tip seated on the cell's layer
+/// (`final_contacts`, per member: the moved contact where a tip slid). The
+/// distance is the straight Euclidean length in the plane, the limit the file
+/// measurement uses, and a contact covers a cell only where it touches the
+/// same piece of the layer's cover (`components`, 8-connected labels per
+/// layer; a contact on another piece reaches across air). Contacts are the
+/// centres (and radii) of the discs the lowering draws on the SETTLED field.
+/// No reach walk, no carried field: it reads the assignment placement made,
+/// so it costs a few distances per demand cell.
+///
+/// What it does not see, by design: a cell the slid tip rooted only through
+/// the material under it (a carried column) or along a path longer than the
+/// straight line, and anything above the seat layer. The full walk
+/// ([`stranded_by_moves`], `PLINTH_EXACT_COVER=1`) sees all of it.
+///
+/// `u` of a stranded cell is its distance over the reach; each cell is
+/// blamed on the first moved tip (in `moved` order) whose demand holds it.
+pub(crate) fn stranded_locally(
+    grid: &Grid,
+    struts: &[SweepStrut],
+    births: &crate::births::Births,
+    final_contacts: &[Option<([f64; 2], f64)>],
+    components: &std::collections::BTreeMap<usize, Vec<u32>>,
+    moved: &[MovedSeat],
+    reach_mm: f64,
+) -> Vec<StrandedCell> {
+    let mut stranded = Vec::new();
+    if reach_mm.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+        return stranded;
+    }
+    let centre = |cell: usize| [grid.center_x_mm(grid.col_of(cell)), grid.center_y_mm(grid.row_of(cell))];
+    let distance = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+    // THE SAME PIECE OF THE LAYER: a contact covers a cell only where it
+    // touches the cover component the cell lies in (a contact on another
+    // piece of the layer reaches it across air, which no lamina does). A
+    // contact touches every piece with a cover cell within its disc and one
+    // pixel (a ball on the edge of a birth holds the birth and the material
+    // beside it); `None` (no labels for the layer, or no cover there) leaves
+    // the distance alone to decide.
+    let label = |layer: usize, cell: usize| -> Option<u32> {
+        components.get(&layer)?.get(cell).copied().filter(|&label| label != u32::MAX)
+    };
+    let touches = |layer: usize, (xy, radius): ([f64; 2], f64), wanted: u32| -> Option<bool> {
+        let labels = components.get(&layer)?;
+        let pitch = grid.pitch_mm();
+        let tolerance = radius.max(0.0) + pitch;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "raster coordinates of a contact on the model are small and clamped to the grid"
+        )]
+        let (row, col, span) = (
+            (grid.row_coord(xy[1]).floor().max(0.0) as usize).min(grid.rows().saturating_sub(1)),
+            (grid.col_coord(xy[0]).floor().max(0.0) as usize).min(grid.cols().saturating_sub(1)),
+            (tolerance / pitch).ceil() as usize,
+        );
+        let mut any = false;
+        for r in row.saturating_sub(span)..=(row + span).min(grid.rows().saturating_sub(1)) {
+            for c in col.saturating_sub(span)..=(col + span).min(grid.cols().saturating_sub(1)) {
+                let cell = grid.index(r, c);
+                let Some(&found) = labels.get(cell).filter(|&&found| found != u32::MAX) else {
+                    continue;
+                };
+                if distance(centre(cell), xy) <= tolerance {
+                    if found == wanted {
+                        return Some(true);
+                    }
+                    any = true;
+                }
+            }
+        }
+        // No cover under the contact at all: the distance alone decides.
+        (any).then_some(false)
+    };
+    let same_piece = |layer: usize, cell: usize, contact: ([f64; 2], f64)| -> bool {
+        label(layer, cell).is_none_or(|wanted| touches(layer, contact, wanted).unwrap_or(true))
+    };
+    // Each moved tip's demand, in its order.
+    let demands: Vec<(&MovedSeat, Vec<(usize, usize)>)> = moved
+        .iter()
+        .filter_map(|seat| {
+            let strut = struts.get(seat.index)?;
+            let mut demand: Vec<(usize, usize)> =
+                strut.covered_demand.iter().map(|&cell| (strut.k_top, cell)).collect();
+            for &(layer, id) in &strut.held_births {
+                if let Some(birth) = births.at(layer).iter().find(|birth| birth.id == id) {
+                    demand.extend(birth.cells.iter().map(|&cell| (layer, cell)));
+                }
+            }
+            Some((seat, demand))
+        })
+        .collect();
+    // The final contacts of the tips seated on each layer asked about.
+    let mut on_layer: std::collections::BTreeMap<usize, Vec<([f64; 2], f64)>> =
+        std::collections::BTreeMap::new();
+    for (_, demand) in &demands {
+        for &(layer, _) in demand {
+            on_layer.entry(layer).or_insert_with(|| {
+                struts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, strut)| strut.kind == crate::StrutKind::Arm && strut.k_top == layer)
+                    .filter_map(|(index, _)| final_contacts.get(index).copied().flatten())
+                    .collect()
+            });
+        }
+    }
+    let mut seen: std::collections::BTreeSet<(usize, usize)> = std::collections::BTreeSet::new();
+    for (seat, demand) in demands {
+        let Some(placed) = seat.placed_contact_xy else {
+            continue;
+        };
+        let placed = (placed, seat.contact_radius_mm);
+        for (layer, cell) in demand {
+            if cell >= grid.cells() || seen.contains(&(layer, cell)) {
+                continue;
+            }
+            let at = centre(cell);
+            if distance(at, placed.0) > reach_mm || !same_piece(layer, cell, placed) {
+                continue;
+            }
+            let contacts = on_layer.get(&layer).map_or(&[][..], Vec::as_slice);
+            let covered = contacts
+                .iter()
+                .any(|&contact| distance(at, contact.0) <= reach_mm && same_piece(layer, cell, contact));
+            if !covered {
+                // How far the nearest contact on the cell's own piece stands
+                // (reporting only).
+                let nearest = contacts
+                    .iter()
+                    .filter(|&&contact| same_piece(layer, cell, contact))
+                    .map(|&(contact, _)| distance(at, contact))
+                    .fold(f64::INFINITY, f64::min);
+                seen.insert((layer, cell));
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "a distance over the reach, a few units at most, kept as the walk's f32"
+                )]
+                let u = (nearest / reach_mm) as f32;
+                stranded.push(StrandedCell { layer, cell, u, blamed: seat.index, surface: true });
+            }
+        }
+    }
+    stranded
+}
+
+/// **A demand cell a set of seat moves left unrooted** that the placed seats
+/// rooted ([`stranded_by_moves`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct StrandedCell {
+    pub layer: usize,
+    pub cell: usize,
+    /// The cell's potential with the moves (`> 1`; infinite where no root
+    /// reaches it at all).
+    pub u: f32,
+    /// The moved member blamed: of the moved seats at or below the cell's
+    /// layer whose root moved, the one whose PLACED root is nearest the cell
+    /// (the one that was covering it), in the up-sweep's metric; ties to the
+    /// lower index.
+    pub blamed: usize,
+    /// The cell's column was not stranded one layer down: a cell of model
+    /// SURFACE the moves left, not one that only inherits a stranded cell
+    /// below it (the count of [`crate::reach::commit_layer`]'s carry upward).
+    pub surface: bool,
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "raster coordinates of a seat on the model are small and clamped to the grid"
+)]
+fn clamped_cell(grid: &Grid, xy: [f64; 2]) -> (usize, usize) {
+    let clamp = |coord: f64, count: usize| -> usize {
+        (coord.floor().max(0.0) as usize).min(count.saturating_sub(1))
+    };
+    (clamp(grid.row_coord(xy[1]), grid.rows()), clamp(grid.col_coord(xy[0]), grid.cols()))
+}
+
+/// The cover cells a ball HOLDS at a layer, with their centres: its section
+/// at the layer's mid-plane, or at the one below where the cell is cured onto
+/// it, covers the whole cell (`Ground::holds` in [`crate::footprint`]). In
+/// cell order.
+fn held_cells(
+    grid: &Grid,
+    cover: &[bool],
+    (centre, radius): ([f64; 3], f64),
+    mids: [Option<f64>; 2],
+) -> Vec<(usize, [f64; 2])> {
+    let pitch = grid.pitch_mm();
+    let mut held = Vec::new();
+    if !(radius > 0.0 && pitch > 0.0) {
+        return held;
+    }
+    let half_diagonal = crate::member_clearance::raster_half_diagonal_mm(grid);
+    let (row, col) = clamped_cell(grid, [centre[0], centre[1]]);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a ball radius of at most a few mm over the pitch is small"
+    )]
+    let span = (radius / pitch).ceil() as usize + 1;
+    let sections: Vec<f64> = mids
+        .iter()
+        .flatten()
+        .map(|z| radius * radius - (z - centre[2]) * (z - centre[2]))
+        .filter(|section| *section > 0.0)
+        .collect();
+    for r in row.saturating_sub(span)..=(row + span).min(grid.rows().saturating_sub(1)) {
+        for c in col.saturating_sub(span)..=(col + span).min(grid.cols().saturating_sub(1)) {
+            let cell = grid.index(r, c);
+            if !cover[cell] {
+                continue;
+            }
+            let at = [grid.center_x_mm(c), grid.center_y_mm(r)];
+            let rho = (at[0] - centre[0]).hypot(at[1] - centre[1]) + half_diagonal;
+            if sections.iter().any(|section| rho * rho <= *section) {
+                held.push((cell, at));
+            }
+        }
+    }
+    held
+}
+
+fn centroid(cells: &[(usize, [f64; 2])]) -> [f64; 2] {
+    #[expect(clippy::cast_precision_loss, reason = "a patch's cell count is small")]
+    let count = cells.len().max(1) as f64;
+    let sum = cells.iter().fold([0.0, 0.0], |sum, (_, at)| [sum[0] + at[0], sum[1] + at[1]]);
+    [sum[0] / count, sum[1] / count]
+}
+
+/// The cell a moved seat roots at its seat layer. The planner roots an arm at
+/// ONE cell, its seat column (`placed_cell`). A slide moves the tip's contact,
+/// so the root moves with it:
+///
+/// 1. the root moves by as much as the CONTACT moved: the centre of the cover
+///    cells the ball holds at this layer ([`held_cells`]: the one point of the
+///    contact patch, as the printer view roots a tip, lane unroot's
+///    `SEEDCENTRE`), after the slide less before it. Where either ball is
+///    unknown or holds no whole cell here (a tip finer than the raster, or a
+///    ball that only meets this layer at its edge), the contact is taken to
+///    move with the seat: the slide itself. A slide that leaves the contact
+///    where it was leaves the root where it was, whatever the offset between
+///    the seat column and the contact's centre;
+/// 2. the root is the cell there when it is cover; else the cover cell
+///    nearest there within the contact disc's radius and one pixel (the
+///    printer cannot part two solids closer, the tolerance `keeps_seat` reads;
+///    ties to the lower index); else the cell there, a stray root
+///    ([`reach::relax_from_root`] handles it).
+///
+/// `mids` are the mid-planes of this layer and of the one under it.
+fn moved_root_cell(
+    grid: &Grid,
+    cover: &[bool],
+    placed_cell: usize,
+    seat: &MovedSeat,
+    mids: [Option<f64>; 2],
+) -> usize {
+    let placed_xy = [
+        grid.center_x_mm(grid.col_of(placed_cell)),
+        grid.center_y_mm(grid.row_of(placed_cell)),
+    ];
+    let contact_shift = match (seat.placed_ball, seat.ball) {
+        (Some(placed), Some(moved)) => {
+            let before = held_cells(grid, cover, placed, mids);
+            let after = held_cells(grid, cover, moved, mids);
+            (!before.is_empty() && !after.is_empty()).then(|| {
+                let (from, to) = (centroid(&before), centroid(&after));
+                [to[0] - from[0], to[1] - from[1]]
+            })
+        }
+        _ => None,
+    };
+    // The seat column is the placed cell's centre, so without a contact shift
+    // the target is the slid seat itself.
+    let target = contact_shift.map_or(seat.xy_mm, |shift| {
+        [placed_xy[0] + shift[0], placed_xy[1] + shift[1]]
+    });
+    let (row, col) = clamped_cell(grid, target);
+    let own = grid.index(row, col);
+    let pitch = grid.pitch_mm();
+    if cover.get(own).copied().unwrap_or(false)
+        || pitch.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+    {
+        return own;
+    }
+    let tolerance = seat.contact_radius_mm.max(0.0) + pitch;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a contact radius of at most a few mm over the pitch is small"
+    )]
+    let span = (tolerance / pitch).ceil() as usize;
+    let mut best: Option<(f64, usize)> = None;
+    for r in row.saturating_sub(span)..=(row + span).min(grid.rows().saturating_sub(1)) {
+        for c in col.saturating_sub(span)..=(col + span).min(grid.cols().saturating_sub(1)) {
+            let cell = grid.index(r, c);
+            if !cover[cell] {
+                continue;
+            }
+            let distance = (grid.center_x_mm(c) - target[0]).hypot(grid.center_y_mm(r) - target[1]);
+            if distance > tolerance {
+                continue;
+            }
+            // Nearest first, ties to the lower cell index (`total_cmp`: exact).
+            if best.is_none_or(|(d, at)| distance.total_cmp(&d).then(cell.cmp(&at)).is_lt()) {
+                best = Some((distance, cell));
+            }
+        }
+    }
+    best.map_or(own, |(_, cell)| cell)
+}
+
+/// **The demand cells a set of seat slides leaves unrooted** (lane tc,
+/// 2026-10-16): the up-sweep's own reach potential, walked layer by layer over
+/// the field twice, once with every arm rooted where it was PLACED and once
+/// with each moved arm rooted where its slid seat stands, and every cover cell
+/// the first roots (`U ≤ 1`) and the second does not.
+///
+/// It is the placement's own question asked of the field the slides leave
+/// (the removal replay asks it of the field a removal would leave,
+/// [`refuse_unrooted_demand`]); nothing here is a new limit.
+///
+/// What a slide changes, and what it does not:
+///
+/// * the moved arm stays a root at its seat LAYER (`k_top`). The footprint
+///   rule refuses a slide that climbs off the laminae the tip was placed under
+///   ([`crate::footprint`]'s `keeps_seat`), so the tip still meets them; a
+///   root filed one layer off by rounding the drawn height is the artifact
+///   lane unroot measured on Bat_Cat_Owl, not a change in support;
+/// * it roots ONE cell, as every arm does: its placed root moved by as much
+///   as its contact on the seat layer moved (the centre of the cells its ball
+///   holds there, [`moved_root_cell`]: the printer view's one-point rooting).
+///   The slid seat's own column can stand over another piece of the layer
+///   than the one the ball touches (Bat_Cat_Owl's tip under the strap: its
+///   centre slid onto the layer below while its ball still held the birth
+///   above), and a ball's contact centre stands off its seat column wherever
+///   the arm leans, by as much before the slide as after;
+/// * the births rule reads the PLACED roots in both walks. A slide keeps the
+///   material its placed ball held over nothing joined to ground
+///   (`keeps_ground`), so its contact with a birth is what it was; a seat cell
+///   that falls out of a 0.01 mm² birth by flooring is lane unroot's other
+///   artifact;
+/// * what changes is the LATERAL reach from the root, and that is what is
+///   compared.
+///
+/// Every cell found is blamed on one moved seat ([`StrandedCell::blamed`]).
+/// The walk stops once the two carries agree above the highest moved seat:
+/// every layer above then agrees too.
+pub(crate) fn stranded_by_moves(
+    context: &ReplayContext<'_>,
+    struts: &[SweepStrut],
+    moved: &[MovedSeat],
+) -> Vec<StrandedCell> {
+    let mut stranded = Vec::new();
+    let grid = context.grid;
+    let moved: Vec<MovedSeat> = moved
+        .iter()
+        .copied()
+        .filter(|seat| {
+            struts.get(seat.index).is_some_and(|strut| {
+                strut.kind == crate::StrutKind::Arm && strut.k_top < context.layers
+            })
+        })
+        .collect();
+    if context.layers == 0 || moved.is_empty() {
+        return stranded;
+    }
+    let mut roots_by_layer: Vec<Vec<usize>> = vec![Vec::new(); context.layers];
+    for (index, strut) in struts.iter().enumerate() {
+        if strut.kind == crate::StrutKind::Arm && strut.k_top < context.layers {
+            roots_by_layer[strut.k_top].push(index);
+        }
+    }
+    let mut moved_of: Vec<Option<usize>> = vec![None; struts.len()];
+    for (slot, seat) in moved.iter().enumerate() {
+        moved_of[seat.index] = Some(slot);
+    }
+    // Whether each moved seat's root left its placed cell (set at its seat
+    // layer, which the walk reaches before any layer it can be blamed on): a
+    // slide that leaves the root where it was strands nothing and is never
+    // blamed.
+    let mut root_moved = vec![false; moved.len()];
+    let lowest = moved.iter().map(|seat| struts[seat.index].k_top).min().unwrap_or(0);
+    let highest = moved.iter().map(|seat| struts[seat.index].k_top).max().unwrap_or(0);
+    let mut creep = if context.creep_weight {
+        SurfaceCreep::new(
+            context.mesh,
+            grid,
+            context.overhang_centre_deg,
+            context.overhang_transition_deg,
+            context.creep_overhang_cut,
+        )
+    } else {
+        SurfaceCreep::disabled(grid)
+    };
+    let layer_cache = LayerCache::resolve(context.layer_cache, grid, context.slices);
+    let mut layer_reader = layer_cache.reader();
+    let metric = crate::ReachMetric {
+        reach_mm: context.kappa * context.layer_height_mm,
+        straight: context.straight_reach,
+    };
+    let mut current = new_reach_state(context);
+    let mut proposed: Option<ReachState> = None;
+    let mut queue = Vec::new();
+    let mut touched = Vec::new();
+    let mut below = vec![false; grid.cells()];
+    let mut here = vec![false; grid.cells()];
+    let relax = |state: &mut ReachState,
+                 cover: &[bool],
+                 cell: usize,
+                 queue: &mut Vec<usize>,
+                 touched: &mut Vec<usize>| {
+        touched.clear();
+        reach::relax_from_root(grid, cover, context.kappa, cell, state, queue, touched);
+    };
+    for layer in 0..context.layers {
+        if crate::cancel::cancelled() {
+            return Vec::new();
+        }
+        layer_reader.prepare(layer.saturating_sub(1), layer > 0);
+        let masks = layer_reader.masks(layer);
+        if !layer_reader.cover_any(layer) {
+            current.u.fill(f32::INFINITY);
+            reach::commit_layer(&mut current, &masks.carry);
+            if let Some(state) = proposed.as_mut() {
+                state.u.fill(f32::INFINITY);
+                reach::commit_layer(state, &masks.carry);
+            }
+            below.fill(false);
+            continue;
+        }
+        creep.load_layer(grid, context.planes[layer] - context.layer_height_mm, context.planes[layer]);
+        if proposed.is_none() && layer >= lowest {
+            let mut state = new_reach_state(context);
+            state.u_prev.copy_from_slice(&current.u_prev);
+            proposed = Some(state);
+        }
+        reach::recompute_potential_layer(
+            grid,
+            &layer_reader,
+            layer,
+            context.kappa,
+            context.layer_height_mm,
+            &[],
+            &creep,
+            &mut current,
+        );
+        let bridged_current = context.births.bridged(layer, &masks.cover, &current);
+        for &index in &roots_by_layer[layer] {
+            relax(&mut current, &masks.cover, struts[index].cell, &mut queue, &mut touched);
+        }
+        // The births rule reads the PLACED roots in both walks (see the doc).
+        let placed_roots = || {
+            crate::births::BirthRoots::of(layer, roots_by_layer[layer].iter().map(|&index| &struts[index]))
+        };
+        if !bridged_current.is_empty() {
+            context
+                .births
+                .unroot_unseated(layer, &bridged_current, &placed_roots(), &masks.cover, &mut current);
+        }
+        let Some(trial) = proposed.as_mut() else {
+            reach::commit_layer(&mut current, &masks.carry);
+            continue;
+        };
+        reach::recompute_potential_layer(
+            grid,
+            &layer_reader,
+            layer,
+            context.kappa,
+            context.layer_height_mm,
+            &[],
+            &creep,
+            trial,
+        );
+        let bridged_trial = context.births.bridged(layer, &masks.cover, trial);
+        // The mid-planes of this layer and the one under it (a layer's
+        // material is born in `[plane - h, plane]`).
+        let half = 0.5 * context.layer_height_mm;
+        let mids = [
+            Some(context.planes[layer] - half),
+            layer.checked_sub(1).map(|below| context.planes[below] - half),
+        ];
+        for &index in &roots_by_layer[layer] {
+            let cell = match moved_of[index] {
+                Some(slot) => {
+                    let cell =
+                        moved_root_cell(grid, &masks.cover, struts[index].cell, &moved[slot], mids);
+                    root_moved[slot] = cell != struts[index].cell;
+                    cell
+                }
+                None => struts[index].cell,
+            };
+            relax(trial, &masks.cover, cell, &mut queue, &mut touched);
+        }
+        if !bridged_trial.is_empty() {
+            context
+                .births
+                .unroot_unseated(layer, &bridged_trial, &placed_roots(), &masks.cover, trial);
+        }
+        here.fill(false);
+        for cell in 0..grid.cells() {
+            if !(masks.cover[cell] && trial.u[cell] > 1.0 && current.u[cell] <= 1.0) {
+                continue;
+            }
+            here[cell] = true;
+            // The nearest moved seat at or below the layer whose root moved;
+            // the nearest moved seat of all only if none did (two identical
+            // root sets cannot strand a cell, so that is never expected).
+            let nearest = |only_moved: bool| {
+                moved
+                    .iter()
+                    .enumerate()
+                    .filter(|(slot, seat)| {
+                        struts[seat.index].k_top <= layer && (root_moved[*slot] || !only_moved)
+                    })
+                    .map(|(_, seat)| {
+                        (metric.distance_mm(grid, cell, struts[seat.index].cell), seat.index)
+                    })
+                    .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+            };
+            let blamed = nearest(true).or_else(|| nearest(false));
+            if let Some((_, blamed)) = blamed {
+                stranded.push(StrandedCell {
+                    layer,
+                    cell,
+                    u: trial.u[cell],
+                    blamed,
+                    surface: !below[cell],
+                });
+            }
+        }
+        std::mem::swap(&mut below, &mut here);
+        reach::commit_layer(&mut current, &masks.carry);
+        reach::commit_layer(trial, &masks.carry);
+        if layer >= highest && trial.u_prev == current.u_prev {
+            break;
+        }
+    }
+    stranded
+}
+
 #[cfg(test)]
 mod tests {
     //! Hand-derived geometry. A slab `S1` 4 mm long (x 0..4), 1 mm wide
@@ -2333,5 +2911,232 @@ mod tests {
         let tally = sweep(60, 7, pool_of(u64::MAX / 2), false);
         assert_eq!(tally.accounting_breaks, 0, "{tally:?}");
         assert!(tally.layers_saved > 0, "a restart saved nothing: {tally:?}");
+    }
+
+    // ---- lane tc: the cover a seat slide leaves ----------------------------
+
+    use super::{stranded_by_moves, MovedSeat, StrandedCell};
+
+    /// `S1` with arms at x 0.9 and 3.1, the second slid to `to_x`: the cells
+    /// the slid field leaves unrooted that the placed field rooted.
+    fn slid(to_x: f64) -> (Vec<StrandedCell>, Grid) {
+        let mesh = fixture(false);
+        let (grid, _) = plan_grid(0.0, -0.5, 4.0, 0.5, LAYERS, H, 1.0, u64::MAX);
+        let planes: Vec<f64> = (0..LAYERS).map(|l| (l as f64 + 0.5) * H).collect();
+        let slices = slice_stack(&mesh, &planes, SliceStackLimits::production()).expect("slices");
+        let struts = vec![arm(&grid, 0, 0.9, 20), arm(&grid, 1, 3.1, 20)];
+        let context = ReplayContext {
+            grid: &grid,
+            slices: &slices,
+            layer_cache: None,
+            planes: &planes,
+            mesh: &mesh,
+            kappa: KAPPA,
+            layer_height_mm: H,
+            layers: LAYERS,
+            straight_reach: true,
+            creep_weight: false,
+            creep_overhang_cut: true,
+            overhang_centre_deg: 45.0,
+            overhang_transition_deg: 25.0,
+            max_restarts: 3,
+            first_loss_ratio: 2.592 / 2.130,
+            births: &crate::births::Births::none(),
+        };
+        let moved =
+            [MovedSeat {
+                index: 1,
+                xy_mm: [to_x, 0.0],
+                contact_radius_mm: 0.1,
+                placed_ball: None,
+                ball: None,
+                placed_contact_xy: None,
+                contact_xy: None,
+            }];
+        (stranded_by_moves(&context, &struts, &moved), grid)
+    }
+
+    /// The arm at 3.1 slid to 1.5: the far end of the slab, x 4.0, is then
+    /// 2.5 mm from it (and 3.1 mm from the arm at 0.9), past the 2.13 mm
+    /// reach, so the cells past x 1.5 + 2.13 = 3.63 on the slab's first layer
+    /// are stranded, blamed on the slid arm, and every one of them inherits
+    /// upward through the slab. Hand-derived: no cell left of 3.63 is
+    /// stranded, less one cell plus one bend: the any-angle field is an upper
+    /// bound on the straight length, up to a step long where a path must bend
+    /// round the cover's edge (`reach`'s module doc), and the slab's cover is
+    /// rounded out one cell.
+    #[test]
+    fn a_slide_that_moves_a_root_away_from_its_far_cells_strands_them() {
+        let (stranded, grid) = slid(1.5);
+        let first: Vec<&StrandedCell> = stranded.iter().filter(|cell| cell.layer == 20).collect();
+        assert!(!first.is_empty(), "the far end was stranded: {stranded:?}");
+        assert!(stranded.iter().all(|cell| cell.blamed == 1), "blamed on the slid arm");
+        assert!(first.iter().all(|cell| cell.surface), "the first layer is surface");
+        assert!(
+            stranded.iter().filter(|cell| cell.layer > 20).all(|cell| !cell.surface),
+            "the layers above only inherit it"
+        );
+        let slack = 2.0 * grid.pitch_mm();
+        for cell in &stranded {
+            let x = grid.center_x_mm(grid.col_of(cell.cell));
+            assert!(x > 3.63 - slack, "a cell at x {x} is within reach of the slid root");
+        }
+        assert!(
+            first.iter().any(|cell| grid.center_x_mm(grid.col_of(cell.cell)) > 3.9),
+            "the far end itself is stranded"
+        );
+    }
+
+    /// The same arm slid only to 3.0: every cell of the slab is still within
+    /// 2.13 mm of a root, so nothing is stranded.
+    #[test]
+    fn a_slide_that_keeps_every_cell_in_reach_strands_nothing() {
+        let (stranded, _) = slid(3.0);
+        assert!(stranded.is_empty(), "{stranded:?}");
+    }
+
+    /// The root moves by as much as the CONTACT moves: an arm whose seat
+    /// column is said to have slid to x 1.5 but whose ball holds the same
+    /// cells of the seat layer before and after (a ball at x 3.1, sunk 0.1 mm
+    /// into the slab's underside, radius 0.3) keeps its placed root, and
+    /// nothing is stranded. SABOTAGE: without the balls the root follows the
+    /// column and the far end is stranded (the first test above).
+    #[test]
+    fn a_tip_whose_contact_stays_put_keeps_its_root() {
+        let mesh = fixture(false);
+        let (grid, _) = plan_grid(0.0, -0.5, 4.0, 0.5, LAYERS, H, 1.0, u64::MAX);
+        let planes: Vec<f64> = (0..LAYERS).map(|l| (l as f64 + 0.5) * H).collect();
+        let slices = slice_stack(&mesh, &planes, SliceStackLimits::production()).expect("slices");
+        let struts = vec![arm(&grid, 0, 0.9, 20), arm(&grid, 1, 3.1, 20)];
+        let context = ReplayContext {
+            grid: &grid,
+            slices: &slices,
+            layer_cache: None,
+            planes: &planes,
+            mesh: &mesh,
+            kappa: KAPPA,
+            layer_height_mm: H,
+            layers: LAYERS,
+            straight_reach: true,
+            creep_weight: false,
+            creep_overhang_cut: true,
+            overhang_centre_deg: 45.0,
+            overhang_transition_deg: 25.0,
+            max_restarts: 3,
+            first_loss_ratio: 2.592 / 2.130,
+            births: &crate::births::Births::none(),
+        };
+        let ball = Some(([3.1, 0.0, 1.1], 0.3));
+        let moved = [MovedSeat {
+            index: 1,
+            xy_mm: [1.5, 0.0],
+            contact_radius_mm: 0.1,
+            placed_ball: ball,
+            ball,
+            placed_contact_xy: None,
+            contact_xy: None,
+        }];
+        let stranded = stranded_by_moves(&context, &struts, &moved);
+        assert!(stranded.is_empty(), "{stranded:?}");
+    }
+
+    // ---- the LOCAL check (the default) -------------------------------------
+
+    use super::stranded_locally;
+
+    /// `S1`'s arms at x 0.9 and 3.1 on layer 20; the second was assigned the
+    /// cells at x 3.0 and 3.9 when it was placed, and its contact slides from
+    /// x 3.1 to `to_x`. Hand-derived, Euclidean in the plane.
+    fn local(to_x: f64) -> (Vec<StrandedCell>, Grid) {
+        let (grid, _) = plan_grid(0.0, -0.5, 4.0, 0.5, LAYERS, H, 1.0, u64::MAX);
+        let mut struts = vec![arm(&grid, 0, 0.9, 20), arm(&grid, 1, 3.1, 20)];
+        struts[1].covered_demand = vec![cell_at(&grid, 3.0, 0.0), cell_at(&grid, 3.9, 0.0)];
+        let contact = |strut: &SweepStrut| Some(strut.center_mm);
+        let mut contacts: Vec<Option<([f64; 2], f64)>> =
+            struts.iter().map(|strut| contact(strut).map(|xy| (xy, 0.1))).collect();
+        let slid = [to_x, 0.0];
+        contacts[1] = Some((slid, 0.1));
+        let moved = [MovedSeat {
+            index: 1,
+            xy_mm: slid,
+            contact_radius_mm: 0.1,
+            placed_ball: None,
+            ball: None,
+            placed_contact_xy: contact(&struts[1]),
+            contact_xy: Some(slid),
+        }];
+        let births = crate::births::Births::none();
+        let components = std::collections::BTreeMap::new();
+        (stranded_locally(&grid, &struts, &births, &contacts, &components, &moved, 2.13), grid)
+    }
+
+    /// THE SAME PIECE: the cell at x 3.9 is held in reach of the slid
+    /// contact (x 3.0, 0.9 mm away) only if both stand on one piece of the
+    /// layer's cover. Labelled as two pieces (the cell on its own), the slid
+    /// contact no longer covers it and it is stranded; as one piece, it is
+    /// not. SABOTAGE: without labels the distance alone decides (covered).
+    #[test]
+    fn the_local_check_never_covers_a_cell_across_air() {
+        let (grid, _) = plan_grid(0.0, -0.5, 4.0, 0.5, LAYERS, H, 1.0, u64::MAX);
+        let mut struts = vec![arm(&grid, 0, 0.9, 20), arm(&grid, 1, 3.1, 20)];
+        let far = cell_at(&grid, 3.9, 0.0);
+        struts[1].covered_demand = vec![far];
+        let slid = [3.0, 0.0];
+        let contacts: Vec<Option<([f64; 2], f64)>> =
+            vec![Some((struts[0].center_mm, 0.1)), Some((slid, 0.1))];
+        let moved = [MovedSeat {
+            index: 1,
+            xy_mm: slid,
+            contact_radius_mm: 0.1,
+            placed_ball: None,
+            ball: None,
+            placed_contact_xy: Some(struts[1].center_mm),
+            contact_xy: Some(slid),
+        }];
+        let births = crate::births::Births::none();
+        let run = |labels: Option<Vec<u32>>| {
+            let mut components = std::collections::BTreeMap::new();
+            if let Some(labels) = labels {
+                components.insert(20, labels);
+            }
+            stranded_locally(&grid, &struts, &births, &contacts, &components, &moved, 2.13)
+        };
+        // One piece: every cell labelled 0.
+        assert!(run(Some(vec![0; grid.cells()])).is_empty());
+        // Everything past x 3.2 a piece of its own: the far cell is on it,
+        // the placed contact (x 3.125, its disc and a pixel reaching 3.275)
+        // touches it, so it covered the cell before; the slid contact (x 3.0,
+        // reaching 3.15) does not.
+        let mut split = vec![0_u32; grid.cells()];
+        for (cell, label) in split.iter_mut().enumerate() {
+            if grid.center_x_mm(grid.col_of(cell)) > 3.2 {
+                *label = 1;
+            }
+        }
+        let stranded = run(Some(split));
+        assert_eq!(stranded.len(), 1, "{stranded:?}");
+        assert_eq!(stranded[0].cell, far);
+        assert!(run(None).is_empty(), "SABOTAGE: the distance alone covers it");
+    }
+
+    /// Slid to x 1.5: the cell at x 3.9 (about 0.8 mm from the placed
+    /// contact) is 2.4 mm from the slid contact and 3.0 mm from the other
+    /// arm, past 2.13 mm, so it is stranded, blamed on the slid arm; the cell
+    /// at x 3.0 (1.5 mm from the slid contact) is not.
+    #[test]
+    fn the_local_check_strands_an_assigned_cell_the_slide_left_beyond_reach() {
+        let (stranded, grid) = local(1.5);
+        assert_eq!(stranded.len(), 1, "{stranded:?}");
+        let cell = stranded[0];
+        assert_eq!((cell.layer, cell.blamed), (20, 1));
+        assert!((grid.center_x_mm(grid.col_of(cell.cell)) - 3.9).abs() < 0.05);
+        assert!(f64::from(cell.u) > 1.0, "{cell:?}");
+    }
+
+    /// Slid only to x 3.0: both assigned cells stay in reach.
+    #[test]
+    fn the_local_check_leaves_a_slide_that_keeps_its_cells_in_reach() {
+        let (stranded, _) = local(3.0);
+        assert!(stranded.is_empty(), "{stranded:?}");
     }
 }

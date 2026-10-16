@@ -1073,6 +1073,20 @@ pub struct SweepPolicy {
     /// air ([`footprint`]'s ground check, fix lane A 2026-10-12). **On in
     /// production.** Off only for its sabotage drill.
     pub footprint_ground: bool,
+    /// Whether a footprint slide must leave every demand cell the placed tips
+    /// rooted still within the reach of a tip as drawn ([`footprint::TipCover`],
+    /// lane tc 2026-10-16; Craig: "ensuring that the final model is fully
+    /// supported is important"). **On in production.** Off only for its
+    /// sabotage drill.
+    pub tip_cover: bool,
+    /// Whether the tip cover uses the EXACT check, the up-sweep's full reach
+    /// walk over the slid field (`demand_replay::stranded_by_moves`), instead
+    /// of the default LOCAL check (`demand_replay::stranded_locally`: each slid
+    /// tip's own demand against one lamina's straight reach from the drawn
+    /// contacts). **Off in production**: the walk costs about one up-sweep per
+    /// slid field (214 s of a Cylinder run). `PLINTH_EXACT_COVER=1` turns it on,
+    /// for audits.
+    pub exact_cover: bool,
     /// Whether the clearance re-route also re-lands a model landing whose
     /// foot, sized for the load it passes on the sized field, does not lie
     /// wholly on the model (fix lane A 2026-10-12). **On in production.** Off
@@ -1246,6 +1260,8 @@ impl SweepPolicy {
             clearance_reroute: true,
             graze_heads: true,
             footprint_ground: true,
+            tip_cover: true,
+            exact_cover: std::env::var_os("PLINTH_EXACT_COVER").is_some_and(|value| value == "1"),
             refit_model_feet: true,
             per_event_sizing: true,
             unrooted_routing: true,
@@ -1717,6 +1733,14 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_footprint_ground(mut self) -> Self {
         self.footprint_ground = false;
+        self
+    }
+
+    /// Let a footprint slide strand demand the placed tips rooted (the rule
+    /// before 2026-10-16). **Sabotage only.**
+    #[must_use]
+    pub const fn without_tip_cover(mut self) -> Self {
+        self.tip_cover = false;
         self
     }
 
@@ -3988,6 +4012,7 @@ fn plan_after_prefix(
         vents: vents.to_vec(),
         reach,
         unrooted,
+        births,
         sizing,
         law,
         slenderness_law,
@@ -4633,6 +4658,47 @@ pub(crate) fn finish(
     // ONE face table for every re-measurement of this pass (each proposed
     // slide's and the emitted field's), built on the first slid tip.
     let seat_faces = footprint_normal::LazyFaceTable::default();
+    // THE TIP COVER (lane tc, 2026-10-16): the slides are held to the reach
+    // the placed tips gave, walked as the up-sweep walked it. Its layer cache
+    // is built on the first walk only (a field with no slide asks none).
+    let cover_cache: std::cell::OnceCell<layer_cache::LayerCache<'_>> = std::cell::OnceCell::new();
+    let mut cover_walk = |struts: &[SweepStrut], moved: &[demand_replay::MovedSeat]| {
+        let cache = cover_cache.get_or_init(|| layer_cache::LayerCache::build(&env.grid, slices));
+        let context = demand_replay::ReplayContext {
+            grid: &env.grid,
+            slices,
+            layer_cache: Some(cache),
+            planes: &env.planes,
+            mesh,
+            kappa: policy.kappa,
+            layer_height_mm: height,
+            layers,
+            straight_reach: policy.straight_reach,
+            creep_weight: policy.creep_weight,
+            creep_overhang_cut: policy.creep_overhang_cut,
+            overhang_centre_deg: policy.overhang_centre_deg,
+            overhang_transition_deg: policy.overhang_transition_deg,
+            max_restarts: policy.strut_removal_passes,
+            first_loss_ratio: policy.kappa_first_loss / policy.kappa,
+            births: &env.births,
+        };
+        demand_replay::stranded_by_moves(&context, struts, moved)
+    };
+    // The LOCAL check by default; the full walk only where it is opted into.
+    let exact_walk: Option<&mut footprint::StrandedWalk<'_>> =
+        if policy.exact_cover { Some(&mut cover_walk) } else { None };
+    // The arms the lowering draws for a field: what the check reads its
+    // contacts from (the settled field, every follow applied).
+    let drawn = |field: &[SweepStrut]| {
+        adapter::drawn_arms_in(&grid, plate_z, height, load_step_taper, field)
+    };
+    let tip_cover = policy.tip_cover.then_some(footprint::TipCover {
+        reach_mm: policy.kappa * height,
+        passes: policy.strut_removal_passes,
+        births: &env.births,
+        drawn: &drawn,
+        stranded: exact_walk,
+    });
     let footprint = footprint::apply(
         &sweep_plan.grid,
         slices,
@@ -4644,6 +4710,7 @@ pub(crate) fn finish(
         height,
         &limits,
         policy.footprint_ground,
+        tip_cover,
         |members: &[usize], moved: &[plinth_support::SweepArm], shifts: &[[f64; 3]]| {
             let sites: Vec<Option<footprint_normal::TipSite>> = members
                 .iter()
@@ -4797,6 +4864,47 @@ pub(crate) fn finish(
         );
     }
     finish_heads(&mut sweep_plan);
+    // THE TIP COVER ON THE EMITTED FIELD (review fix, 2026-10-16): the
+    // normals were measured again and the balls grown after the footprint
+    // rule checked the cover, and either can move a contact. So the same
+    // check runs once more on the field exactly as the lowering gets it (the
+    // same mode: the local check, or the walk where opted into); anything it
+    // finds that the rule had not already warned about is emitted and warned
+    // (`CoverShortfall::late`). No repair here: the field is final.
+    if policy.tip_cover {
+        let placed_discs = plinth_support::tip_contact_discs(&arms, plan)
+            .unwrap_or_else(|_| vec![None; arms.len()]);
+        let settled = footprint::settled_cover(
+            &sweep_plan.struts,
+            &arms,
+            &placed_discs,
+            &drawn,
+            plan,
+            grid.pitch_mm(),
+            &[],
+        );
+        if !settled.moved.is_empty() {
+            let stranded = if policy.exact_cover {
+                cover_walk(&sweep_plan.struts, &settled.moved)
+            } else {
+                let mut components = std::collections::BTreeMap::new();
+                footprint::components_for(&grid, slices, &sweep_plan.struts, &settled.moved, &mut components);
+                demand_replay::stranded_locally(
+                    &grid,
+                    &sweep_plan.struts,
+                    &env.births,
+                    &settled.contacts,
+                    &components,
+                    &settled.moved,
+                    policy.kappa * height,
+                )
+            };
+            footprint::note_late_shortfalls(&grid, &stranded, &mut sweep_plan.report.seat_footprint.cover);
+        }
+    }
+    // The tip cover's layer cache is read by nothing after this: give its
+    // bytes back to the pool.
+    drop(cover_cache);
     // THE MODEL FEET ON THE FINISHED FIELD (lane 2, 2026-10-12,
     // `MODEL-FEET.md` F1/F2): every arm that lands on the model gets its
     // landed face, its load-sized contact (the down-sweep's load at the
