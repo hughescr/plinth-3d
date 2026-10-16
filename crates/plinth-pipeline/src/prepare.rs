@@ -3863,7 +3863,7 @@ fn print_sweep_disclosure(
                  of the model's surface from layer {} (centred at x {:.3}, y {:.3} mm) beyond the \
                  reach the placed tips gave (worst U {:.3}; 0: no root reaches it at all); the \
                  slide put the tip's disc onto its face, no other seat of that tip on the face \
-                 covers this and no neighbouring tip on the same layer can slide to cover it \
+                 covers this and no neighbouring tip rooted at or below it can slide to cover it \
                  (no new tip is added at this stage), so the slide stands and the area is \
                  emitted as it is",
                 left.slide_mm,

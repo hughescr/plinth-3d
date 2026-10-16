@@ -347,7 +347,8 @@ pub struct CoverShortfall {
 ///    would take contact area from the tip (on Deinonychus it left one tip
 ///    with no real contact at all), and contact area governs (owner ruling
 ///    2026-08-30). The slide the rule first chose stands. Every seated,
-///    unheaded tip on its face, rooted on the layer the slide strands first,
+///    unheaded tip on its face, rooted at or below the layer the slide
+///    strands first,
 ///    whose search can reach the stranded cells, is searched as a failing tip
 ///    is (and as a section tip is: its slide must not cut its shaft), with
 ///    those cells as the prefilter's targets; the next walk judges them, a
@@ -2489,8 +2490,10 @@ pub(crate) fn apply(
     }
     // THE NEIGHBOUR REPAIR (a): for each slide kept this turn, the tips that
     // can root the cells it strands try to slide to cover them. A helper is a
-    // seated, unheaded arm on its face, not searched already, rooted on the
-    // layer the kept slide strands first, whose search can reach those cells
+    // seated, unheaded arm on its face, not searched already, rooted at or
+    // below the layer the kept slide strands first (a root below reaches it
+    // through the material built on it; one above has not touched the model
+    // when that layer cures), whose search can reach those cells
     // (its root within one lamina's reach plus its search radius of the
     // farthest of them). It is searched exactly as a failing tip is
     // (`search_for`: its lattice graded, its ground window, every rule a slide
@@ -2522,7 +2525,7 @@ pub(crate) fn apply(
         for (arm, strut) in struts.iter().enumerate() {
             if strut.kind != crate::StrutKind::Arm
                 || strut.head.is_some()
-                || strut.k_top != layer
+                || strut.k_top > layer
                 || slot_of_member[arm] != usize::MAX
                 || strut.seat_face.footprint != Footprint::OnFace
                 || frames[arm].is_none()
