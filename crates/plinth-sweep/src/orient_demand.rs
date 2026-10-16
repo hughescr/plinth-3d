@@ -813,17 +813,17 @@ impl SweepDemand {
             };
             eprintln!(
                 "[orient-demand] hollow-first pose ({:+.4},{:+.4},{:+.4}): drilled shell {} faces \
-                 (kept {} / {:.2} mm2, cut at a mouth {} / {:.2} mm2, cavity and bores priced 0 \
-                 {} / {:.2} mm2), {} drain(s), {} vent(s); arms {}, model landings {} ({} \
-                 interior), landing scar {}, tip scar {}",
+                 (kept {} / {:.2} mm2, cut and contained in the solid's surface {} / {:.2} mm2, \
+                 cavity and bores priced 0 {} / {:.2} mm2), {} drain(s), {} vent(s); arms {}, \
+                 model landings {} ({} interior), landing scar {}, tip scar {}",
                 up[0],
                 up[1],
                 up[2],
                 shell.mesh.tris().len(),
                 fields.kept_faces,
                 fields.kept_mm2,
-                fields.touching_faces,
-                fields.touching_mm2,
+                fields.contained_faces,
+                fields.contained_mm2,
                 fields.zero_faces,
                 fields.zero_mm2,
                 shell.drains.len(),
@@ -1292,21 +1292,32 @@ pub fn pose_shell(
 /// * KEPT: its three vertices, in winding order, are bit-equal to a face of
 ///   the oriented solid. It is that face, kept by the Boolean, and takes its
 ///   fragility and display.
-/// * TOUCHING: not kept, but it has a vertex bit-equal to a solid vertex: an
-///   outer face cut again at a bore mouth. It takes the values of the solid
-///   face at those vertices that faces most nearly its way.
+/// * CONTAINED: not kept, but it lies on the solid's surface: an outer face
+///   the Boolean cut again at a bore mouth, or re-triangulated across
+///   coplanar faces. Its source is found by geometry, never by shared
+///   vertices (a shared vertex does not say which of its coplanar faces a
+///   fragment came from): four sample points (the centroid and the three
+///   points halfway from the centroid to each vertex) are each looked up in
+///   the solid faces that CONTAIN them ([`FaceGrid::containing`]: in the
+///   face's plane, inside its triangle, facing the same way). A fragment
+///   inside one source face takes that face's values. A fragment that spans
+///   several source faces, or a sample on an edge they share, takes the
+///   LARGEST fragility and the LARGEST display among every face any sample
+///   lies in: a scar is never priced below a face it may sit on.
 /// * Every other face (the cavity surface, a bore wall) is priced 0 for both:
 ///   a seat there is inside the model or a bore, never seen, on a wall at
 ///   least the registered minimum thick.
 ///
+/// The Boolean (Manifold, through `plinth-solid`) does not hand its face
+/// provenance back, which is why CONTAINED is decided by geometry.
 /// An empty field stays empty (a stated absence).
 struct ShellFields {
     fragility: Vec<f64>,
     display: Vec<f64>,
     kept_faces: usize,
     kept_mm2: f64,
-    touching_faces: usize,
-    touching_mm2: f64,
+    contained_faces: usize,
+    contained_mm2: f64,
     zero_faces: usize,
     zero_mm2: f64,
 }
@@ -1315,77 +1326,203 @@ type FaceKey = [[u64; 3]; 3];
 
 impl ShellFields {
     fn carry(solid: &Mesh, shell: &Mesh, fragility: &[f64], display: &[f64]) -> Self {
-        // One pass over the solid builds both maps; one pass over the shell
-        // reads them.
         let mut by_face: std::collections::HashMap<FaceKey, usize> =
             std::collections::HashMap::with_capacity(solid.tris().len());
-        let mut by_vertex: std::collections::HashMap<[u64; 3], Vec<usize>> =
-            std::collections::HashMap::with_capacity(solid.verts().len());
-        let solid_normals: Vec<[f64; 3]> = solid
-            .tris()
-            .iter()
-            .map(|triangle| face_frame(solid, *triangle).0)
-            .collect();
         for (face, triangle) in solid.tris().iter().enumerate() {
             by_face.entry(face_key(solid, *triangle)).or_insert(face);
-            for index in triangle {
-                by_vertex.entry(vertex_bits(solid, *index)).or_default().push(face);
-            }
         }
+        let grid = FaceGrid::new(solid);
         let faces = shell.tris().len();
         let mut fields = Self {
             fragility: Vec::with_capacity(if fragility.is_empty() { 0 } else { faces }),
             display: Vec::with_capacity(if display.is_empty() { 0 } else { faces }),
             kept_faces: 0,
             kept_mm2: 0.0,
-            touching_faces: 0,
-            touching_mm2: 0.0,
+            contained_faces: 0,
+            contained_mm2: 0.0,
             zero_faces: 0,
             zero_mm2: 0.0,
         };
+        let value = |field: &[f64], face: usize| field.get(face).copied().unwrap_or(0.0);
+        let mut sources: Vec<usize> = Vec::new();
         for triangle in shell.tris() {
             let (normal, area) = face_frame(shell, *triangle);
-            let source = if let Some(face) = by_face.get(&face_key(shell, *triangle)) {
+            let carried = if let Some(&face) = by_face.get(&face_key(shell, *triangle)) {
                 fields.kept_faces += 1;
                 fields.kept_mm2 += area;
-                Some(*face)
+                Some((value(fragility, face), value(display, face)))
             } else {
-                // An outer face the Boolean cut again at a bore mouth still
-                // touches the solid's own vertices; the cavity surface and the
-                // bore walls do not. Of the solid faces at those vertices, the
-                // one facing most nearly the same way (the lowest index on a
-                // tie) is the face it was cut from.
-                let mut best: Option<(f64, usize)> = None;
-                for index in triangle {
-                    let at = by_vertex.get(&vertex_bits(shell, *index));
-                    for &face in at.into_iter().flatten() {
-                        let dot = vec3::dot(solid_normals[face], normal);
-                        if best.is_none_or(|(best_dot, best_face)| {
-                            dot.total_cmp(&best_dot).then(best_face.cmp(&face)).is_gt()
-                        }) {
-                            best = Some((dot, face));
-                        }
-                    }
+                sources.clear();
+                let [a, b, c] = triangle.map(|index| shell.verts()[index as usize]);
+                let centroid = vec3::scale(vec3::add(vec3::add(a, b), c), 1.0 / 3.0);
+                for point in [
+                    centroid,
+                    vec3::scale(vec3::add(centroid, a), 0.5),
+                    vec3::scale(vec3::add(centroid, b), 0.5),
+                    vec3::scale(vec3::add(centroid, c), 0.5),
+                ] {
+                    grid.containing(solid, point, normal, &mut sources);
                 }
-                if best.is_some() {
-                    fields.touching_faces += 1;
-                    fields.touching_mm2 += area;
-                } else {
+                if sources.is_empty() {
                     fields.zero_faces += 1;
                     fields.zero_mm2 += area;
+                    None
+                } else {
+                    fields.contained_faces += 1;
+                    fields.contained_mm2 += area;
+                    let largest = |field: &[f64]| {
+                        sources.iter().map(|&face| value(field, face)).fold(0.0_f64, f64::max)
+                    };
+                    Some((largest(fragility), largest(display)))
                 }
-                best.map(|(_, face)| face)
             };
+            let (carried_fragility, carried_display) = carried.unwrap_or((0.0, 0.0));
             if !fragility.is_empty() {
-                let value = source.and_then(|face| fragility.get(face)).copied();
-                fields.fragility.push(value.unwrap_or(0.0));
+                fields.fragility.push(carried_fragility);
             }
             if !display.is_empty() {
-                let value = source.and_then(|face| display.get(face)).copied();
-                fields.display.push(value.unwrap_or(0.0));
+                fields.display.push(carried_display);
             }
         }
         fields
+    }
+}
+
+/// The oriented solid's faces bucketed on a uniform grid, to answer "which
+/// solid faces contain this point" without a scan over every face.
+///
+/// The cell is the median face extent (at least 1/512 of the solid's bounding
+/// diagonal, so a fine mesh cannot make the grid huge); a face is listed in
+/// every cell its bounding box, widened by the tolerance, touches. The
+/// tolerance is [`CONTAINMENT_RELATIVE_TOLERANCE`] times the bounding
+/// diagonal: a numerical allowance for the Boolean's recomputed vertices
+/// (doubles, about 1e-15 relative), not a physical limit. Every face it could
+/// confuse a surface fragment with is orders of magnitude further: the cavity
+/// is at least the wall away, and a bore-wall sample lies at least a sixth of
+/// its triangle's height inside the solid.
+struct FaceGrid {
+    origin: [f64; 3],
+    cell: f64,
+    tolerance: f64,
+    normals: Vec<[f64; 3]>,
+    cells: std::collections::HashMap<[i64; 3], Vec<usize>>,
+}
+
+/// See [`FaceGrid`]: a numerical allowance, relative to the solid's bounding
+/// diagonal, for "this point lies on that face". Not a physical constant.
+const CONTAINMENT_RELATIVE_TOLERANCE: f64 = 1e-9;
+
+impl FaceGrid {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "cell indices of finite points over a positive cell no smaller than 1/512 of \
+                  the bounding diagonal"
+    )]
+    fn new(solid: &Mesh) -> Self {
+        let (mut low, mut high) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for vertex in solid.verts() {
+            for axis in 0..3 {
+                low[axis] = low[axis].min(vertex[axis]);
+                high[axis] = high[axis].max(vertex[axis]);
+            }
+        }
+        let diagonal = vec3::norm(vec3::sub(high, low));
+        let diagonal = if diagonal.is_finite() && diagonal > 0.0 { diagonal } else { 1.0 };
+        let tolerance = CONTAINMENT_RELATIVE_TOLERANCE * diagonal;
+        let boxes: Vec<([f64; 3], [f64; 3])> = solid
+            .tris()
+            .iter()
+            .map(|triangle| {
+                let points = triangle.map(|index| solid.verts()[index as usize]);
+                let mut lo = points[0];
+                let mut hi = points[0];
+                for point in &points[1..] {
+                    for axis in 0..3 {
+                        lo[axis] = lo[axis].min(point[axis]);
+                        hi[axis] = hi[axis].max(point[axis]);
+                    }
+                }
+                (lo, hi)
+            })
+            .collect();
+        let mut extents: Vec<f64> = boxes
+            .iter()
+            .map(|(lo, hi)| (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]))
+            .collect();
+        let median = if extents.is_empty() {
+            0.0
+        } else {
+            let middle = extents.len() / 2;
+            *extents.select_nth_unstable_by(middle, f64::total_cmp).1
+        };
+        let cell = median.max(diagonal / 512.0);
+        let frames: Vec<([f64; 3], f64)> =
+            solid.tris().iter().map(|triangle| face_frame(solid, *triangle)).collect();
+        let normals: Vec<[f64; 3]> = frames.iter().map(|frame| frame.0).collect();
+        let index = |value: f64, axis: usize| ((value - low[axis]) / cell).floor() as i64;
+        let mut cells: std::collections::HashMap<[i64; 3], Vec<usize>> =
+            std::collections::HashMap::new();
+        for (face, (lo, hi)) in boxes.iter().enumerate() {
+            // A degenerate face bounds nothing and contains no point.
+            if frames[face].1 <= 0.0 {
+                continue;
+            }
+            let from: [i64; 3] = std::array::from_fn(|axis| index(lo[axis] - tolerance, axis));
+            let to: [i64; 3] = std::array::from_fn(|axis| index(hi[axis] + tolerance, axis));
+            for x in from[0]..=to[0] {
+                for y in from[1]..=to[1] {
+                    for z in from[2]..=to[2] {
+                        cells.entry([x, y, z]).or_default().push(face);
+                    }
+                }
+            }
+        }
+        Self {
+            origin: low,
+            cell,
+            tolerance,
+            normals,
+            cells,
+        }
+    }
+
+    /// Push every solid face that contains `point` and faces the same way as
+    /// `normal` (a positive dot product) onto `out`, once each: `point` within
+    /// the tolerance of the face's plane and of the inside of each of its
+    /// edges.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the cell index of a finite point, as in `new`"
+    )]
+    fn containing(&self, solid: &Mesh, point: [f64; 3], normal: [f64; 3], out: &mut Vec<usize>) {
+        let key: [i64; 3] = std::array::from_fn(|axis| {
+            ((point[axis] - self.origin[axis]) / self.cell).floor() as i64
+        });
+        let Some(faces) = self.cells.get(&key) else {
+            return;
+        };
+        for &face in faces {
+            let face_normal = self.normals[face];
+            if vec3::dot(face_normal, normal) <= 0.0 || out.contains(&face) {
+                continue;
+            }
+            let corners = solid.tris()[face].map(|index| solid.verts()[index as usize]);
+            if vec3::dot(face_normal, vec3::sub(point, corners[0])).abs() > self.tolerance {
+                continue;
+            }
+            let inside = (0..3).all(|edge| {
+                let (from, to) = (corners[edge], corners[(edge + 1) % 3]);
+                let along = vec3::sub(to, from);
+                // |along| times the signed distance of `point` from the
+                // edge's line, in the face's plane: positive on the face's
+                // side.
+                let side = vec3::dot(vec3::cross(along, vec3::sub(point, from)), face_normal);
+                side >= -self.tolerance * vec3::norm(along)
+            });
+            if inside {
+                out.push(face);
+            }
+        }
     }
 }
 
@@ -1447,47 +1584,195 @@ fn max_z_mm(mesh: &Mesh) -> Result<f64, String> {
 mod shell_fields_tests {
     use super::{Mesh, ShellFields};
 
-    /// A face kept by the Boolean (same three points, same winding, listed from
-    /// another vertex and at another index) takes its solid face's values; a
-    /// face that only touches solid vertices takes the value of the solid face
-    /// there that faces most nearly its way; a face with no solid vertex is
-    /// priced 0; an empty field stays empty.
+    /// Two coplanar solid faces A (y <= x) and B (y >= x) of a unit square,
+    /// with different values. A kept face takes its own values; a fragment
+    /// inside A takes A's; a fragment spanning A and B takes the larger of
+    /// each field; a reversed fragment and one off the plane are priced 0;
+    /// an empty field stays empty.
     #[test]
-    fn kept_faces_carry_their_values_and_every_other_face_is_priced_zero() {
+    fn a_fragment_takes_the_face_that_contains_it_and_the_largest_when_it_spans_two() {
         let solid = Mesh::new(
-            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[0, 1, 2], [0, 2, 3]],
         )
-        .expect("a tetrahedron");
-        let fragility = [0.1, 0.2, 0.3, 0.4];
-        let display = [1.0, 2.0, 3.0, 4.0];
-        // The shell lists its vertices in another order and keeps faces 1 and 3
-        // (face 3 rotated to start at another vertex). Face 0 reversed (normal
-        // +Z) and a new face through two solid vertices (normal (1, 0, 1)/√2)
-        // only touch the solid: both face most nearly the way solid face 3
-        // (normal (1, 1, 1)/√3) does. The last face touches no solid vertex.
+        .expect("a square");
+        let fragility = [0.1, 0.7];
+        let display = [1.0, 5.0];
         let shell = Mesh::new(
             vec![
-                [0.0, 0.0, 1.0],
-                [1.0, 0.0, 0.0],
                 [0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.5, 0.5, 0.5],
-                [0.2, 0.2, 0.2],
-                [0.3, 0.2, 0.2],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.5, 0.1, 0.0],
+                [0.9, 0.1, 0.0],
+                [0.9, 0.5, 0.0],
+                [0.1, 0.2, 0.0],
+                [0.9, 0.2, 0.0],
+                [0.5, 0.9, 0.0],
+                [0.5, 0.1, 0.01],
+                [0.9, 0.1, 0.01],
+                [0.9, 0.5, 0.01],
             ],
-            vec![[2, 1, 0], [3, 0, 1], [2, 1, 3], [0, 1, 4], [4, 5, 6]],
+            vec![
+                // A itself, listed from another vertex.
+                [1, 2, 0],
+                // Inside A.
+                [3, 4, 5],
+                // Centroid (0.5, 0.43) in A, a sample at (0.5, 0.67) in B.
+                [6, 7, 8],
+                // Inside A, wound the other way.
+                [3, 5, 4],
+                // Over A, 0.01 mm off its plane.
+                [9, 10, 11],
+            ],
         )
         .expect("a shell-like soup");
         let fields = ShellFields::carry(&solid, &shell, &fragility, &display);
-        assert_eq!(fields.fragility, vec![0.2, 0.4, 0.4, 0.4, 0.0]);
-        assert_eq!(fields.display, vec![2.0, 4.0, 4.0, 4.0, 0.0]);
+        assert_eq!(fields.fragility, vec![0.1, 0.1, 0.7, 0.0, 0.0]);
+        assert_eq!(fields.display, vec![1.0, 1.0, 5.0, 0.0, 0.0]);
         assert_eq!(
-            (fields.kept_faces, fields.touching_faces, fields.zero_faces),
-            (2, 2, 1)
+            (fields.kept_faces, fields.contained_faces, fields.zero_faces),
+            (1, 2, 2)
         );
         let empty = ShellFields::carry(&solid, &shell, &fragility, &[]);
         assert!(empty.display.is_empty(), "no display field stays no display field");
         assert_eq!(empty.fragility.len(), 5);
+    }
+
+    /// **A real drilled shell whose coplanar neighbours carry different
+    /// values** (gpt-astra-high's review of lane hf, 2026-10-16). An 18 x 20 x
+    /// 22 mm box with every triangle split through its centroid (36 faces, six
+    /// per side), each face its own value, hollowed and drilled by the
+    /// production hollow stage. The check is written against the box itself,
+    /// not against [`ShellFields`]' search: an outer shell triangle lies on one
+    /// side of the box, and a 2-D point-in-triangle test on that side finds the
+    /// source faces under it.
+    ///
+    /// * A triangle wholly inside one source face takes exactly that face's
+    ///   values. The shared-vertex rule this replaces failed it: a vent-mouth
+    ///   triangle inside face 2 took face 1's value.
+    /// * Any other outer triangle takes at least the value of the face under
+    ///   its centroid, and a value of a face on its own side.
+    /// * Every outer triangle is priced (none falls through to 0), and every
+    ///   triangle off the box's sides (the cavity, the bores) is priced 0.
+    #[test]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a face index under 64 as a test value"
+    )]
+    fn on_a_drilled_subdivided_box_each_outer_fragment_takes_its_own_source_face() {
+        let box_mesh = plinth_mesh::make_box([18.0, 20.0, 22.0], [0.0, 0.0, 0.0]).expect("a box");
+        let mut verts = box_mesh.verts().to_vec();
+        let mut tris = Vec::new();
+        for triangle in box_mesh.tris() {
+            let points = triangle.map(|index| box_mesh.verts()[index as usize]);
+            let centroid: [f64; 3] =
+                std::array::from_fn(|axis| (points[0][axis] + points[1][axis] + points[2][axis]) / 3.0);
+            let middle = u32::try_from(verts.len()).expect("a small mesh");
+            verts.push(centroid);
+            for edge in 0..3 {
+                tris.push([triangle[edge], triangle[(edge + 1) % 3], middle]);
+            }
+        }
+        let solid = Mesh::new(verts, tris).expect("the subdivided box");
+        let fragility: Vec<f64> = (0..solid.tris().len()).map(|face| 1.0 + face as f64).collect();
+        let display: Vec<f64> = (0..solid.tris().len()).map(|face| 100.0 + face as f64).collect();
+        let constants = plinth_core::m0_constants().expect("the registry");
+        let request = plinth_hollow::HollowRequest::with_registered_wall_default(
+            constants.saturn4_ultra().clone(),
+        )
+        .expect("the registered wall");
+        let shell = plinth_hollow::drilled_shell_for_pose(&solid, &request)
+            .expect("the box hollows and drills")
+            .into_parts()
+            .0;
+        let fields = ShellFields::carry(&solid, &shell, &fragility, &display);
+
+        let mut bounds = [[f64::INFINITY, f64::NEG_INFINITY]; 3];
+        for vertex in solid.verts() {
+            for axis in 0..3 {
+                bounds[axis][0] = bounds[axis][0].min(vertex[axis]);
+                bounds[axis][1] = bounds[axis][1].max(vertex[axis]);
+            }
+        }
+        let on_side = |points: &[[f64; 3]], axis: usize, at: f64| {
+            points.iter().all(|point| (point[axis] - at).abs() < 1e-9)
+        };
+        // 2-D point-in-triangle on the plane normal to `axis`, inclusive.
+        let inside = |corners: [[f64; 3]; 3], point: [f64; 3], axis: usize| {
+            let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+            let cross = |a: [f64; 3], b: [f64; 3], p: [f64; 3]| {
+                (b[u] - a[u]) * (p[v] - a[v]) - (b[v] - a[v]) * (p[u] - a[u])
+            };
+            let signs: Vec<f64> =
+                (0..3).map(|edge| cross(corners[edge], corners[(edge + 1) % 3], point)).collect();
+            signs.iter().all(|s| *s >= -1e-9) || signs.iter().all(|s| *s <= 1e-9)
+        };
+        let (mut outer, mut whole_checked, mut partial_checked) = (0, 0, 0);
+        for (index, triangle) in shell.tris().iter().enumerate() {
+            let points = triangle.map(|vertex| shell.verts()[vertex as usize]);
+            let side = (0..3).find_map(|axis| {
+                bounds[axis]
+                    .iter()
+                    .find(|at| on_side(&points, axis, **at))
+                    .map(|at| (axis, *at))
+            });
+            let Some((axis, at)) = side else {
+                assert_eq!(
+                    (fields.fragility[index].to_bits(), fields.display[index].to_bits()),
+                    (0.0_f64.to_bits(), 0.0_f64.to_bits()),
+                    "a cavity or bore face is priced 0"
+                );
+                continue;
+            };
+            outer += 1;
+            let faces_on_side: Vec<usize> = (0..solid.tris().len())
+                .filter(|&face| {
+                    let corners = solid.tris()[face].map(|vertex| solid.verts()[vertex as usize]);
+                    on_side(&corners, axis, at)
+                })
+                .collect();
+            let corners_of =
+                |face: usize| solid.tris()[face].map(|vertex| solid.verts()[vertex as usize]);
+            let centroid: [f64; 3] =
+                std::array::from_fn(|k| (points[0][k] + points[1][k] + points[2][k]) / 3.0);
+            let whole = faces_on_side
+                .iter()
+                .copied()
+                .find(|&face| points.iter().all(|point| inside(corners_of(face), *point, axis)));
+            let carried = (fields.fragility[index], fields.display[index]);
+            assert!(carried.0 > 0.0, "outer shell face {index} fell through to 0");
+            match whole {
+                Some(face) => {
+                    whole_checked += 1;
+                    assert_eq!(
+                        carried,
+                        (fragility[face], display[face]),
+                        "outer shell face {index} lies wholly in source face {face}"
+                    );
+                }
+                None => {
+                    partial_checked += 1;
+                    let under = faces_on_side
+                        .iter()
+                        .copied()
+                        .filter(|&face| inside(corners_of(face), centroid, axis))
+                        .map(|face| fragility[face])
+                        .fold(0.0_f64, f64::max);
+                    assert!(carried.0 >= under, "shell face {index}: below the face under it");
+                    assert!(
+                        faces_on_side
+                            .iter()
+                            .any(|&face| fragility[face].to_bits() == carried.0.to_bits()),
+                        "shell face {index}: a value from another side"
+                    );
+                }
+            }
+        }
+        assert!(outer > 0 && whole_checked > 0, "path hit: outer fragments were checked");
+        assert!(
+            fields.contained_faces > 0,
+            "path hit: the drill cut outer faces ({outer} outer, {partial_checked} spanning)"
+        );
     }
 }

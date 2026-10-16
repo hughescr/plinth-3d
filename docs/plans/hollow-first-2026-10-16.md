@@ -70,15 +70,25 @@ face of the oriented solid. A drilled shell has other faces. The rule:
 
 - KEPT: a shell face whose three vertices, in winding order, are bit-equal to a solid face's (the Boolean
   keeps every face it does not cut) takes that face's fragility and display;
-- CUT AT A MOUTH: a face that is not kept but has a vertex bit-equal to a solid vertex (an outer face the
-  drill cut again) takes the values of the solid face at those vertices that faces most nearly its way;
+- CONTAINED: a face that is not kept but lies on the solid's surface (an outer face the drill cut again,
+  or one the Boolean re-triangulated across coplanar faces). The Boolean does not hand back its face
+  provenance, so the source is found by geometry: four sample points (the centroid and the three points
+  halfway from it to each vertex) are looked up among the solid faces that contain them (in the face's
+  plane, inside its triangle, facing the same way; a uniform grid over the solid's faces). A fragment in
+  one source face takes that face's values. A fragment that spans several source faces, or a sample on a
+  shared edge, takes the **largest** fragility and the **largest** display among all faces its samples lie
+  in, so a scar is never priced below a face it may sit on. (The first version took the face at a shared
+  vertex that faced most nearly the same way; coplanar neighbours tie there, and the review reproduced
+  wrong sources on a drilled subdivided box.)
 - every other face (the cavity surface, bore walls) is priced **0 / 0**: a seat inside the cavity or a bore
   is never seen and the wall there is at least the registered minimum wall, not a delicate feature.
 
-No tolerance or constant is involved: the classes are decided by vertex bits. The run log prints, per pose,
-the face count and area of each class, so the rule's reach is visible (Sphere: kept 1237 mm2 of the solid's
-1254.5 mm2; the rest of the outside is cut at the three mouths). This is the one new pricing choice in the
-lane and needs Craig's confirmation.
+The one number involved is a numerical allowance for "this point lies on that face":
+`CONTAINMENT_RELATIVE_TOLERANCE` = 1e-9 times the solid's bounding diagonal (the Boolean's recomputed
+vertices are doubles, about 1e-15 relative; the cavity is a wall away, and a bore-wall sample at least a
+sixth of its triangle inside the solid). It is not a physical constant. The run log prints, per pose, the
+face count and area of each class, so the rule's reach is visible. This is the one new pricing choice in
+the lane and needs Craig's confirmation.
 
 The analytic terms (height, peel corners, the analytic down-facing fold) stay on the solid table. The burden
 (arm count) counts every arm that seats on the model, interior arms included.
@@ -110,5 +120,7 @@ can merge the other forward.
 ## 8. Memory
 
 Each finalist now holds a voxel grid briefly (the hollow stage) and then sweeps a shell instead of a solid.
-Cylinder's shell sweep peaked at 3.59 GB alone against ~11 GB for three solids, so the shell may cost less.
-Measured for Cylinder, Sphere and Giant_Bat in RESULTS.md.
+Measured peaks: Cylinder 14.05 -> 11.03 GB, Sphere 3.89 -> 3.18 GB, Giant_Bat 17.93 GB (RESULTS.md).
+**There is no process-wide memory guarantee.** The hollow stage's admission limits are per call, and up to
+three finalists run it and their shell sweeps at once; nothing bounds the sum at 20 GB. Giant_Bat's 17.93 GB
+is one measurement, not a proof that a larger model stays under the limit.

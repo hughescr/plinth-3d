@@ -840,8 +840,9 @@ the stage that made it. It decides nothing.
   `plinth_hollow::run`) and is swept as that drilled shell with its drains and vents; a pose
   the hollow stage does not hollow is swept as the solid, so a model that is never hollowed
   keeps its bytes. The scars read the table's fields carried face by face onto the shell
-  (a face kept by the Boolean takes its solid face's values; the cavity, bore walls and
-  faces cut at a mouth are priced 0). The kept plan carries its holes, and the reuse key
+  (a face kept by the Boolean takes its solid face's values; a fragment on the solid's
+  surface takes the largest values among the solid faces that contain its centroid and
+  three more sample points; the cavity and the bore walls are priced 0). The kept plan carries its holes, and the reuse key
   compares them bit for bit (`ReuseMiss::HolesDiffer`), so the seal emits the winner's shell
   plan instead of sweeping the shell again. The prefilter stays on the solid. `--no-cache`
   still scores on the shells and only moves where the plan is made. Each finalist logs one
