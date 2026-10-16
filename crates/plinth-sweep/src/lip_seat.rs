@@ -1113,6 +1113,9 @@ impl Pending {
     fn release(&mut self, ledger: &mut Ledger) {
         self.tested = std::collections::HashMap::new();
         self.ahead = std::collections::HashMap::new();
+        // The scan's verdicts are charged into `retained` too.
+        self.scan.clear();
+        self.scan.verdicts = std::collections::VecDeque::new();
         ledger.retained = ledger.retained.saturating_sub(self.retained);
         self.retained = 0;
     }
@@ -1144,6 +1147,8 @@ impl Pending {
     fn charge(&mut self, ledger: &mut Ledger, bytes: usize) {
         self.retained += bytes;
         ledger.retained += bytes;
+        #[cfg(test)]
+        TEST_PEAK_RETAINED.with(|cell| cell.set(cell.get().max(ledger.retained)));
     }
 
     fn credit(&mut self, ledger: &mut Ledger, bytes: usize) {
@@ -1667,6 +1672,40 @@ thread_local! {
     static TEST_SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Tests: candidates the scan's clearance test refused at a child.
     static TEST_CHILD_REFUSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Tests: the most any ledger held, whether a scan chunk's working set
+    /// passed its share, and how often the scan fell back for want of room.
+    static TEST_PEAK_RETAINED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_CHUNK_OVER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_FALLBACKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Tests: what [`with_scan`]'s work held. `peak`: the most a ledger held;
+/// `chunk_over`: a scan chunk's working set passed its share; `fallbacks`:
+/// times the scan found no room and took only what was proven.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ScanMemory {
+    pub(crate) peak: usize,
+    pub(crate) chunk_over: bool,
+    pub(crate) fallbacks: usize,
+}
+
+/// Tests: run `work` with the read-ahead's (and the scan's) byte limit set to
+/// `limit`; returns its answer and what it held ([`ScanMemory`]).
+#[cfg(test)]
+pub(crate) fn with_budget<R>(limit: Option<usize>, work: impl FnOnce() -> R) -> (R, ScanMemory) {
+    TEST_BUDGET.with(|cell| cell.set(limit));
+    TEST_PEAK_RETAINED.with(|cell| cell.set(0));
+    TEST_CHUNK_OVER.with(|cell| cell.set(false));
+    TEST_FALLBACKS.with(|cell| cell.set(0));
+    let answer = work();
+    TEST_BUDGET.with(|cell| cell.set(None));
+    let memory = ScanMemory {
+        peak: TEST_PEAK_RETAINED.with(std::cell::Cell::get),
+        chunk_over: TEST_CHUNK_OVER.with(std::cell::Cell::get),
+        fallbacks: TEST_FALLBACKS.with(std::cell::Cell::get),
+    };
+    (answer, memory)
 }
 
 /// Tests: run `work` with the deep scan on or off and the shadow
@@ -2552,6 +2591,19 @@ struct Prefetched {
 /// list's end, as the rounds would leave it. The verdicts past the cursors
 /// are kept ([`ScanStore`]) for the next scan and taken only at the same
 /// generation, from the very candidate the rounds left each cursor on.
+///
+/// **Bytes.** A stored refusal keeps its hidden count and its mover's read,
+/// no paths (a round that proposes it asks its path test again); a stored
+/// pass keeps its paths. Every stored verdict is charged to the pass's
+/// [`Ledger`] (`PLINTH_SWEEP_LIPSEAT_READ_AHEAD_BYTES`), with the read-ahead's
+/// entries, and a verdict that would take it past its limit is not stored.
+/// A chunk's working set (trial solids, every descendant's path and solid,
+/// frame rows) is held to a share of a quarter of the limit at an upper bound
+/// per candidate ([`scan_candidate_bytes`]). When nothing more fits, the
+/// scan takes the rounds its stores already prove, which frees what they
+/// held, and settles on; with none proven, the rounds go on from the cursors
+/// as they did before the scan existed. A job's stores go when its job ends.
+///
 /// Nothing else a skipped round does
 /// reaches the field: its perf counters, the read-ahead's window and stores
 /// (which only ever save asking again) and the S0 tallies. Chunking, the
@@ -2587,43 +2639,59 @@ pub(crate) const SCAN_FIRST: usize = 16;
 const SCAN_CHUNK_ROWS: f64 = 4096.0;
 
 impl ScanStore {
-    /// **How many candidates the job's next scan chunk takes**, from what its
-    /// earlier chunks measured: the kernel rows and the bytes (trial solids
-    /// and paths) per candidate. A chunk at most doubles the one before (so
-    /// the work a commit throws away is at most the work before it, plus
-    /// [`SCAN_FIRST`]), aims at [`SCAN_CHUNK_ROWS`] rows at the measured
-    /// rate, and holds its rows to `bytes` (a share of a quarter of the
-    /// read-ahead's limit, as one read-ahead call is held to a quarter). A
-    /// schedule only: the scan's answers do not depend on it.
+    /// **How many candidates the job's next scan chunk takes.** A chunk at
+    /// most doubles the one before (so the work a commit throws away is at
+    /// most the work before it, plus [`SCAN_FIRST`]), aims at
+    /// [`SCAN_CHUNK_ROWS`] kernel rows at the rate the job's chunks measured,
+    /// and holds its working set to `working` bytes at `per_candidate`, an
+    /// upper bound on what one candidate's evaluation holds
+    /// ([`scan_candidate_bytes`]), the first chunk included. `0`: not even
+    /// one candidate fits. A schedule only: the scan's answers do not depend
+    /// on it.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        clippy::cast_precision_loss,
-        reason = "a chunk length from measured rates: positive, finite, far below 2^52"
+        reason = "a chunk length from a measured rate: positive, finite, far below 2^52"
     )]
-    fn next_len(&self, bytes: usize) -> usize {
+    fn next_len(&self, working: usize, per_candidate: usize) -> usize {
+        let by_bytes = working / per_candidate.max(1);
         let Some(previous) = self.chunk else {
-            return SCAN_FIRST;
+            return SCAN_FIRST.min(by_bytes);
         };
         let doubled = previous.saturating_mul(2);
         let by_rows = self
             .rows_per_candidate
             .map_or(doubled, |rate| (SCAN_CHUNK_ROWS / rate.max(1.0e-3)) as usize)
             .max(SCAN_FIRST);
-        let by_bytes = self
-            .bytes_per_candidate
-            .map_or(usize::MAX, |per| (bytes as f64 / per.max(1.0)) as usize)
-            .max(1);
-        doubled.min(by_rows).min(by_bytes).max(1)
+        doubled.min(by_rows).min(by_bytes)
     }
 
-    #[expect(clippy::cast_precision_loss, reason = "rates from counts far below 2^52")]
-    fn measured(&mut self, candidates: usize, rows: usize, bytes: usize) {
+    #[expect(clippy::cast_precision_loss, reason = "a rate from counts far below 2^52")]
+    fn measured(&mut self, candidates: usize, rows: usize) {
         if candidates > 0 {
             self.rows_per_candidate = Some(rows as f64 / candidates as f64);
-            self.bytes_per_candidate = Some(bytes as f64 / candidates as f64);
         }
     }
+}
+
+/// The bytes one frame row of a kernel read holds besides the solid (seat,
+/// base, radius, zones; `solid_frame`).
+const FRAME_ROW_BYTES: usize = 128;
+
+/// **An upper bound on the bytes one candidate's scan evaluation holds**
+/// ([`scan_chunk`]): the mover's trial solid (a radius per layer up to its
+/// top), its path and every descendant's (a cell per layer), each
+/// descendant's trial solid, a frame row per kernel read, and the verdict.
+/// Each length is bounded by the member's own top layer, so the bound holds
+/// for every candidate of the job.
+fn scan_candidate_bytes(job: &Pending, struts: &[SweepStrut]) -> usize {
+    let layers = |member: usize| struts[member].k_top.saturating_add(1);
+    let member = |member: usize| {
+        (8 + 4) * layers(member) + TRIAL_ARM_BYTES + FRAME_ROW_BYTES + std::mem::size_of::<Follow>()
+    };
+    64 + std::mem::size_of::<Verdict>()
+        + member(job.index)
+        + job.children.iter().map(|&child| member(child)).sum::<usize>()
 }
 
 /// **One candidate's fate in a job's walk**, as the rounds settle it
@@ -2635,15 +2703,12 @@ enum Verdict {
     /// The clearance test refuses it: `candidates_refused_clearance`, after
     /// `hidden` members the test counted as standing in a hidden cavity
     /// (`candidates_hidden`; the test stops at the first member that fails).
-    /// With its path test and its mover's read, for a round that proposes it.
-    Clearance {
-        hidden: usize,
-        found: Found,
-        read: Option<f64>,
-    },
+    /// It keeps its mover's read (for a round that proposes it) and none of
+    /// its paths: a round that proposes it asks its path test again.
+    Clearance { hidden: usize, read: Option<f64> },
     /// It gets past the clearance test: the walk stops here, and the round
     /// takes it with this path test and this read of its mover.
-    Clears { found: Found, read: Option<f64> },
+    Clears { found: Box<Found>, read: Option<f64> },
 }
 
 impl Verdict {
@@ -2652,23 +2717,23 @@ impl Verdict {
         let read_bits = |read: &Option<f64>| read.map(f64::to_bits);
         match (self, other) {
             (Self::Path, Self::Path) => true,
-            (
-                Self::Clearance {
-                    hidden: a,
-                    found: fa,
-                    read: ra,
-                },
-                Self::Clearance {
-                    hidden: b,
-                    found: fb,
-                    read: rb,
-                },
-            ) => a == b && fa == fb && read_bits(ra) == read_bits(rb),
+            (Self::Clearance { hidden: a, read: ra }, Self::Clearance { hidden: b, read: rb }) => {
+                a == b && read_bits(ra) == read_bits(rb)
+            }
             (Self::Clears { found: a, read: ra }, Self::Clears { found: b, read: rb }) => {
                 a == b && read_bits(ra) == read_bits(rb)
             }
             _ => false,
         }
+    }
+
+    /// The bytes the verdict holds in a [`ScanStore`].
+    fn bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + match self {
+                Self::Clears { found, .. } => found_bytes(Some(found)),
+                Self::Path | Self::Clearance { .. } => 0,
+            }
     }
 }
 
@@ -2679,7 +2744,10 @@ impl Verdict {
 /// length of the job's last chunk, and the rates the next chunk is sized
 /// from ([`ScanStore::next_len`]). The counts a round start
 /// asks of it ([`Pending::stored_walk`]) are kept as verdicts come and go, so
-/// asking costs nothing however long the store is.
+/// asking costs nothing however long the store is. `bytes` is what the held
+/// verdicts hold ([`Verdict::bytes`]); the job charges it to the pass's
+/// [`Ledger`] ([`Pending::scan_push`]), so the store never takes the ledger
+/// past its limit.
 #[derive(Default)]
 struct ScanStore {
     generation: u64,
@@ -2687,20 +2755,22 @@ struct ScanStore {
     verdicts: std::collections::VecDeque<Verdict>,
     chunk: Option<usize>,
     rows_per_candidate: Option<f64>,
-    bytes_per_candidate: Option<f64>,
     /// Clearance verdicts pushed and popped since the store was last cleared.
     pushed_refused: usize,
     popped_refused: usize,
     /// For each `Clears` verdict held, the clearance verdicts pushed before it.
     clears: std::collections::VecDeque<usize>,
+    bytes: usize,
 }
 
 impl ScanStore {
-    fn clear(&mut self) {
+    /// Drop every verdict; returns the bytes they held.
+    fn clear(&mut self) -> usize {
         self.verdicts.clear();
         self.clears.clear();
         self.pushed_refused = 0;
         self.popped_refused = 0;
+        std::mem::take(&mut self.bytes)
     }
 
     fn push(&mut self, verdict: Verdict) {
@@ -2709,6 +2779,7 @@ impl ScanStore {
             Verdict::Clearance { .. } => self.pushed_refused += 1,
             Verdict::Clears { .. } => self.clears.push_back(self.pushed_refused),
         }
+        self.bytes += verdict.bytes();
         self.verdicts.push_back(verdict);
     }
 
@@ -2722,6 +2793,7 @@ impl ScanStore {
                 self.clears.pop_front();
             }
         }
+        self.bytes = self.bytes.saturating_sub(verdict.bytes());
         self.from += 1;
         Some(verdict)
     }
@@ -2747,7 +2819,6 @@ fn clearance_verdict(
     if !mover_hidden && !mover_read.is_some_and(|now| now >= mover_bound) {
         return Verdict::Clearance {
             hidden: 0,
-            found,
             read: mover_read,
         };
     }
@@ -2761,13 +2832,12 @@ fn clearance_verdict(
             TEST_CHILD_REFUSED.with(|cell| cell.set(cell.get() + 1));
             return Verdict::Clearance {
                 hidden,
-                found,
                 read: mover_read,
             };
         }
     }
     Verdict::Clears {
-        found,
+        found: Box::new(found),
         read: mover_read,
     }
 }
@@ -2929,8 +2999,9 @@ fn scan_chunk(
     let mut on_model: Vec<bool> = Vec::new();
     let mut bytes = 0_usize;
     for (at, entry) in judged.into_iter().enumerate() {
+        bytes += std::mem::size_of::<Verdict>();
         passes.push(entry.map(|(pass, solid)| {
-            bytes += trial_bytes(&solid) + found_bytes(Some(&pass.found));
+            bytes += trial_bytes(&solid) + found_bytes(Some(&pass.found)) + FRAME_ROW_BYTES;
             rows.push(at);
             on_model.push(matches!(candidates[at].landing, Landing::Model { .. }));
             solids.push(solid);
@@ -2968,7 +3039,7 @@ fn scan_chunk(
     let asked: Vec<usize> = (0..rows.len())
         .filter(|&row| mover_passes[row] && passes[rows[row]].as_ref().is_some_and(|pass| !pass.found.1.is_empty()))
         .collect();
-    let trials: Vec<(Vec<SweepArm>, Vec<bool>)> = asked
+    let mut trials: Vec<(Vec<SweepArm>, Vec<bool>)> = asked
         .par_iter()
         .map(|&row| {
             let at = rows[row];
@@ -2976,6 +3047,11 @@ fn scan_chunk(
             children_trial(context, plate_z_mm, struts, arms, mover, candidates[at], pass)
         })
         .collect();
+    bytes += trials
+        .iter()
+        .flat_map(|(solids, _)| solids.iter())
+        .map(|solid| trial_bytes(solid) + FRAME_ROW_BYTES)
+        .sum::<usize>();
     let followers: Vec<usize> = asked
         .iter()
         .flat_map(|&row| {
@@ -2993,7 +3069,8 @@ fn scan_chunk(
             .iter()
             .map(|&child| admitted_at_least(false, standing_reads.before(child, struts), frame.tier))
             .collect();
-        let child_solids: Vec<SweepArm> = trials.iter().flat_map(|(solids, _)| solids.iter().cloned()).collect();
+        // Moved, not copied: only the hidden flags are read after this.
+        let child_solids: Vec<SweepArm> = trials.iter_mut().flat_map(|(solids, _)| solids.drain(..)).collect();
         let read_started = s0.on.then(std::time::Instant::now);
         let child_reads = {
             let _site = crate::perf::clear_site(crate::perf::ClearSite::LipScan);
@@ -3102,23 +3179,45 @@ impl Pending {
     /// Line the job's [`ScanStore`] up with its cursor: verdicts of another
     /// generation are dropped (and the chunk length starts again), and so are
     /// those of candidates the rounds have walked since the store was filled.
-    fn align_scan(&mut self, generation: u64) {
+    fn align_scan(&mut self, ledger: &mut Ledger, generation: u64) {
+        let held = self.scan.bytes;
         let store = &mut self.scan;
         if store.generation != generation {
             store.clear();
             store.chunk = None;
             store.generation = generation;
             store.from = self.next;
-            return;
-        }
-        if self.next < store.from || self.next > store.end() {
+        } else if self.next < store.from || self.next > store.end() {
             store.clear();
             store.from = self.next;
-            return;
+        } else {
+            while store.from < self.next {
+                store.pop();
+            }
         }
-        while store.from < self.next {
-            store.pop();
+        let freed = held.saturating_sub(self.scan.bytes);
+        self.credit(ledger, freed);
+    }
+
+    /// Store `verdict` at the end of the job's scan, charged to the ledger;
+    /// `false` (the verdict dropped) where the ledger has no room for it. A
+    /// dropped verdict is only work to do again: the store simply ends
+    /// before it.
+    fn scan_push(&mut self, ledger: &mut Ledger, verdict: Verdict) -> bool {
+        let bytes = verdict.bytes();
+        if !ledger.has_room(bytes) {
+            return false;
         }
+        self.scan.push(verdict);
+        self.charge(ledger, bytes);
+        true
+    }
+
+    /// Take the verdict at the scan's cursor, crediting the ledger.
+    fn scan_pop(&mut self, ledger: &mut Ledger) -> Option<Verdict> {
+        let verdict = self.scan.pop()?;
+        self.credit(ledger, verdict.bytes());
+        Some(verdict)
     }
 
     fn stored_walk(&self) -> StoredWalk {
@@ -3170,16 +3269,27 @@ fn scan_open_jobs(
 ) -> bool {
     let started = s0.on.then(std::time::Instant::now);
     let generation = index.generation();
-    let verify = verify_lip_seat();
+    let look = ScanLook {
+        frame,
+        context,
+        index,
+        struts,
+        arms,
+        clearance,
+        verify: verify_lip_seat(),
+        generation,
+    };
     for &slot in slots {
-        pending[slot].align_scan(generation);
+        pending[slot].align_scan(ledger, generation);
     }
-    // One chunk's rows are held to a share of a read-ahead call's bytes.
-    let bytes = ledger.limit / 4 / slots.len().max(1);
+    // One chunk's working set is held to a share of a read-ahead call's
+    // bytes; what the stores hold, to the ledger's limit.
+    let working = ledger.limit / 4 / slots.len().max(1);
+    let mut taken = Settled::default();
     // Settle more of every job that has refused fewer proposals than the
     // least `R` known so far, until `R` is known (`None`: no job ever passes,
     // and every list is walked to its end).
-    let rounds = loop {
+    let settled_rounds: Option<Option<usize>> = loop {
         let walks: Vec<StoredWalk> = slots.iter().map(|&slot| pending[slot].stored_walk()).collect();
         let bound = walks.iter().filter_map(|walk| walk.clears).min();
         let short: Vec<usize> = slots
@@ -3191,15 +3301,22 @@ fn scan_open_jobs(
             .map(|(&slot, _)| slot)
             .collect();
         if short.is_empty() {
-            break bound;
+            break Some(bound);
         }
         if crate::cancel::cancelled() {
             return false;
         }
+        let mut stored = false;
         for slot in short {
             let job = &mut pending[slot];
             let from = job.scan.end();
-            let take = job.scan.next_len(bytes);
+            // Held to the working-set share at the job's own upper bound per
+            // candidate, and to what the ledger can still hold of verdicts.
+            let room = ledger.limit.saturating_sub(ledger.retained) / std::mem::size_of::<Verdict>();
+            let take = job.scan.next_len(working, scan_candidate_bytes(job, struts)).min(room);
+            if take == 0 {
+                continue;
+            }
             let end = from.saturating_add(take).min(job.candidates.len());
             let (verdicts, chunk_rows, chunk_bytes) = scan_chunk(
                 frame,
@@ -3214,107 +3331,204 @@ fn scan_open_jobs(
                 standing_reads,
                 s0,
             );
-            job.scan.measured(end - from, chunk_rows, chunk_bytes);
+            #[cfg(test)]
+            if chunk_bytes > working {
+                TEST_CHUNK_OVER.with(|cell| cell.set(true));
+            }
+            let _ = chunk_bytes;
+            job.scan.measured(end - from, chunk_rows);
+            job.scan.chunk = Some(take);
             if s0.on {
                 s0.scan.chunks += 1;
             }
             for verdict in verdicts {
-                job.scan.push(verdict);
+                if !job.scan_push(ledger, verdict) {
+                    break;
+                }
+                stored = true;
             }
-            job.scan.chunk = Some(take);
+        }
+        if !stored {
+            // **The ledger is full.** Take the rounds the stores already prove
+            // (every job's proposals up to the fewest any job has settled, or
+            // its first that passes), which frees what they held, and settle
+            // on. With none proven, the rounds go on from the cursors as they
+            // did before the scan existed.
+            #[cfg(test)]
+            TEST_FALLBACKS.with(|cell| cell.set(cell.get() + 1));
+            let proven = walks
+                .iter()
+                .map(|walk| walk.clears.unwrap_or(if walk.ends { usize::MAX } else { walk.refused }))
+                .min()
+                .unwrap_or(0);
+            let proven = if proven == usize::MAX { 0 } else { proven };
+            for &slot in slots {
+                take_settled(&look, &mut pending[slot], ledger, standing_reads, Some(proven), false, &mut taken, s0);
+            }
+            if proven == 0 {
+                break None;
+            }
         }
     };
-    let (mut refused_path, mut refused_clearance, mut hidden) = (0_usize, 0_usize, 0_usize);
-    for &slot in slots {
-        let job = &mut pending[slot];
-        let start = job.next;
-        let mut taken = 0_usize;
-        // The job's proposal in round `R + 1`, the round that runs: its
-        // index, path test and mover's read, and whether it passes the
-        // clearance test. The round counts it.
-        let mut handed: Option<(usize, Found, Option<f64>, bool)> = None;
-        while let Some(front) = job.scan.verdicts.front() {
-            let in_round_r1 = matches!(front, Verdict::Clearance { .. }) && rounds.is_some_and(|rounds| taken >= rounds);
-            let at = job.scan.from;
-            let Some(verdict) = job.scan.pop() else {
-                break;
-            };
-            if verify {
-                let fresh = verdict_alone(
-                    frame,
-                    context,
-                    index,
-                    struts,
-                    arms,
-                    job.index,
-                    &job.children,
-                    job.candidates[at],
-                    clearance,
-                    standing_reads,
-                );
-                assert!(
-                    verdict.same(&fresh),
-                    "PLINTH_SWEEP_VERIFY_LIPSEAT: a scan verdict differs from the candidate asked alone\n candidate {at}: scan {verdict:?}\n alone {fresh:?}"
-                );
-            }
-            match verdict {
-                Verdict::Path => refused_path += 1,
-                Verdict::Clearance { found, read, .. } if in_round_r1 => {
-                    handed = Some((at, found, read, false));
-                    break;
-                }
-                Verdict::Clearance { hidden: counted, .. } => {
-                    refused_clearance += 1;
-                    hidden += counted;
-                    taken += 1;
-                }
-                Verdict::Clears { found, read } => {
-                    debug_assert_eq!(rounds, Some(taken), "a job passes only in round R + 1");
-                    handed = Some((at, found, read, true));
-                    break;
-                }
-            }
-        }
-        let next = handed.as_ref().map_or(job.scan.from, |(at, _, _, _)| *at);
-        // What the read-ahead stored for the candidates the walk settled is
-        // never asked again.
-        job.drop_settled(ledger, start, next);
-        job.next = next;
-        if s0.on {
-            s0.scan.cands += (next - start) as u64;
-            s0.scan.stops += u64::from(handed.as_ref().is_some_and(|(_, _, _, clears)| *clears));
-        }
-        if let Some((at, found, read, _)) = handed {
-            let found = std::rc::Rc::new(found);
-            let charged = found_bytes(Some(&found)) + AHEAD_ENTRY_BYTES * (1 + found.1.len());
-            if ledger.has_room(charged + found_bytes(Some(&found))) {
-                job.store_tested(ledger, at, generation, Some(std::rc::Rc::clone(&found)));
-                job.store_ahead(
-                    ledger,
-                    at,
-                    Ahead {
-                        found,
-                        read,
-                        prefetched: None,
-                        charged,
-                    },
-                );
-            }
+    // `None`: the fallback ended the scan with nothing proven to take.
+    if let Some(rounds) = settled_rounds {
+        for &slot in slots {
+            take_settled(&look, &mut pending[slot], ledger, standing_reads, rounds, true, &mut taken, s0);
         }
     }
-    outcome.candidates_refused_path += refused_path;
-    outcome.candidates_refused_clearance += refused_clearance;
-    outcome.candidates_hidden += hidden;
+    outcome.candidates_refused_path += taken.path;
+    outcome.candidates_refused_clearance += taken.clearance;
+    outcome.candidates_hidden += taken.hidden;
     #[cfg(test)]
-    TEST_SCANNED.with(|cell| cell.set(cell.get() + refused_path + refused_clearance));
+    TEST_SCANNED.with(|cell| cell.set(cell.get() + taken.path + taken.clearance));
     if let Some(started) = started {
         s0.scan.scans += 1;
-        s0.scan.rounds += rounds.map_or(0, |rounds| rounds as u64);
-        s0.scan.ref_path += refused_path as u64;
-        s0.scan.ref_clear += refused_clearance as u64;
+        s0.scan.rounds += settled_rounds.flatten().map_or(0, |rounds| rounds as u64);
+        s0.scan.ref_path += taken.path as u64;
+        s0.scan.ref_clear += taken.clearance as u64;
         s0.scan.ns += s0_ns(started);
     }
     true
+}
+
+/// What [`scan_open_jobs`] reads the frozen field through.
+struct ScanLook<'a, 'f> {
+    frame: &'a ReadFrame<'f>,
+    context: &'a SlendernessContext<'f>,
+    index: &'a StampedIndex,
+    struts: &'a [SweepStrut],
+    arms: &'a [SweepArm],
+    clearance: bool,
+    verify: bool,
+    generation: u64,
+}
+
+/// The refusals [`take_settled`] counted, as the rounds count them.
+#[derive(Default)]
+struct Settled {
+    path: usize,
+    clearance: usize,
+    hidden: usize,
+}
+
+/// **Take one job's settled rounds**: its first `rounds` proposals (each
+/// refused at the clearance test) and every path refusal up to its next
+/// proposal are counted, and its cursor moves past them (`None`: the whole
+/// list, which then holds no proposal that passes). With `hand`, the next
+/// proposal is taken too and left for the round that runs, with its path
+/// test and its mover's read stored at the current generation (as the
+/// read-ahead stores them); the round counts it. Without `hand` the cursor
+/// stops on it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the field, one job, the pass's caches and counters, and what to take"
+)]
+fn take_settled(
+    look: &ScanLook<'_, '_>,
+    job: &mut Pending,
+    ledger: &mut Ledger,
+    standing_reads: &mut StandingReads,
+    rounds: Option<usize>,
+    hand: bool,
+    settled: &mut Settled,
+    s0: &mut S0Apply,
+) {
+    let start = job.next;
+    let mut taken = 0_usize;
+    // The job's proposal in round `R + 1`: its index, path test (where the
+    // verdict kept it) and mover's read, and whether it passes.
+    let mut handed: Option<(usize, Option<Found>, Option<f64>, bool)> = None;
+    while let Some(front) = job.scan.verdicts.front() {
+        let next_round = rounds.is_some_and(|rounds| taken >= rounds);
+        let proposal = matches!(front, Verdict::Clears { .. })
+            || matches!(front, Verdict::Clearance { .. }) && next_round;
+        if proposal && !hand {
+            break;
+        }
+        let at = job.scan.from;
+        let Some(verdict) = job.scan_pop(ledger) else {
+            break;
+        };
+        if look.verify {
+            let fresh = verdict_alone(
+                look.frame,
+                look.context,
+                look.index,
+                look.struts,
+                look.arms,
+                job.index,
+                &job.children,
+                job.candidates[at],
+                look.clearance,
+                standing_reads,
+            );
+            assert!(
+                verdict.same(&fresh),
+                "PLINTH_SWEEP_VERIFY_LIPSEAT: a scan verdict differs from the candidate asked alone\n candidate {at}: scan {verdict:?}\n alone {fresh:?}"
+            );
+        }
+        match verdict {
+            Verdict::Path => settled.path += 1,
+            Verdict::Clearance { read, .. } if next_round => {
+                handed = Some((at, None, read, false));
+                break;
+            }
+            Verdict::Clearance { hidden, .. } => {
+                settled.clearance += 1;
+                settled.hidden += hidden;
+                taken += 1;
+            }
+            Verdict::Clears { found, read } => {
+                debug_assert_eq!(rounds, Some(taken), "a job passes only in round R + 1");
+                handed = Some((at, Some(*found), read, true));
+                break;
+            }
+        }
+    }
+    let next = handed.as_ref().map_or(job.scan.from, |(at, _, _, _)| *at);
+    // What the read-ahead stored for the candidates the walk settled is never
+    // asked again.
+    job.drop_settled(ledger, start, next);
+    job.next = next;
+    if s0.on {
+        s0.scan.cands += (next - start) as u64;
+        s0.scan.stops += u64::from(handed.as_ref().is_some_and(|(_, _, _, clears)| *clears));
+    }
+    let Some((at, found, read, _)) = handed else {
+        return;
+    };
+    // A refused proposal kept no paths: its path test is asked again, at the
+    // generation its verdict was settled at (it passed then, so it passes).
+    let found = found.or_else(|| {
+        propose_now(
+            look.context,
+            look.index,
+            look.struts,
+            job.index,
+            job.candidates[at],
+            &job.children,
+            look.clearance,
+        )
+    });
+    let Some(found) = found else {
+        debug_assert!(false, "a settled proposal passes its path test");
+        return;
+    };
+    let found = std::rc::Rc::new(found);
+    let charged = found_bytes(Some(&found)) + AHEAD_ENTRY_BYTES * (1 + found.1.len());
+    if ledger.has_room(charged + found_bytes(Some(&found))) {
+        job.store_tested(ledger, at, look.generation, Some(std::rc::Rc::clone(&found)));
+        job.store_ahead(
+            ledger,
+            at,
+            Ahead {
+                found,
+                read,
+                prefetched: None,
+                charged,
+            },
+        );
+    }
 }
 
 /// **Remedy 1: a smaller angle to the same seat.** Re-land every arm over its

@@ -724,7 +724,10 @@ digest sees it.
   `s2.lip.scan` (light) counts per call the scans, the rounds they settled, the candidates,
   reads, stops and the scans' driver time. `PLINTH_SWEEP_LIPSEAT_SCAN=0` turns the scan off (a
   diagnostic: the output does not depend on it); `PLINTH_SWEEP_VERIFY_LIPSEAT=1` re-asks every
-  verdict the scan settles one candidate at a time and panics on a difference.
+  verdict the scan settles one candidate at a time and panics on a difference. What the scan
+  stores is charged to the read-ahead's byte limit (`PLINTH_SWEEP_LIPSEAT_READ_AHEAD_BYTES`), and
+  each chunk's working set to a share of a quarter of it; when nothing more fits the scan takes
+  only the rounds it has proven, so a smaller limit changes speed, never the output.
   `PLINTH_S2_MEMO_PROBE=1` (with `--perf`) counts the movers' clearance reads by their exact
   kernel inputs and bound, and how many repeat within the call and within the sweep (the
   `probe_*` columns): the prize an exact read memo could take.
