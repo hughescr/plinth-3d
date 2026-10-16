@@ -45,6 +45,7 @@ pub mod adapter;
 pub(crate) mod births;
 pub mod cancel;
 pub mod cavity;
+pub(crate) mod clearance_memo;
 pub mod congestion;
 pub mod contact_growth;
 pub mod deferred_shake;
@@ -2659,6 +2660,7 @@ fn plan_prefix<R>(
         surface_early: policy.drawn_solid_descent || thickening_reads_the_model,
         model_surface: Arc::new(model_surface),
         contacts: Arc::default(),
+        clearances: Arc::default(),
         seat_face_rule,
         head_registry,
         struts,
@@ -2727,6 +2729,7 @@ fn plan_after_prefix(
         surface_early,
         model_surface,
         contacts,
+        clearances,
         seat_face_rule,
         head_registry,
         mut struts,
@@ -3429,6 +3432,7 @@ fn plan_after_prefix(
         surface_max_bytes: policy.surface_index_max_bytes,
         surface: &model_surface,
         contacts: &contacts,
+        clearances: Some(&clearances),
     };
     let mut lip_seat_outcome = lip_seat::LipSeatOutcome {
         enabled: policy.lip_seat,
@@ -4126,6 +4130,8 @@ pub(crate) fn finish(
         surface: model_surface,
         // `finish` asks no tip ball: an empty memo of its own.
         contacts: &contact_growth::MeasureMemo::default(),
+        // ... and asks no lip-seat clearance row.
+        clearances: None,
     };
 
     // The finished field's own check, and the load it lost if any landing is

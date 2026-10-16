@@ -330,6 +330,13 @@ works! {
     LipSeatMoverReads, "lip_seat.mover_reads", Work;
     /// Of those, reads a batch had already taken ahead on the same path.
     LipSeatMoverReadsAhead, "lip_seat.mover_reads_ahead", Work;
+    /// Bounded lip-seat clearance rows answered from the plan's exact-key
+    /// memo (`plinth_sweep::clearance_memo`), not sent to the kernel.
+    LipSeatMemoHits, "lip_seat.memo.hits", Work;
+    /// Rows the memo did not hold (sent to the kernel).
+    LipSeatMemoMisses, "lip_seat.memo.misses", Work;
+    /// Of those, rows not kept for want of room in the memo's byte ledger.
+    LipSeatMemoUnkept, "lip_seat.memo.unkept", Work;
     /// Brace partner searches (`partner_candidates` calls).
     BracePartnerCalls, "brace.partner_calls", Work;
     /// Members scanned by those searches.

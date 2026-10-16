@@ -266,6 +266,14 @@ pub(crate) struct HeadJoinContext<'a> {
     /// surface: a fresh one, or the one the plan's [`crate::sweep_state::Prefix`]
     /// carries (a prefix is consumed only with its own mesh).
     pub contacts: &'a crate::contact_growth::MeasureMemo,
+    /// The bounded solid-clearance rows the lip-seat rule asked of this
+    /// `surface`'s geometry ([`crate::clearance_memo`]), read only through the
+    /// rule's bounded read. As with `contacts`, the owner passes a memo that
+    /// holds only answers for this geometry: the one the plan's
+    /// [`crate::sweep_state::Prefix`] carries (its rows were read against
+    /// this very surface where the prefix built it early, else against a
+    /// surface [`build_surface`] built from the same mesh and policy), or none.
+    pub clearances: Option<&'a crate::clearance_memo::ClearanceMemo>,
 }
 
 /// The model's surface index, or `None` when its memory estimate is over
