@@ -30,6 +30,20 @@ use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// Stack of every worker this module builds: 8 MiB, the stack of `main`.
+///
+/// A worker that waits at a parallel region (a `join`, a `par_iter`, or a pool
+/// `install` from another pool's worker) runs other queued jobs while it waits,
+/// and one of those can be a whole pose's sweep (`orient_demand` measures the
+/// poses in a `par_iter`). The sweeps then nest on one stack, about 90 KiB each
+/// (measured, `plinth-evidence/perf-2026-10-14/stack/RESULTS.md`). Rayon's own
+/// default is 2 MiB, which a loaded test run overflows.
+///
+/// Rayon's global pool, which the tests' bare `par_iter` calls build lazily, takes
+/// its stack from `RUST_MIN_STACK`, so `.cargo/config.toml` sets that variable to
+/// this value, and `tests/it/worker_stack.rs` checks that it does.
+pub const WORKER_STACK_BYTES: usize = 8 << 20;
+
 // A Vec (not a HashMap — sec 4.2 / R6) of (k, pool); linear scan over the few
 // distinct thread counts a process ever uses.
 type PoolList = Mutex<Vec<(usize, Arc<ThreadPool>)>>;
@@ -173,6 +187,7 @@ fn try_pool_for(k: usize) -> Result<Arc<ThreadPool>, PoolBuildError> {
     let p = Arc::new(
         rayon::ThreadPoolBuilder::new()
             .num_threads(k)
+            .stack_size(WORKER_STACK_BYTES)
             .build()
             .map_err(|error| PoolBuildError(error.to_string()))?,
     );
@@ -256,7 +271,7 @@ where
     rayon::ThreadPoolBuilder::new()
         .num_threads(k)
         // 8 MiB = main's stack: the top-level code now runs on a worker.
-        .stack_size(8 << 20)
+        .stack_size(WORKER_STACK_BYTES)
         .thread_name(|index| format!("plinth-{index}"))
         .spawn_handler(spawn)
         .build()

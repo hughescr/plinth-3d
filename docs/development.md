@@ -110,6 +110,17 @@ scripts/gate-full.sh                 # milestone: every test binary, ignored tes
 | `gate-full.sh --skip-ignored` (72 test binaries, 2,748 tests) | about 6,550 s one binary at a time (release, 2026-10-08) | 1,456 s |
 | `gate-full.sh` with the ignored tests | | not finished in 140 min: `a_spec6_removal` alone needs 65-80 min on a quiet machine |
 
+### Worker stack in tests: `RUST_MIN_STACK`
+
+A rayon worker that waits at a parallel region runs other queued jobs, and one of them can be a whole
+pose's sweep (`orient_demand` measures the poses in a `par_iter`). The sweeps then nest on one stack at
+about 90 KiB each. The CLI's pool has 8 MiB (`geom_kernel::par::WORKER_STACK_BYTES`). In the tests,
+bare `par_iter` calls build rayon's global pool, whose default stack is 2 MiB, and a loaded run of
+`plinth-pipeline::it` could overflow it and abort the whole program (`thread '<unknown>' has overflowed
+its stack`). `.cargo/config.toml` therefore sets `RUST_MIN_STACK=8388608` for every program cargo
+starts; `geom_kernel/tests/it/worker_stack.rs` fails if it is missing. A test binary run by hand needs
+the variable set in the shell.
+
 ## Where integration tests go
 
 Each crate's integration tests are ONE test program, `tests/it/main.rs`, with one module per
