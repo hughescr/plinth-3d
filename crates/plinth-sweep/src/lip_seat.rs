@@ -2598,7 +2598,7 @@ struct Prefetched {
 /// [`Ledger`] (`PLINTH_SWEEP_LIPSEAT_READ_AHEAD_BYTES`), with the read-ahead's
 /// entries, and a verdict that would take it past its limit is not stored.
 /// A chunk's working set (trial solids, every descendant's path and solid,
-/// frame rows) is held to a share of a quarter of the limit at an upper bound
+/// frame rows) is held to a quarter of the limit (chunks run one at a time) at an upper bound
 /// per candidate ([`scan_candidate_bytes`]). When nothing more fits, the
 /// scan takes the rounds its stores already prove, which frees what they
 /// held, and settles on; with none proven, the rounds go on from the cursors
@@ -3282,9 +3282,10 @@ fn scan_open_jobs(
     for &slot in slots {
         pending[slot].align_scan(ledger, generation);
     }
-    // One chunk's working set is held to a share of a read-ahead call's
-    // bytes; what the stores hold, to the ledger's limit.
-    let working = ledger.limit / 4 / slots.len().max(1);
+    // One chunk's working set is held to what one read-ahead call may hold
+    // (a quarter of the limit); chunks run one at a time, so that is the
+    // scan's whole working set. What the stores hold: the ledger's limit.
+    let working = ledger.limit / 4;
     let mut taken = Settled::default();
     // Settle more of every job that has refused fewer proposals than the
     // least `R` known so far, until `R` is known (`None`: no job ever passes,
@@ -3310,7 +3311,7 @@ fn scan_open_jobs(
         for slot in short {
             let job = &mut pending[slot];
             let from = job.scan.end();
-            // Held to the working-set share at the job's own upper bound per
+            // Held to the working set at the job's own upper bound per
             // candidate, and to what the ledger can still hold of verdicts.
             let room = ledger.limit.saturating_sub(ledger.retained) / std::mem::size_of::<Verdict>();
             let take = job.scan.next_len(working, scan_candidate_bytes(job, struts)).min(room);
