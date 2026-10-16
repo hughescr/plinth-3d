@@ -27,7 +27,7 @@ use plinth_pipeline::{OutputProfile, Placement};
 
 pub const ROOT_USAGE: &str = "Usage: plinth <subcommand>\n\nSubcommands:\n  prepare  Prepare every source model in a directory\n\nOptions:\n  -h, --help     Show help\n  -V, --version  Show version";
 
-pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|none|pinned:DIR] [--no-orient=LIST] [--placement legacy|sweep] [--wall-mm MM] [--no-cache] [--exact-delicacy] [--perf DIR]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --orient MODE          dense (default) searches every model's build orientation; none uses every model exactly as drawn (no rotation; still centred and lifted off the plate); pinned:DIR replays the rotation DIR/<stem>.pipeline.json records, per model by stem.\n                         One model is used as drawn under any mode when it is named in --no-orient, carries the Finder tag plinth-no-rotate (macOS), has plinth-no-rotate in its user.xdg.tags attribute (Linux), or has a marker file <stem>.asdrawn beside it (any platform). The report says, per model, \"as drawn (<reason>)\" or \"orientation searched\"\n  --no-orient=LIST       Use these models exactly as drawn, under any --orient mode: a comma-separated list of file names in the input directory, with or without .stl, and simple globs (* any run of characters, ? one character), e.g. --no-orient=Round_*,make_overhang_table. Also --no-orient LIST; may be given more than once. A name that matches no model prints a WARNING and the run continues\n  --placement MODE       legacy (default) is the sealed support run and its pre-write gates; sweep is the EXPERIMENTAL slice-sweep core, which runs NO pre-write gate; it leans and merges arms onto other shafts, ties long members with |X| braces, thickened roots and masts, and keeps each brace's and mast's solid clear of the model and of other members, but draws no joint spheres and does not clearance-check an arm's own shaft against the model\n  --wall-mm MM           Hollow shell wall thickness in mm, no finer than the frozen hollow voxel pitch; omit for the registered default, raise it for a piece that gets handled\n  --no-cache             Disable cache use for this request\n  --exact-delicacy       Evaluate the orientation table's delicacy curvature on the full mesh (the reference; slower on a dense model). Omitted, a protected proxy is used: low-curvature vertices are merged into small patches, every sharp vertex is still spread exactly. The proxy can pick a different pose on a dense model\n  --perf DIR             Write per-model work counters and phase times to DIR/<model>.perf.json (outside the output folder; the emitted file is unchanged). PLINTH_PERF_DIR=DIR does the same when --perf is absent\n  -h, --help             Show help";
+pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|none|pinned:DIR] [--no-orient=LIST] [--placement legacy|sweep] [--wall-mm MM] [--no-cache] [--exact-delicacy] [--hollow-first] [--perf DIR]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --orient MODE          dense (default) searches every model's build orientation; none uses every model exactly as drawn (no rotation; still centred and lifted off the plate); pinned:DIR replays the rotation DIR/<stem>.pipeline.json records, per model by stem.\n                         One model is used as drawn under any mode when it is named in --no-orient, carries the Finder tag plinth-no-rotate (macOS), has plinth-no-rotate in its user.xdg.tags attribute (Linux), or has a marker file <stem>.asdrawn beside it (any platform). The report says, per model, \"as drawn (<reason>)\" or \"orientation searched\"\n  --no-orient=LIST       Use these models exactly as drawn, under any --orient mode: a comma-separated list of file names in the input directory, with or without .stl, and simple globs (* any run of characters, ? one character), e.g. --no-orient=Round_*,make_overhang_table. Also --no-orient LIST; may be given more than once. A name that matches no model prints a WARNING and the run continues\n  --placement MODE       legacy (default) is the sealed support run and its pre-write gates; sweep is the EXPERIMENTAL slice-sweep core, which runs NO pre-write gate; it leans and merges arms onto other shafts, ties long members with |X| braces, thickened roots and masts, and keeps each brace's and mast's solid clear of the model and of other members, but draws no joint spheres and does not clearance-check an arm's own shaft against the model\n  --wall-mm MM           Hollow shell wall thickness in mm, no finer than the frozen hollow voxel pitch; omit for the registered default, raise it for a piece that gets handled\n  --no-cache             Disable cache use for this request\n  --exact-delicacy       Evaluate the orientation table's delicacy curvature on the full mesh (the reference; slower on a dense model). Omitted, a protected proxy is used: low-curvature vertices are merged into small patches, every sharp vertex is still spread exactly. The proxy can pick a different pose on a dense model\n  --hollow-first         EXPERIMENTAL, off by default: score the orientation finalists on the hollowed, drilled shell each pose would print as (drains at its bottom, vents at its top), not on the solid; the winner's plan is then emitted without a second sweep. Changes the output of hollowed models only. PLINTH_HOLLOW_FIRST=1 does the same\n  --perf DIR            Write per-model work counters and phase times to DIR/<model>.perf.json (outside the output folder; the emitted file is unchanged). PLINTH_PERF_DIR=DIR does the same when --perf is absent\n  -h, --help             Show help";
 
 /// Whether this request may use a `plinth-pipeline` cache.
 ///
@@ -155,6 +155,10 @@ pub struct PrepareSelection {
     /// low-curvature vertices, with every sharp vertex still spread exactly.
     /// The proxy can move the chosen pose on a dense model.
     pub exact_delicacy: bool,
+    /// `--hollow-first`: the orientation finalists are scored on the drilled
+    /// shell each pose prints as (`docs/plans/hollow-first-2026-10-16.md`).
+    /// Absent, `PLINTH_HOLLOW_FIRST=1` can still turn it on.
+    pub hollow_first: bool,
     /// `--perf DIR`: where the write-only per-model counter sidecars go. It
     /// reaches no decision and no digested output.
     pub perf_dir: Option<PathBuf>,
@@ -307,6 +311,7 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
     let mut cache = CacheMode::Enabled;
     let mut no_cache_seen = false;
     let mut exact_delicacy = false;
+    let mut hollow_first = false;
     let mut perf_dir = None;
     let mut index = 0;
     while index < arguments.len() {
@@ -438,6 +443,12 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
                 }
                 exact_delicacy = true;
             }
+            Some("--hollow-first") => {
+                if hollow_first {
+                    return Err(ParseError::DuplicateFlag("--hollow-first"));
+                }
+                hollow_first = true;
+            }
             Some(value) if value.starts_with('-') => {
                 return Err(ParseError::UnknownFlag(argument.clone()));
             }
@@ -460,6 +471,7 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
         },
         cache,
         exact_delicacy,
+        hollow_first,
         perf_dir,
     }))
 }
@@ -555,6 +567,20 @@ mod tests {
         assert!(matches!(
             parse_args(arguments),
             Err(ParseError::DuplicateFlag("--exact-delicacy"))
+        ));
+    }
+
+    /// `--hollow-first` is off unless given, and can be given once.
+    #[test]
+    fn hollow_first_is_off_by_default_and_given_at_most_once() {
+        assert!(!selection(parse_args(stable_arguments()).unwrap()).hollow_first);
+        let mut arguments = stable_arguments().to_vec();
+        arguments.push("--hollow-first");
+        assert!(selection(parse_args(arguments.clone()).unwrap()).hollow_first);
+        arguments.push("--hollow-first");
+        assert!(matches!(
+            parse_args(arguments),
+            Err(ParseError::DuplicateFlag("--hollow-first"))
         ));
     }
 

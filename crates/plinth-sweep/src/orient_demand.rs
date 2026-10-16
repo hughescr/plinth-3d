@@ -168,6 +168,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
+use geom_kernel::vec3;
 use plinth_core::{m0_constants, LayerPlan};
 use plinth_mesh::Mesh;
 use plinth_orient::demand::{
@@ -280,6 +281,9 @@ struct DemandSettings {
     /// plans are swept under, [`production_measurement_policy`] of the
     /// registered one. `None` everywhere else.
     retained_policy: Option<SweepPolicy>,
+    /// HOLLOW FIRST: the hollow request a retained production pose is drilled
+    /// under ([`RetainingSweepDemand::hollow_first`]). `None` everywhere else.
+    shells: Option<plinth_hollow::HollowRequest>,
 }
 
 impl DemandSettings {
@@ -351,6 +355,7 @@ impl DemandSettings {
             down_limit: weights.down_limit(),
             policy,
             retained_policy,
+            shells: None,
         })
     }
 }
@@ -393,6 +398,25 @@ pub struct RetainedPlan {
     pub seed: Option<Arc<EditSeed>>,
     /// Wall seconds of the sweep. Evidence only; it is in no digest.
     pub sweep_seconds: f64,
+    /// The drains the sweep ran with (hollow first only; else empty). The
+    /// reuse key compares them bit for bit.
+    pub drains: Vec<DrainSpec>,
+    /// The vents the sweep ran with (hollow first only; else empty). The reuse
+    /// key compares them bit for bit.
+    pub vents: Vec<DrainSpec>,
+    /// HOLLOW FIRST: the oriented SOLID this pose's drilled shell was made from,
+    /// so [`RetainingSweepDemand::take_winner`] can match the pose the search
+    /// committed. `None` when [`Self::mesh`] is itself that solid.
+    pub pose_solid: Option<Mesh>,
+}
+
+impl RetainedPlan {
+    /// The oriented solid of this pose: what the search's committed mesh is
+    /// compared with.
+    #[must_use]
+    pub fn oriented_solid(&self) -> &Mesh {
+        self.pose_solid.as_ref().unwrap_or(&self.mesh)
+    }
 }
 
 /// Why a retained plan was not reused. The first failing check in key order.
@@ -412,6 +436,9 @@ pub enum ReuseMiss {
     PolicyDiffers,
     /// The emitted sweep has drains or vents; the measurement had none.
     HolesPresent,
+    /// The measurement had drains or vents (hollow first), and the emitted
+    /// sweep's are not bit-equal to them.
+    HolesDiffer,
 }
 
 /// The reuse key: `None` when the retained plan is exactly what a fresh
@@ -419,7 +446,8 @@ pub enum ReuseMiss {
 /// (up to the deferred shake check), else the first thing that differs.
 ///
 /// Key order: the mesh bit for bit; the layer plan bit for bit; the whole
-/// policy; no holes.
+/// policy; the drains and vents bit for bit against the ones the measurement
+/// ran with (none, unless the search measured a drilled shell).
 #[must_use]
 pub fn reuse_miss(
     retained: &RetainedPlan,
@@ -438,10 +466,29 @@ pub fn reuse_miss(
     if retained.policy != production_measurement_policy(*emitted) {
         return Some(ReuseMiss::PolicyDiffers);
     }
-    if !drains.is_empty() || !vents.is_empty() {
-        return Some(ReuseMiss::HolesPresent);
+    if !holes_bit_equal(&retained.drains, drains) || !holes_bit_equal(&retained.vents, vents) {
+        return Some(if retained.drains.is_empty() && retained.vents.is_empty() {
+            ReuseMiss::HolesPresent
+        } else {
+            ReuseMiss::HolesDiffer
+        });
     }
     None
+}
+
+fn holes_bit_equal(left: &[DrainSpec], right: &[DrainSpec]) -> bool {
+    let bits = |hole: &DrainSpec| {
+        [
+            hole.outlet_mm[0].to_bits(),
+            hole.outlet_mm[1].to_bits(),
+            hole.outlet_mm[2].to_bits(),
+            hole.outward_axis[0].to_bits(),
+            hole.outward_axis[1].to_bits(),
+            hole.outward_axis[2].to_bits(),
+            hole.radius_mm.to_bits(),
+        ]
+    };
+    left.len() == right.len() && left.iter().zip(right).all(|(a, b)| bits(a) == bits(b))
 }
 
 /// Reuse a retained plan for emission: on a hit, a copy of the plan with its
@@ -535,6 +582,12 @@ pub struct RetainingSweepDemand {
     /// search's race, so no finalist is withdrawn and every finalist keeps its
     /// plan. Never set on a real run.
     keep_every_finalist: bool,
+    /// HOLLOW FIRST (lane hf, 2026-10-16; `--hollow-first`): `Some` makes every
+    /// PRODUCTION pose run the hollow stage on its oriented solid and measure
+    /// the drilled shell, with its drains and vents, instead of the solid. A
+    /// pose the hollow stage does not hollow is measured on the solid as
+    /// before. The prefilter never hollows (`docs/plans/hollow-first-2026-10-16.md` §5).
+    shells: Option<plinth_hollow::HollowRequest>,
 }
 
 impl RetainingSweepDemand {
@@ -545,7 +598,16 @@ impl RetainingSweepDemand {
             inner: SweepDemand::production(),
             retained: Mutex::new(Vec::new()),
             keep_every_finalist: false,
+            shells: None,
         }
+    }
+
+    /// This measurer, with every production pose measured on the drilled shell
+    /// the hollow stage makes for it under `request` (hollow first).
+    #[must_use]
+    pub fn hollow_first(mut self, request: plinth_hollow::HollowRequest) -> Self {
+        self.shells = Some(request);
+        self
     }
 
     /// **Sabotage tests only.** [`Self::production`], except that the
@@ -563,6 +625,7 @@ impl RetainingSweepDemand {
             inner: SweepDemand::production(),
             retained: Mutex::new(Vec::new()),
             keep_every_finalist: true,
+            shells: None,
         }
     }
 
@@ -571,13 +634,14 @@ impl RetainingSweepDemand {
         std::mem::take(&mut *self.retained.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
-    /// Drain the store and return the first plan whose mesh is bit-equal to
-    /// `oriented` (the mesh the search committed). Every other plan is dropped.
-    /// At most one finalist can match: the grid de-duplicates directions.
+    /// Drain the store and return the first plan whose oriented solid is
+    /// bit-equal to `oriented` (the mesh the search committed). Every other
+    /// plan is dropped. At most one finalist can match: the grid de-duplicates
+    /// directions.
     pub fn take_winner(&self, oriented: &Mesh) -> Option<RetainedPlan> {
         self.drain()
             .into_iter()
-            .find(|retained| meshes_bit_equal(&retained.mesh, oriented))
+            .find(|retained| meshes_bit_equal(retained.oriented_solid(), oriented))
     }
 
     /// **Sabotage only** (`WinnerPlanReuse::SabotageOtherPose`): drain the
@@ -589,9 +653,10 @@ impl RetainingSweepDemand {
     pub fn take_other_pose_relabelled(&self, oriented: &Mesh) -> Option<RetainedPlan> {
         self.drain()
             .into_iter()
-            .find(|retained| !meshes_bit_equal(&retained.mesh, oriented))
+            .find(|retained| !meshes_bit_equal(retained.oriented_solid(), oriented))
             .map(|mut retained| {
                 retained.mesh = oriented.clone();
+                retained.pose_solid = None;
                 retained
             })
     }
@@ -631,15 +696,31 @@ impl SweepDemand {
         let transformed = plinth_orient::oriented_recentered_mesh(mesh, candidate)
             .map_err(|error| error.to_string())?;
 
+        // HOLLOW FIRST: a retained production pose is measured on the shell the
+        // hollow stage drills for it, when it hollows (`pose_shell`).
+        let shell = match (fidelity, &settings.shells, &settings.retained_policy) {
+            (DemandFidelity::Production, Some(request), Some(_)) => {
+                pose_shell(&transformed, request, candidate)
+            }
+            _ => None,
+        };
+
         let layer_height_mm = settings.layer_height_mm;
 
         // `oriented_recentered_mesh` recenters translation so the
         // transformed mesh's own minimum Z is exactly 0
         // (`plinth-orient`'s `transform_mesh`: `translation = [.., -min[2]]`),
         // so the plate sits at `-lift_mm` for every candidate without
-        // re-deriving its own minimum here.
-        let plate_z = -settings.lift_mm;
-        let max_z = max_z_mm(&transformed)?;
+        // re-deriving its own minimum here. A drilled shell can lose the
+        // solid's lowest or highest point to a bore, so its plate is placed
+        // from its own extent, exactly as `sweep_and_emit` places it.
+        let (plate_z, max_z) = match &shell {
+            None => (-settings.lift_mm, max_z_mm(&transformed)?),
+            Some(shell) => {
+                let (min_z, max_z) = z_extent_mm(&shell.mesh)?;
+                (min_z - settings.lift_mm, max_z)
+            }
+        };
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
@@ -665,10 +746,14 @@ impl SweepDemand {
             format!("{} ({:+.4},{:+.4},{:+.4})", fidelity.label(), up[0], up[1], up[2])
         });
         let started = Instant::now();
+        let (swept, drains, vents) = match &shell {
+            Some(shell) => (&shell.mesh, &shell.drains[..], &shell.vents[..]),
+            None => (&transformed, &[][..], &[][..]),
+        };
         // A RETAINED sweep keeps its state at checkpoint C beside the plan.
         let (plan, seed) = match &settings.retained_policy {
             Some(policy) => {
-                run_sweep_with_holes_seeded_in_token_scope(&transformed, &layers, policy, &[], &[])
+                run_sweep_with_holes_seeded_in_token_scope(swept, &layers, policy, drains, vents)
                     .map(|(plan, seed)| (plan, Some(seed)))
             }
             None => run_sweep_in_token_scope(&transformed, &layers, &settings.policy)
@@ -690,15 +775,19 @@ impl SweepDemand {
         // The fields come from the table the objective was SCORED against,
         // never re-evaluated here, and the face order of `transformed` is the
         // face order of `mesh` (orienting rotates vertices and never reorders
-        // triangles), which is the table's own order.
+        // triangles), which is the table's own order. A drilled shell has other
+        // faces: its fields are the table's, carried face by face onto the
+        // shell (`ShellFields`).
+        let shell_fields = shell.as_ref().map(|shell| {
+            ShellFields::carry(&transformed, &shell.mesh, table.delicacy(), table.display())
+        });
+        let (fragility, display) = shell_fields.as_ref().map_or_else(
+            || (table.delicacy(), table.display()),
+            |fields| (&fields.fragility[..], &fields.display[..]),
+        );
         let landing = match (fidelity, landing_scar) {
             (DemandFidelity::Production, ModelLandingScarPolicy::Measured) => {
-                model_landing::model_landing_scar(
-                    &transformed,
-                    &plan,
-                    table.delicacy(),
-                    table.display(),
-                )
+                model_landing::model_landing_scar(swept, &plan, fragility, display)
             }
             _ => None,
         };
@@ -708,15 +797,45 @@ impl SweepDemand {
         let tip = match (fidelity, tip_scar) {
             (DemandFidelity::Production, TipContactScarPolicy::Measured) => {
                 tip_landing::tip_contact_scar(
-                    &transformed,
+                    swept,
                     &plan,
-                    table.delicacy(),
-                    table.display(),
+                    fragility,
+                    display,
                     settings.down_limit,
                 )
             }
             _ => None,
         };
+        if let (Some(shell), Some(fields)) = (&shell, &shell_fields) {
+            let up = candidate.get();
+            let scar = |raw: Option<f64>| {
+                raw.map_or_else(|| "unmeasured".to_owned(), |value| format!("{value:.5}"))
+            };
+            eprintln!(
+                "[orient-demand] hollow-first pose ({:+.4},{:+.4},{:+.4}): drilled shell {} faces \
+                 (kept {} / {:.2} mm2, cut and contained in the solid's surface {} / {:.2} mm2, \
+                 cavity and bores priced 0 {} / {:.2} mm2), {} drain(s), {} vent(s); arms {}, \
+                 model landings {} ({} interior), landing scar {}, tip scar {}",
+                up[0],
+                up[1],
+                up[2],
+                shell.mesh.tris().len(),
+                fields.kept_faces,
+                fields.kept_mm2,
+                fields.contained_faces,
+                fields.contained_mm2,
+                fields.zero_faces,
+                fields.zero_mm2,
+                shell.drains.len(),
+                shell.vents.len(),
+                plan.struts.iter().filter(|strut| strut.kind.seats_on_model()).count(),
+                plan.report.landings.model,
+                landing.as_ref().map_or(0, |landing| landing.interior),
+                scar(landing.as_ref().map(|landing| landing.raw_mm2)),
+                scar(tip.as_ref().map(|tip| tip.raw_mm2)),
+            );
+        }
+        drop(shell_fields);
         // THE BURDEN IS WHAT THE OWNER PAYS IN CLIPS, so it counts only the
         // members that seat into the model and carry peel load. A brace or a
         // mast (the slenderness lane, 2026-09-05/06) touches no model face
@@ -755,14 +874,21 @@ impl SweepDemand {
             tip_scar_raw_mm2: tip.as_ref().map(|scar| scar.raw_mm2),
             fidelity,
         };
+        let (swept, pose_solid, drains, vents) = match shell {
+            Some(shell) => (shell.mesh, Some(transformed), shell.drains, shell.vents),
+            None => (transformed, None, Vec::new(), Vec::new()),
+        };
         let retained = settings.retained_policy.map(|policy| RetainedPlan {
             up: candidate,
-            mesh: transformed,
+            mesh: swept,
             layers,
             policy,
             plan,
             seed,
             sweep_seconds,
+            drains,
+            vents,
+            pose_solid,
         });
         Ok((measured, retained))
     }
@@ -770,6 +896,11 @@ impl SweepDemand {
     /// One batch of measurements. `retain` keeps the production plans (see
     /// [`RetainingSweepDemand`]); the numbers returned are the same either way.
     /// The plans come back in candidate order, one per measured pose.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the batch's own inputs plus the three per-measurer switches (policies, race, \
+                  hollow request), each read once here; a bundling struct would only rename them"
+    )]
     fn measure_batch(
         mesh: &Mesh,
         table: &OrientFaceTable,
@@ -778,11 +909,15 @@ impl SweepDemand {
         retain: bool,
         policies: Self,
         race: Option<&ProductionRace>,
+        shells: Option<&plinth_hollow::HollowRequest>,
     ) -> (Vec<RaceOutcome>, Vec<RetainedPlan>) {
         let (landing_scar, tip_scar) = (policies.landing_scar, policies.tip_scar);
         let started = Instant::now();
         let settings = match DemandSettings::read(fidelity, retain) {
-            Ok(settings) => settings,
+            Ok(settings) => DemandSettings {
+                shells: shells.cloned(),
+                ..settings
+            },
             // Emit and warn: one named failure per candidate, so the caller
             // keeps its proxy for all of them rather than the search refusing.
             Err(error) => {
@@ -912,6 +1047,7 @@ impl SupportDemandMeasurer for SweepDemand {
                 false,
                 *self,
                 None,
+                None,
             )
             .0,
         )
@@ -932,6 +1068,7 @@ impl SupportDemandMeasurer for SweepDemand {
             false,
             *self,
             Some(race),
+            None,
         )
         .0
     }
@@ -997,6 +1134,7 @@ impl RetainingSweepDemand {
             retain,
             self.inner,
             race,
+            self.shells.as_ref(),
         );
         // A production batch REPLACES what the previous one left; the
         // prefilter keeps nothing and so leaves the store alone.
@@ -1082,6 +1220,353 @@ impl SweepDemand {
     }
 }
 
+/// HOLLOW FIRST: the drilled shell one pose would print as, and the holes the
+/// sweep must plan around, mapped exactly as `sweep_and_emit` maps the hollow
+/// stage's report (drains from the drilled drains, vents from every planned
+/// hole).
+#[derive(Debug)]
+pub struct PoseShell {
+    pub mesh: Mesh,
+    pub drains: Vec<DrainSpec>,
+    pub vents: Vec<DrainSpec>,
+}
+
+/// Run the hollow stage on this pose's oriented solid
+/// ([`plinth_hollow::drilled_shell_for_pose`], the body of `plinth_hollow::run`).
+/// `None` when it does not hollow; the pose is then measured on the solid.
+#[must_use]
+pub fn pose_shell(
+    oriented_solid: &Mesh,
+    request: &plinth_hollow::HollowRequest,
+    candidate: UpDirection,
+) -> Option<PoseShell> {
+    let Some(drilled) = plinth_hollow::drilled_shell_for_pose(oriented_solid, request) else {
+        let up = candidate.get();
+        eprintln!(
+            "[orient-demand] hollow-first pose ({:+.4},{:+.4},{:+.4}): the hollow stage does not \
+             hollow this pose; measured on the solid",
+            up[0], up[1], up[2]
+        );
+        return None;
+    };
+    let drains = drilled
+        .drain_bores()
+        .map(|(entrance, exit, radius)| {
+            DrainSpec::from_bore(
+                [entrance[0].get(), entrance[1].get(), entrance[2].get()],
+                [exit[0].get(), exit[1].get(), exit[2].get()],
+                radius.get(),
+            )
+        })
+        .collect();
+    let vents = drilled
+        .drain_plan()
+        .holes()
+        .iter()
+        .map(|hole| DrainSpec {
+            outlet_mm: [
+                hole.outer_exit_mm[0].get(),
+                hole.outer_exit_mm[1].get(),
+                hole.outer_exit_mm[2].get(),
+            ],
+            outward_axis: [
+                hole.direction[0].get(),
+                hole.direction[1].get(),
+                hole.direction[2].get(),
+            ],
+            radius_mm: hole.radius_mm.get(),
+        })
+        .collect();
+    let (mesh, ..) = drilled.into_parts();
+    Some(PoseShell {
+        mesh,
+        drains,
+        vents,
+    })
+}
+
+/// The orientation table's per-face fields carried onto a drilled shell.
+///
+/// Three kinds of shell face (`docs/plans/hollow-first-2026-10-16.md` §4):
+///
+/// * KEPT: its three vertices, in winding order, are bit-equal to a face of
+///   the oriented solid. It is that face, kept by the Boolean, and takes its
+///   fragility and display.
+/// * CONTAINED: not kept, but it lies on the solid's surface: an outer face
+///   the Boolean cut again at a bore mouth, or re-triangulated across
+///   coplanar faces. Its source is found by geometry, never by shared
+///   vertices (a shared vertex does not say which of its coplanar faces a
+///   fragment came from): four sample points (the centroid and the three
+///   points halfway from the centroid to each vertex) are each looked up in
+///   the solid faces that CONTAIN them ([`FaceGrid::containing`]: in the
+///   face's plane, inside its triangle, facing the same way). A fragment
+///   inside one source face takes that face's values. A fragment that spans
+///   several source faces, or a sample on an edge they share, takes the
+///   LARGEST fragility and the LARGEST display among every face any sample
+///   lies in: a scar is never priced below a face it may sit on.
+/// * Every other face (the cavity surface, a bore wall) is priced 0 for both:
+///   a seat there is inside the model or a bore, never seen, on a wall at
+///   least the registered minimum thick.
+///
+/// The Boolean (Manifold, through `plinth-solid`) does not hand its face
+/// provenance back, which is why CONTAINED is decided by geometry.
+/// An empty field stays empty (a stated absence).
+struct ShellFields {
+    fragility: Vec<f64>,
+    display: Vec<f64>,
+    kept_faces: usize,
+    kept_mm2: f64,
+    contained_faces: usize,
+    contained_mm2: f64,
+    zero_faces: usize,
+    zero_mm2: f64,
+}
+
+type FaceKey = [[u64; 3]; 3];
+
+impl ShellFields {
+    fn carry(solid: &Mesh, shell: &Mesh, fragility: &[f64], display: &[f64]) -> Self {
+        let mut by_face: std::collections::HashMap<FaceKey, usize> =
+            std::collections::HashMap::with_capacity(solid.tris().len());
+        for (face, triangle) in solid.tris().iter().enumerate() {
+            by_face.entry(face_key(solid, *triangle)).or_insert(face);
+        }
+        let grid = FaceGrid::new(solid);
+        let faces = shell.tris().len();
+        let mut fields = Self {
+            fragility: Vec::with_capacity(if fragility.is_empty() { 0 } else { faces }),
+            display: Vec::with_capacity(if display.is_empty() { 0 } else { faces }),
+            kept_faces: 0,
+            kept_mm2: 0.0,
+            contained_faces: 0,
+            contained_mm2: 0.0,
+            zero_faces: 0,
+            zero_mm2: 0.0,
+        };
+        let value = |field: &[f64], face: usize| field.get(face).copied().unwrap_or(0.0);
+        let mut sources: Vec<usize> = Vec::new();
+        for triangle in shell.tris() {
+            let (normal, area) = face_frame(shell, *triangle);
+            let carried = if let Some(&face) = by_face.get(&face_key(shell, *triangle)) {
+                fields.kept_faces += 1;
+                fields.kept_mm2 += area;
+                Some((value(fragility, face), value(display, face)))
+            } else {
+                sources.clear();
+                let [a, b, c] = triangle.map(|index| shell.verts()[index as usize]);
+                let centroid = vec3::scale(vec3::add(vec3::add(a, b), c), 1.0 / 3.0);
+                for point in [
+                    centroid,
+                    vec3::scale(vec3::add(centroid, a), 0.5),
+                    vec3::scale(vec3::add(centroid, b), 0.5),
+                    vec3::scale(vec3::add(centroid, c), 0.5),
+                ] {
+                    grid.containing(solid, point, normal, &mut sources);
+                }
+                if sources.is_empty() {
+                    fields.zero_faces += 1;
+                    fields.zero_mm2 += area;
+                    None
+                } else {
+                    fields.contained_faces += 1;
+                    fields.contained_mm2 += area;
+                    let largest = |field: &[f64]| {
+                        sources.iter().map(|&face| value(field, face)).fold(0.0_f64, f64::max)
+                    };
+                    Some((largest(fragility), largest(display)))
+                }
+            };
+            let (carried_fragility, carried_display) = carried.unwrap_or((0.0, 0.0));
+            if !fragility.is_empty() {
+                fields.fragility.push(carried_fragility);
+            }
+            if !display.is_empty() {
+                fields.display.push(carried_display);
+            }
+        }
+        fields
+    }
+}
+
+/// The oriented solid's faces bucketed on a uniform grid, to answer "which
+/// solid faces contain this point" without a scan over every face.
+///
+/// The cell is the median face extent (at least 1/512 of the solid's bounding
+/// diagonal, so a fine mesh cannot make the grid huge); a face is listed in
+/// every cell its bounding box, widened by the tolerance, touches. The
+/// tolerance is [`CONTAINMENT_RELATIVE_TOLERANCE`] times the bounding
+/// diagonal: a numerical allowance for the Boolean's recomputed vertices
+/// (doubles, about 1e-15 relative), not a physical limit. Every face it could
+/// confuse a surface fragment with is orders of magnitude further: the cavity
+/// is at least the wall away, and a bore-wall sample lies at least a sixth of
+/// its triangle's height inside the solid.
+struct FaceGrid {
+    origin: [f64; 3],
+    cell: f64,
+    tolerance: f64,
+    normals: Vec<[f64; 3]>,
+    cells: std::collections::HashMap<[i64; 3], Vec<usize>>,
+}
+
+/// See [`FaceGrid`]: a numerical allowance, relative to the solid's bounding
+/// diagonal, for "this point lies on that face". Not a physical constant.
+const CONTAINMENT_RELATIVE_TOLERANCE: f64 = 1e-9;
+
+impl FaceGrid {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "cell indices of finite points over a positive cell no smaller than 1/512 of \
+                  the bounding diagonal"
+    )]
+    fn new(solid: &Mesh) -> Self {
+        let (mut low, mut high) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for vertex in solid.verts() {
+            for axis in 0..3 {
+                low[axis] = low[axis].min(vertex[axis]);
+                high[axis] = high[axis].max(vertex[axis]);
+            }
+        }
+        let diagonal = vec3::norm(vec3::sub(high, low));
+        let diagonal = if diagonal.is_finite() && diagonal > 0.0 { diagonal } else { 1.0 };
+        let tolerance = CONTAINMENT_RELATIVE_TOLERANCE * diagonal;
+        let boxes: Vec<([f64; 3], [f64; 3])> = solid
+            .tris()
+            .iter()
+            .map(|triangle| {
+                let points = triangle.map(|index| solid.verts()[index as usize]);
+                let mut lo = points[0];
+                let mut hi = points[0];
+                for point in &points[1..] {
+                    for axis in 0..3 {
+                        lo[axis] = lo[axis].min(point[axis]);
+                        hi[axis] = hi[axis].max(point[axis]);
+                    }
+                }
+                (lo, hi)
+            })
+            .collect();
+        let mut extents: Vec<f64> = boxes
+            .iter()
+            .map(|(lo, hi)| (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]))
+            .collect();
+        let median = if extents.is_empty() {
+            0.0
+        } else {
+            let middle = extents.len() / 2;
+            *extents.select_nth_unstable_by(middle, f64::total_cmp).1
+        };
+        let cell = median.max(diagonal / 512.0);
+        let frames: Vec<([f64; 3], f64)> =
+            solid.tris().iter().map(|triangle| face_frame(solid, *triangle)).collect();
+        let normals: Vec<[f64; 3]> = frames.iter().map(|frame| frame.0).collect();
+        let index = |value: f64, axis: usize| ((value - low[axis]) / cell).floor() as i64;
+        let mut cells: std::collections::HashMap<[i64; 3], Vec<usize>> =
+            std::collections::HashMap::new();
+        for (face, (lo, hi)) in boxes.iter().enumerate() {
+            // A degenerate face bounds nothing and contains no point.
+            if frames[face].1 <= 0.0 {
+                continue;
+            }
+            let from: [i64; 3] = std::array::from_fn(|axis| index(lo[axis] - tolerance, axis));
+            let to: [i64; 3] = std::array::from_fn(|axis| index(hi[axis] + tolerance, axis));
+            for x in from[0]..=to[0] {
+                for y in from[1]..=to[1] {
+                    for z in from[2]..=to[2] {
+                        cells.entry([x, y, z]).or_default().push(face);
+                    }
+                }
+            }
+        }
+        Self {
+            origin: low,
+            cell,
+            tolerance,
+            normals,
+            cells,
+        }
+    }
+
+    /// Push every solid face that contains `point` and faces the same way as
+    /// `normal` (a positive dot product) onto `out`, once each: `point` within
+    /// the tolerance of the face's plane and of the inside of each of its
+    /// edges.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the cell index of a finite point, as in `new`"
+    )]
+    fn containing(&self, solid: &Mesh, point: [f64; 3], normal: [f64; 3], out: &mut Vec<usize>) {
+        let key: [i64; 3] = std::array::from_fn(|axis| {
+            ((point[axis] - self.origin[axis]) / self.cell).floor() as i64
+        });
+        let Some(faces) = self.cells.get(&key) else {
+            return;
+        };
+        for &face in faces {
+            let face_normal = self.normals[face];
+            if vec3::dot(face_normal, normal) <= 0.0 || out.contains(&face) {
+                continue;
+            }
+            let corners = solid.tris()[face].map(|index| solid.verts()[index as usize]);
+            if vec3::dot(face_normal, vec3::sub(point, corners[0])).abs() > self.tolerance {
+                continue;
+            }
+            let inside = (0..3).all(|edge| {
+                let (from, to) = (corners[edge], corners[(edge + 1) % 3]);
+                let along = vec3::sub(to, from);
+                // |along| times the signed distance of `point` from the
+                // edge's line, in the face's plane: positive on the face's
+                // side.
+                let side = vec3::dot(vec3::cross(along, vec3::sub(point, from)), face_normal);
+                side >= -self.tolerance * vec3::norm(along)
+            });
+            if inside {
+                out.push(face);
+            }
+        }
+    }
+}
+
+fn vertex_bits(mesh: &Mesh, index: u32) -> [u64; 3] {
+    mesh.verts()[index as usize].map(f64::to_bits)
+}
+
+/// A face's unit normal (zero on a degenerate face) and its area, mm².
+fn face_frame(mesh: &Mesh, triangle: [u32; 3]) -> ([f64; 3], f64) {
+    let [a, b, c] = triangle.map(|index| mesh.verts()[index as usize]);
+    let cross = vec3::cross(vec3::sub(b, a), vec3::sub(c, a));
+    let length = vec3::norm(cross);
+    if length.is_finite() && length > 0.0 {
+        (vec3::scale(cross, 1.0 / length), 0.5 * length)
+    } else {
+        ([0.0; 3], 0.0)
+    }
+}
+
+/// A face's three vertices as bits, rotated so the smallest comes first: the
+/// same triangle with the same winding gives the same key whatever vertex a
+/// mesh lists first; the reversed winding does not.
+fn face_key(mesh: &Mesh, triangle: [u32; 3]) -> FaceKey {
+    let [a, b, c] = triangle.map(|index| vertex_bits(mesh, index));
+    let rotations = [[a, b, c], [b, c, a], [c, a, b]];
+    rotations.into_iter().min().unwrap_or([a, b, c])
+}
+
+/// The lowest and highest vertex Z, folded exactly as `sweep_and_emit` folds
+/// them, so a shell's plate and layer count are the emitted sweep's.
+fn z_extent_mm(mesh: &Mesh) -> Result<(f64, f64), String> {
+    let (min_z, max_z) = mesh
+        .verts()
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), vertex| {
+            (lo.min(vertex[2]), hi.max(vertex[2]))
+        });
+    if min_z.is_finite() && max_z.is_finite() {
+        Ok((min_z, max_z))
+    } else {
+        Err("the drilled shell has no finite Z extent".to_owned())
+    }
+}
+
 /// One batched pass over the oriented mesh's own vertices.
 fn max_z_mm(mesh: &Mesh) -> Result<f64, String> {
     let mut max_z = f64::NEG_INFINITY;
@@ -1092,5 +1577,202 @@ fn max_z_mm(mesh: &Mesh) -> Result<f64, String> {
         Ok(max_z)
     } else {
         Err("the oriented mesh has no finite Z extent".to_owned())
+    }
+}
+
+#[cfg(test)]
+mod shell_fields_tests {
+    use super::{Mesh, ShellFields};
+
+    /// Two coplanar solid faces A (y <= x) and B (y >= x) of a unit square,
+    /// with different values. A kept face takes its own values; a fragment
+    /// inside A takes A's; a fragment spanning A and B takes the larger of
+    /// each field; a reversed fragment and one off the plane are priced 0;
+    /// an empty field stays empty.
+    #[test]
+    fn a_fragment_takes_the_face_that_contains_it_and_the_largest_when_it_spans_two() {
+        let solid = Mesh::new(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[0, 1, 2], [0, 2, 3]],
+        )
+        .expect("a square");
+        let fragility = [0.1, 0.7];
+        let display = [1.0, 5.0];
+        let shell = Mesh::new(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.5, 0.1, 0.0],
+                [0.9, 0.1, 0.0],
+                [0.9, 0.5, 0.0],
+                [0.1, 0.2, 0.0],
+                [0.9, 0.2, 0.0],
+                [0.5, 0.9, 0.0],
+                [0.5, 0.1, 0.01],
+                [0.9, 0.1, 0.01],
+                [0.9, 0.5, 0.01],
+            ],
+            vec![
+                // A itself, listed from another vertex.
+                [1, 2, 0],
+                // Inside A.
+                [3, 4, 5],
+                // Centroid (0.5, 0.43) in A, a sample at (0.5, 0.67) in B.
+                [6, 7, 8],
+                // Inside A, wound the other way.
+                [3, 5, 4],
+                // Over A, 0.01 mm off its plane.
+                [9, 10, 11],
+            ],
+        )
+        .expect("a shell-like soup");
+        let fields = ShellFields::carry(&solid, &shell, &fragility, &display);
+        assert_eq!(fields.fragility, vec![0.1, 0.1, 0.7, 0.0, 0.0]);
+        assert_eq!(fields.display, vec![1.0, 1.0, 5.0, 0.0, 0.0]);
+        assert_eq!(
+            (fields.kept_faces, fields.contained_faces, fields.zero_faces),
+            (1, 2, 2)
+        );
+        let empty = ShellFields::carry(&solid, &shell, &fragility, &[]);
+        assert!(empty.display.is_empty(), "no display field stays no display field");
+        assert_eq!(empty.fragility.len(), 5);
+    }
+
+    /// **A real drilled shell whose coplanar neighbours carry different
+    /// values** (gpt-astra-high's review of lane hf, 2026-10-16). An 18 x 20 x
+    /// 22 mm box with every triangle split through its centroid (36 faces, six
+    /// per side), each face its own value, hollowed and drilled by the
+    /// production hollow stage. The check is written against the box itself,
+    /// not against [`ShellFields`]' search: an outer shell triangle lies on one
+    /// side of the box, and a 2-D point-in-triangle test on that side finds the
+    /// source faces under it.
+    ///
+    /// * A triangle wholly inside one source face takes exactly that face's
+    ///   values. The shared-vertex rule this replaces failed it: a vent-mouth
+    ///   triangle inside face 2 took face 1's value.
+    /// * Any other outer triangle takes at least the value of the face under
+    ///   its centroid, and a value of a face on its own side.
+    /// * Every outer triangle is priced (none falls through to 0), and every
+    ///   triangle off the box's sides (the cavity, the bores) is priced 0.
+    #[test]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a face index under 64 as a test value"
+    )]
+    fn on_a_drilled_subdivided_box_each_outer_fragment_takes_its_own_source_face() {
+        let box_mesh = plinth_mesh::make_box([18.0, 20.0, 22.0], [0.0, 0.0, 0.0]).expect("a box");
+        let mut verts = box_mesh.verts().to_vec();
+        let mut tris = Vec::new();
+        for triangle in box_mesh.tris() {
+            let points = triangle.map(|index| box_mesh.verts()[index as usize]);
+            let centroid: [f64; 3] =
+                std::array::from_fn(|axis| (points[0][axis] + points[1][axis] + points[2][axis]) / 3.0);
+            let middle = u32::try_from(verts.len()).expect("a small mesh");
+            verts.push(centroid);
+            for edge in 0..3 {
+                tris.push([triangle[edge], triangle[(edge + 1) % 3], middle]);
+            }
+        }
+        let solid = Mesh::new(verts, tris).expect("the subdivided box");
+        let fragility: Vec<f64> = (0..solid.tris().len()).map(|face| 1.0 + face as f64).collect();
+        let display: Vec<f64> = (0..solid.tris().len()).map(|face| 100.0 + face as f64).collect();
+        let constants = plinth_core::m0_constants().expect("the registry");
+        let request = plinth_hollow::HollowRequest::with_registered_wall_default(
+            constants.saturn4_ultra().clone(),
+        )
+        .expect("the registered wall");
+        let shell = plinth_hollow::drilled_shell_for_pose(&solid, &request)
+            .expect("the box hollows and drills")
+            .into_parts()
+            .0;
+        let fields = ShellFields::carry(&solid, &shell, &fragility, &display);
+
+        let mut bounds = [[f64::INFINITY, f64::NEG_INFINITY]; 3];
+        for vertex in solid.verts() {
+            for axis in 0..3 {
+                bounds[axis][0] = bounds[axis][0].min(vertex[axis]);
+                bounds[axis][1] = bounds[axis][1].max(vertex[axis]);
+            }
+        }
+        let on_side = |points: &[[f64; 3]], axis: usize, at: f64| {
+            points.iter().all(|point| (point[axis] - at).abs() < 1e-9)
+        };
+        // 2-D point-in-triangle on the plane normal to `axis`, inclusive.
+        let inside = |corners: [[f64; 3]; 3], point: [f64; 3], axis: usize| {
+            let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+            let cross = |a: [f64; 3], b: [f64; 3], p: [f64; 3]| {
+                (b[u] - a[u]) * (p[v] - a[v]) - (b[v] - a[v]) * (p[u] - a[u])
+            };
+            let signs: Vec<f64> =
+                (0..3).map(|edge| cross(corners[edge], corners[(edge + 1) % 3], point)).collect();
+            signs.iter().all(|s| *s >= -1e-9) || signs.iter().all(|s| *s <= 1e-9)
+        };
+        let (mut outer, mut whole_checked, mut partial_checked) = (0, 0, 0);
+        for (index, triangle) in shell.tris().iter().enumerate() {
+            let points = triangle.map(|vertex| shell.verts()[vertex as usize]);
+            let side = (0..3).find_map(|axis| {
+                bounds[axis]
+                    .iter()
+                    .find(|at| on_side(&points, axis, **at))
+                    .map(|at| (axis, *at))
+            });
+            let Some((axis, at)) = side else {
+                assert_eq!(
+                    (fields.fragility[index].to_bits(), fields.display[index].to_bits()),
+                    (0.0_f64.to_bits(), 0.0_f64.to_bits()),
+                    "a cavity or bore face is priced 0"
+                );
+                continue;
+            };
+            outer += 1;
+            let faces_on_side: Vec<usize> = (0..solid.tris().len())
+                .filter(|&face| {
+                    let corners = solid.tris()[face].map(|vertex| solid.verts()[vertex as usize]);
+                    on_side(&corners, axis, at)
+                })
+                .collect();
+            let corners_of =
+                |face: usize| solid.tris()[face].map(|vertex| solid.verts()[vertex as usize]);
+            let centroid: [f64; 3] =
+                std::array::from_fn(|k| (points[0][k] + points[1][k] + points[2][k]) / 3.0);
+            let whole = faces_on_side
+                .iter()
+                .copied()
+                .find(|&face| points.iter().all(|point| inside(corners_of(face), *point, axis)));
+            let carried = (fields.fragility[index], fields.display[index]);
+            assert!(carried.0 > 0.0, "outer shell face {index} fell through to 0");
+            match whole {
+                Some(face) => {
+                    whole_checked += 1;
+                    assert_eq!(
+                        carried,
+                        (fragility[face], display[face]),
+                        "outer shell face {index} lies wholly in source face {face}"
+                    );
+                }
+                None => {
+                    partial_checked += 1;
+                    let under = faces_on_side
+                        .iter()
+                        .copied()
+                        .filter(|&face| inside(corners_of(face), centroid, axis))
+                        .map(|face| fragility[face])
+                        .fold(0.0_f64, f64::max);
+                    assert!(carried.0 >= under, "shell face {index}: below the face under it");
+                    assert!(
+                        faces_on_side
+                            .iter()
+                            .any(|&face| fragility[face].to_bits() == carried.0.to_bits()),
+                        "shell face {index}: a value from another side"
+                    );
+                }
+            }
+        }
+        assert!(outer > 0 && whole_checked > 0, "path hit: outer fragments were checked");
+        assert!(
+            fields.contained_faces > 0,
+            "path hit: the drill cut outer faces ({outer} outer, {partial_checked} spanning)"
+        );
     }
 }
