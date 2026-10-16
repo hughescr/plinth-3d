@@ -2,7 +2,7 @@
 
 Branch `feature/hollow-first-2026-10-16` (worktree `wt-hf`), base develop `a9053e75`.
 Owner direction (Craig): score each orientation on the hollowed, drilled shell that will print, not on the solid.
-Output-changing for hollowed models; behind a flag, default OFF.
+Output-changing for hollowed models. Status: ON by default since 2026-10-16 (Craig approved the output change); `--no-hollow-first` or `PLINTH_HOLLOW_FIRST=0` opts out.
 
 ## 1. What in hollowing depends on the pose (checked in `plinth-hollow`)
 
@@ -104,8 +104,9 @@ suspicious (a finalist near the cut on the shell).
 
 ## 6. Flag
 
-`--hollow-first` (CLI) or `PLINTH_HOLLOW_FIRST=1` (environment; any other value is off). Default off.
-It reaches `StagePolicy::hollow_first`. It has effect only on `--orient dense --placement sweep`. With
+Default ON. `--no-hollow-first` (CLI) or `PLINTH_HOLLOW_FIRST=0` (environment; exactly `0`, any other value
+leaves it on) opts out. `--hollow-first` is still accepted; either CLI flag wins over the environment, and
+giving both is a parse error. It reaches `StagePolicy::hollow_first`. It has effect only on `--orient dense --placement sweep`. With
 `--no-cache` the finalists are still measured on their shells (so the same pose wins) and only the reuse is
 off: the seal plans the shell itself, and the file must be the same bytes. Off: every sha is develop's. On: non-hollowed models measure the solid on every
 pose (the hollow stage refuses them per pose), so they stay byte-identical.

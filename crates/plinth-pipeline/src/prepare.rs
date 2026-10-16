@@ -904,21 +904,29 @@ pub struct StagePolicy {
     /// `--exact-delicacy`: the orientation table's delicacy curvature is
     /// evaluated on the full mesh rather than by the protected proxy.
     pub exact_delicacy: bool,
-    /// HOLLOW FIRST (`--hollow-first` or `PLINTH_HOLLOW_FIRST=1`; default off):
-    /// the orientation search's production finalists are measured on the
-    /// drilled shell the hollow stage makes for each pose, so the winner's
-    /// retained plan is the hollowed plan and the seal reuses it.
-    /// OUTPUT-CHANGING for hollowed models. `docs/plans/hollow-first-2026-10-16.md`.
+    /// HOLLOW FIRST (default ON since 2026-10-16; `--no-hollow-first` or
+    /// `PLINTH_HOLLOW_FIRST=0` turns it off): the orientation search's
+    /// production finalists are measured on the drilled shell the hollow stage
+    /// makes for each pose, so the winner's retained plan is the hollowed plan
+    /// and the seal reuses it. Output-changing for hollowed models against the
+    /// solid-first search. `docs/plans/hollow-first-2026-10-16.md`.
     /// Work that pre-computes the hollowed final sweep beside production has
     /// nothing to do when this is on.
     pub hollow_first: bool,
 }
 
-/// The environment switch for [`StagePolicy::hollow_first`]: on only when
-/// `PLINTH_HOLLOW_FIRST` is exactly `1`.
+/// The environment switch for [`StagePolicy::hollow_first`]: on unless
+/// `PLINTH_HOLLOW_FIRST` is exactly `0`. Unset, `1` and any other value leave
+/// the default (on).
 #[must_use]
 pub fn hollow_first_from_env() -> bool {
-    std::env::var_os("PLINTH_HOLLOW_FIRST").is_some_and(|value| value == "1")
+    hollow_first_from_value(std::env::var_os("PLINTH_HOLLOW_FIRST").as_deref())
+}
+
+/// [`hollow_first_from_env`] on the variable's value (`None`: unset).
+#[must_use]
+pub fn hollow_first_from_value(value: Option<&std::ffi::OsStr>) -> bool {
+    value != Some(std::ffi::OsStr::new("0"))
 }
 
 /// Per-run stage settings a caller may set over what the request implies.
@@ -926,7 +934,9 @@ pub fn hollow_first_from_env() -> bool {
 pub struct StageOverrides {
     /// See [`prepare_with_reuse`].
     pub reuse: Option<WinnerPlanReuse>,
-    /// `Some(true)`: hollow first (`--hollow-first`), whatever the environment.
+    /// `Some(true)`: hollow first (`--hollow-first`); `Some(false)`: the
+    /// solid-first search (`--no-hollow-first`); either way whatever the
+    /// environment says. `None`: the environment decides, default on.
     pub hollow_first: Option<bool>,
 }
 
@@ -1046,7 +1056,8 @@ pub fn prepare_with_reuse(
 }
 
 /// [`prepare`] with [`StageOverrides`] applied over the policy the request
-/// implies (the CLI's `--hollow-first`; the tests' reuse sabotage).
+/// implies (the CLI's `--hollow-first` and `--no-hollow-first`; the tests'
+/// reuse sabotage).
 ///
 /// # Errors
 ///

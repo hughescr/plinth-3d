@@ -82,6 +82,20 @@ fn request(scratch: &Scratch, run: &str, no_cache: bool) -> PrepareRequest {
     }
 }
 
+/// The switch's default is on, and only `PLINTH_HOLLOW_FIRST=0` turns it off.
+/// (Every run below names its mode, so none of them depends on the default.)
+#[test]
+fn hollow_first_is_on_unless_the_environment_says_zero() {
+    use std::ffi::OsStr;
+    use plinth_pipeline::prepare::hollow_first_from_value;
+    assert!(hollow_first_from_value(None), "unset: the default is on");
+    assert!(hollow_first_from_value(Some(OsStr::new("1"))));
+    assert!(hollow_first_from_value(Some(OsStr::new(""))));
+    assert!(hollow_first_from_value(Some(OsStr::new("off"))), "only exactly 0 opts out");
+    assert!(!hollow_first_from_value(Some(OsStr::new("0"))));
+}
+
+/// One run with the mode named: `true` is hollow first, `false` is the solid-first search.
 fn run(scratch: &Scratch, label: &str, no_cache: bool, hollow_first: bool) -> PrepareReport {
     prepare_with_overrides(
         request(scratch, label, no_cache),
@@ -116,7 +130,8 @@ fn emitted(
     (bytes, sweep_plan_source.0, *hollow_disposition)
 }
 
-/// A model the hollow stage does not hollow keeps its bytes with the switch on.
+/// **Flag-off byte identity.** A model the hollow stage does not hollow keeps
+/// its bytes with hollow first on or off (`--no-hollow-first` is the old search).
 #[test]
 fn a_model_that_is_not_hollowed_keeps_its_bytes_with_hollow_first_on() {
     let scratch = Scratch::new("solid");
@@ -164,7 +179,7 @@ fn a_hollowed_model_reuses_the_winners_shell_plan_and_keeps_the_seals_bytes() {
     assert_eq!(
         off_source,
         Some(SweepPlanSource::Planned(ReuseMiss::MeshDiffers)),
-        "hollow first off: the solid's plan cannot serve the shell, as before"
+        "hollow first explicitly off (the solid-first search): the solid's plan cannot serve the shell"
     );
     assert!(
         reused_bytes == planned_bytes,
