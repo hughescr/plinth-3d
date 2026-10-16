@@ -1540,8 +1540,12 @@ pub(crate) struct MovedSeat {
 /// beyond reach of the FINAL contact of every tip seated on the cell's layer
 /// (`final_contacts`, per member: the moved contact where a tip slid). The
 /// distance is the straight Euclidean length in the plane, the limit the file
-/// measurement uses. No reach walk, no carried field: it reads the assignment
-/// placement made, so it costs a few distances per demand cell.
+/// measurement uses, and a contact covers a cell only where it touches the
+/// same piece of the layer's cover (`components`, 8-connected labels per
+/// layer; a contact on another piece reaches across air). Contacts are the
+/// centres (and radii) of the discs the lowering draws on the SETTLED field.
+/// No reach walk, no carried field: it reads the assignment placement made,
+/// so it costs a few distances per demand cell.
 ///
 /// What it does not see, by design: a cell the slid tip rooted only through
 /// the material under it (a carried column) or along a path longer than the
@@ -1554,7 +1558,8 @@ pub(crate) fn stranded_locally(
     grid: &Grid,
     struts: &[SweepStrut],
     births: &crate::births::Births,
-    final_contacts: &[Option<[f64; 2]>],
+    final_contacts: &[Option<([f64; 2], f64)>],
+    components: &std::collections::BTreeMap<usize, Vec<u32>>,
     moved: &[MovedSeat],
     reach_mm: f64,
 ) -> Vec<StrandedCell> {
@@ -1564,6 +1569,50 @@ pub(crate) fn stranded_locally(
     }
     let centre = |cell: usize| [grid.center_x_mm(grid.col_of(cell)), grid.center_y_mm(grid.row_of(cell))];
     let distance = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+    // THE SAME PIECE OF THE LAYER: a contact covers a cell only where it
+    // touches the cover component the cell lies in (a contact on another
+    // piece of the layer reaches it across air, which no lamina does). The
+    // contact's component is the one of the cover cell nearest its centre
+    // within its disc and one pixel; `None` (no labels for the layer, or no
+    // cover there) leaves the distance alone to decide.
+    let label = |layer: usize, cell: usize| -> Option<u32> {
+        components.get(&layer)?.get(cell).copied().filter(|&label| label != u32::MAX)
+    };
+    let contact_component = |layer: usize, (xy, radius): ([f64; 2], f64)| -> Option<u32> {
+        let labels = components.get(&layer)?;
+        let pitch = grid.pitch_mm();
+        let tolerance = radius.max(0.0) + pitch;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "raster coordinates of a contact on the model are small and clamped to the grid"
+        )]
+        let (row, col, span) = (
+            (grid.row_coord(xy[1]).floor().max(0.0) as usize).min(grid.rows().saturating_sub(1)),
+            (grid.col_coord(xy[0]).floor().max(0.0) as usize).min(grid.cols().saturating_sub(1)),
+            (tolerance / pitch).ceil() as usize,
+        );
+        let mut best: Option<(f64, usize, u32)> = None;
+        for r in row.saturating_sub(span)..=(row + span).min(grid.rows().saturating_sub(1)) {
+            for c in col.saturating_sub(span)..=(col + span).min(grid.cols().saturating_sub(1)) {
+                let cell = grid.index(r, c);
+                let Some(&found) = labels.get(cell).filter(|&&found| found != u32::MAX) else {
+                    continue;
+                };
+                let d = distance(centre(cell), xy);
+                if d <= tolerance && best.is_none_or(|(bd, bc, _)| d.total_cmp(&bd).then(cell.cmp(&bc)).is_lt()) {
+                    best = Some((d, cell, found));
+                }
+            }
+        }
+        best.map(|(_, _, found)| found)
+    };
+    let same_piece = |layer: usize, cell: usize, contact: ([f64; 2], f64)| -> bool {
+        match (label(layer, cell), contact_component(layer, contact)) {
+            (Some(a), Some(b)) => a == b,
+            _ => true,
+        }
+    };
     // Each moved tip's demand, in its order.
     let demands: Vec<(&MovedSeat, Vec<(usize, usize)>)> = moved
         .iter()
@@ -1580,7 +1629,8 @@ pub(crate) fn stranded_locally(
         })
         .collect();
     // The final contacts of the tips seated on each layer asked about.
-    let mut on_layer: std::collections::BTreeMap<usize, Vec<[f64; 2]>> = std::collections::BTreeMap::new();
+    let mut on_layer: std::collections::BTreeMap<usize, Vec<([f64; 2], f64)>> =
+        std::collections::BTreeMap::new();
     for (_, demand) in &demands {
         for &(layer, _) in demand {
             on_layer.entry(layer).or_insert_with(|| {
@@ -1598,21 +1648,27 @@ pub(crate) fn stranded_locally(
         let Some(placed) = seat.placed_contact_xy else {
             continue;
         };
+        let placed = (placed, seat.contact_radius_mm);
         for (layer, cell) in demand {
             if cell >= grid.cells() || seen.contains(&(layer, cell)) {
                 continue;
             }
             let at = centre(cell);
-            if distance(at, placed) > reach_mm {
+            if distance(at, placed.0) > reach_mm || !same_piece(layer, cell, placed) {
                 continue;
             }
-            let nearest = on_layer
-                .get(&layer)
-                .into_iter()
-                .flatten()
-                .map(|&contact| distance(at, contact))
-                .fold(f64::INFINITY, f64::min);
-            if nearest > reach_mm {
+            let contacts = on_layer.get(&layer).map_or(&[][..], Vec::as_slice);
+            let covered = contacts
+                .iter()
+                .any(|&contact| distance(at, contact.0) <= reach_mm && same_piece(layer, cell, contact));
+            if !covered {
+                // How far the nearest contact on the cell's own piece stands
+                // (reporting only).
+                let nearest = contacts
+                    .iter()
+                    .filter(|&&contact| same_piece(layer, cell, contact))
+                    .map(|&(contact, _)| distance(at, contact))
+                    .fold(f64::INFINITY, f64::min);
                 seen.insert((layer, cell));
                 #[expect(
                     clippy::cast_possible_truncation,
@@ -2995,9 +3051,10 @@ mod tests {
         let mut struts = vec![arm(&grid, 0, 0.9, 20), arm(&grid, 1, 3.1, 20)];
         struts[1].covered_demand = vec![cell_at(&grid, 3.0, 0.0), cell_at(&grid, 3.9, 0.0)];
         let contact = |strut: &SweepStrut| Some(strut.center_mm);
-        let mut contacts: Vec<Option<[f64; 2]>> = struts.iter().map(contact).collect();
+        let mut contacts: Vec<Option<([f64; 2], f64)>> =
+            struts.iter().map(|strut| contact(strut).map(|xy| (xy, 0.1))).collect();
         let slid = [to_x, 0.0];
-        contacts[1] = Some(slid);
+        contacts[1] = Some((slid, 0.1));
         let moved = [MovedSeat {
             index: 1,
             xy_mm: slid,
@@ -3008,7 +3065,55 @@ mod tests {
             contact_xy: Some(slid),
         }];
         let births = crate::births::Births::none();
-        (stranded_locally(&grid, &struts, &births, &contacts, &moved, 2.13), grid)
+        let components = std::collections::BTreeMap::new();
+        (stranded_locally(&grid, &struts, &births, &contacts, &components, &moved, 2.13), grid)
+    }
+
+    /// THE SAME PIECE: the cell at x 3.9 is held in reach of the slid
+    /// contact (x 3.0, 0.9 mm away) only if both stand on one piece of the
+    /// layer's cover. Labelled as two pieces (the cell on its own), the slid
+    /// contact no longer covers it and it is stranded; as one piece, it is
+    /// not. SABOTAGE: without labels the distance alone decides (covered).
+    #[test]
+    fn the_local_check_never_covers_a_cell_across_air() {
+        let (grid, _) = plan_grid(0.0, -0.5, 4.0, 0.5, LAYERS, H, 1.0, u64::MAX);
+        let mut struts = vec![arm(&grid, 0, 0.9, 20), arm(&grid, 1, 3.1, 20)];
+        let far = cell_at(&grid, 3.9, 0.0);
+        struts[1].covered_demand = vec![far];
+        let slid = [3.0, 0.0];
+        let contacts: Vec<Option<([f64; 2], f64)>> =
+            vec![Some((struts[0].center_mm, 0.1)), Some((slid, 0.1))];
+        let moved = [MovedSeat {
+            index: 1,
+            xy_mm: slid,
+            contact_radius_mm: 0.1,
+            placed_ball: None,
+            ball: None,
+            placed_contact_xy: Some(struts[1].center_mm),
+            contact_xy: Some(slid),
+        }];
+        let births = crate::births::Births::none();
+        let run = |labels: Option<Vec<u32>>| {
+            let mut components = std::collections::BTreeMap::new();
+            if let Some(labels) = labels {
+                components.insert(20, labels);
+            }
+            stranded_locally(&grid, &struts, &births, &contacts, &components, &moved, 2.13)
+        };
+        // One piece: every cell labelled 0.
+        assert!(run(Some(vec![0; grid.cells()])).is_empty());
+        // The far cell and its own column of x 3.9 on a piece of their own,
+        // and the placed contact (x 3.1) on it too, so it was covered before.
+        let mut split = vec![0_u32; grid.cells()];
+        for (cell, label) in split.iter_mut().enumerate() {
+            if grid.center_x_mm(grid.col_of(cell)) > 3.05 {
+                *label = 1;
+            }
+        }
+        let stranded = run(Some(split));
+        assert_eq!(stranded.len(), 1, "{stranded:?}");
+        assert_eq!(stranded[0].cell, far);
+        assert!(run(None).is_empty(), "SABOTAGE: the distance alone covers it");
     }
 
     /// Slid to x 1.5: the cell at x 3.9 (about 0.8 mm from the placed

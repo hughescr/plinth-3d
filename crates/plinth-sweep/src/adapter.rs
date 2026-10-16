@@ -1296,10 +1296,38 @@ fn arms_and_junction_raises_over(
     plan: &SweepPlan,
     struts: &[crate::SweepStrut],
 ) -> (Vec<SweepArm>, JunctionRaises) {
-    let height = plan.layer_height_mm;
-    let plate = plan.plate_z_mm;
-    let grid = &plan.grid;
-    let (mut profiles, raised) = drawn_profiles(struts, plan.load_step_taper);
+    arms_and_junction_raises_in(
+        &plan.grid,
+        plan.plate_z_mm,
+        plan.layer_height_mm,
+        plan.load_step_taper,
+        struts,
+    )
+}
+
+/// **The arms the lowering gets for `struts`** ([`arms_of`]'s construction,
+/// every footprint move, follow and drawn-line offset applied), from the
+/// frame alone rather than a whole plan: what the tip-cover check reads its
+/// final contacts from while the footprint rule is still running
+/// ([`crate::footprint::TipCover`]).
+pub(crate) fn drawn_arms_in(
+    grid: &crate::grid::Grid,
+    plate: f64,
+    height: f64,
+    taper: LoadStepTaper,
+    struts: &[crate::SweepStrut],
+) -> Vec<SweepArm> {
+    arms_and_junction_raises_in(grid, plate, height, taper, struts).0
+}
+
+fn arms_and_junction_raises_in(
+    grid: &crate::grid::Grid,
+    plate: f64,
+    height: f64,
+    taper: LoadStepTaper,
+    struts: &[crate::SweepStrut],
+) -> (Vec<SweepArm>, JunctionRaises) {
+    let (mut profiles, raised) = drawn_profiles(struts, taper);
     // THE FOOTPRINT RULE's move (fix/tip-trim, 2026-09-28): a seat whose
     // contact disc hung off its face slides ALONG the face; a member joined to
     // a moved axis follows it at the junction (`footprint::followed_shifts`).

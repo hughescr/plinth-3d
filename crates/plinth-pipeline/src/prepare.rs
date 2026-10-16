@@ -3862,7 +3862,22 @@ fn print_sweep_disclosure(
                 );
             }
         }
-        for left in &cover.left {
+        for left in cover.left.iter().filter(|left| left.late) {
+            println!(
+                "[sweep {model}] WARNING the tip of arm {}, as finally drawn (after the last \
+                 normals and ball growth), leaves {:.4} mm2 of the model's surface from layer {} \
+                 (centred at x {:.3}, y {:.3} mm) beyond the reach the placed tips gave (worst U \
+                 {:.3}; 0: no root reaches it at all); found on the emitted field, after every \
+                 repair, so it is emitted as it is",
+                left.arm,
+                left.surface_mm2,
+                left.layer,
+                left.centre_mm[0],
+                left.centre_mm[1],
+                left.max_u,
+            );
+        }
+        for left in cover.left.iter().filter(|left| !left.late) {
             println!(
                 "[sweep {model}] WARNING the {:.4} mm slide of the tip of arm {} leaves {:.4} mm2 \
                  of the model's surface from layer {} (centred at x {:.3}, y {:.3} mm) beyond the \

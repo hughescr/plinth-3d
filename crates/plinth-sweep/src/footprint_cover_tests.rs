@@ -72,15 +72,25 @@ fn field(grid: &Grid, col: usize) -> Vec<SweepStrut> {
     ]
 }
 
-fn arms(grid: &Grid, struts: &mut [SweepStrut]) -> Vec<SweepArm> {
-    struts
-        .iter_mut()
-        .map(|strut| {
-            strut.seat_normal = [0.0, 0.0, -1.0];
-            let (seat, base) = crate::adapter::drawn_ends(grid, 0.0, H, strut);
-            crate::adapter::sweep_arm(strut, seat, base, Some(seat), strut.radius_mm.clone())
-        })
-        .collect()
+fn taper() -> crate::adapter::LoadStepTaper {
+    crate::adapter::LoadStepTaper::of(&crate::lean::LeanLaw::new(H, 45.0, 25.0))
+}
+
+/// The arms the lowering draws for a field (the adapter's own construction,
+/// every footprint move and host follow applied): what the tests hand the
+/// rule, and what the tip cover reads the settled field through.
+fn drawn(field: &[SweepStrut]) -> Vec<SweepArm> {
+    crate::adapter::drawn_arms_in(&grid(), 0.0, H, taper(), field)
+}
+
+fn arms(_grid: &Grid, struts: &mut [SweepStrut]) -> Vec<SweepArm> {
+    for strut in struts.iter_mut() {
+        strut.seat_normal = [0.0, 0.0, -1.0];
+        if strut.seat_face.point_mm.is_none() {
+            strut.seat_face.point_mm = Some(crate::adapter::drawn_ends(_grid, 0.0, H, strut).0);
+        }
+    }
+    drawn(struts)
 }
 
 /// The footprint rule over the field with the test tip over `col`, with or
@@ -196,7 +206,7 @@ fn a_slide_that_still_holds_its_seat_is_not_walked() {
     let asked = RefCell::new(Vec::new());
     let mut walk = scripted([2.9, 0.1], 0.0, &asked);
     let (outcome, struts) =
-        run_at(OVER_EDGE, Some(TipCover { reach_mm: 2.13, passes: 2, births: no_births(), stranded: Some(&mut walk) }));
+        run_at(OVER_EDGE, Some(TipCover { reach_mm: 2.13, passes: 2, births: no_births(), drawn: &drawn, stranded: Some(&mut walk) }));
     assert!(asked.borrow().is_empty(), "walked: {:?}", asked.borrow());
     assert_eq!(outcome.cover.slides_holding_seat, 1, "{:?}", outcome.cover);
     assert!(!outcome.cover.enabled && outcome.cover.checks == 0);
@@ -214,7 +224,7 @@ fn a_slide_that_keeps_its_cover_is_left_alone() {
         asked.borrow_mut().push(moved.to_vec());
         Vec::new()
     };
-    let (outcome, struts) = run(Some(TipCover { reach_mm: 2.13, passes: 2, births: no_births(), stranded: Some(&mut walk) }));
+    let (outcome, struts) = run(Some(TipCover { reach_mm: 2.13, passes: 2, births: no_births(), drawn: &drawn, stranded: Some(&mut walk) }));
     assert_eq!(asked.borrow().len(), 1, "one walk over the slid field: {:?}", outcome.cover);
     assert_eq!(asked.borrow()[0].len(), 1, "the one slid tip was walked");
     assert_eq!(struts, plain_struts, "the field is exactly the unchecked one");
@@ -243,7 +253,7 @@ fn a_slide_that_strands_demand_is_reseated_where_it_covers_it() {
     assert!(distance(landed, target) > limit, "the unchecked slide strands the target");
     let asked = RefCell::new(Vec::new());
     let mut walk = scripted(target, limit, &asked);
-    let (outcome, struts) = run(Some(TipCover { reach_mm: limit, passes: 2, births: no_births(), stranded: Some(&mut walk) }));
+    let (outcome, struts) = run(Some(TipCover { reach_mm: limit, passes: 2, births: no_births(), drawn: &drawn, stranded: Some(&mut walk) }));
     let cover = &outcome.cover;
     assert_eq!(struts[0].seat_face.footprint, Footprint::MovedOntoFace, "{cover:?}");
     assert!(
@@ -273,7 +283,7 @@ fn an_onto_face_slide_no_reseat_can_save_is_kept_and_warned() {
     let target = [2.9, 0.1];
     let asked = RefCell::new(Vec::new());
     let mut walk = scripted(target, 0.05, &asked);
-    let (outcome, struts) = run(Some(TipCover { reach_mm: 0.05, passes: 2, births: no_births(), stranded: Some(&mut walk) }));
+    let (outcome, struts) = run(Some(TipCover { reach_mm: 0.05, passes: 2, births: no_births(), drawn: &drawn, stranded: Some(&mut walk) }));
     let cover = &outcome.cover;
     assert_eq!(struts, plain, "the slide the rule chose stands: {cover:?}");
     assert_eq!(cover.kept, vec![0], "{cover:?}");
@@ -302,7 +312,7 @@ fn the_repair_is_the_same_on_any_pool() {
             let asked = RefCell::new(Vec::new());
             let mut walk = scripted(target, 0.3, &asked);
             let (outcome, struts) =
-                run(Some(TipCover { reach_mm: 0.3, passes: 2, births: no_births(), stranded: Some(&mut walk) }));
+                run(Some(TipCover { reach_mm: 0.3, passes: 2, births: no_births(), drawn: &drawn, stranded: Some(&mut walk) }));
             drop(walk);
             (format!("{outcome:?}"), struts, format!("{:?}", asked.into_inner()))
         })
@@ -373,7 +383,7 @@ fn a_neighbour_slides_to_cover_what_a_kept_slide_strands() {
     let asked = RefCell::new(Vec::new());
     let mut walk = covered_by_any(target, limit, &asked);
     let (outcome, struts) =
-        run_field(&neighbour_field, Some(TipCover { reach_mm: limit, passes: 2, births: no_births(), stranded: Some(&mut walk) }));
+        run_field(&neighbour_field, Some(TipCover { reach_mm: limit, passes: 2, births: no_births(), drawn: &drawn, stranded: Some(&mut walk) }));
     let cover = &outcome.cover;
     assert_eq!(cover.kept, vec![0], "{cover:?}");
     assert_eq!(cover.helpers, vec![2], "{cover:?}");
@@ -387,7 +397,7 @@ fn a_neighbour_slides_to_cover_what_a_kept_slide_strands() {
     let asked = RefCell::new(Vec::new());
     let mut walk = covered_by_any(far, limit, &asked);
     let (outcome, struts) =
-        run_field(&neighbour_field, Some(TipCover { reach_mm: limit, passes: 2, births: no_births(), stranded: Some(&mut walk) }));
+        run_field(&neighbour_field, Some(TipCover { reach_mm: limit, passes: 2, births: no_births(), drawn: &drawn, stranded: Some(&mut walk) }));
     let cover = &outcome.cover;
     assert_eq!(cover.kept, vec![0], "{cover:?}");
     assert!(cover.helpers.is_empty(), "{cover:?}");
@@ -400,10 +410,81 @@ fn a_neighbour_slides_to_cover_what_a_kept_slide_strands() {
     let asked = RefCell::new(Vec::new());
     let mut walk = covered_by_any(target, 0.1, &asked);
     let (outcome, struts) =
-        run_field(&neighbour_field, Some(TipCover { reach_mm: limit, passes: 2, births: no_births(), stranded: Some(&mut walk) }));
+        run_field(&neighbour_field, Some(TipCover { reach_mm: limit, passes: 2, births: no_births(), drawn: &drawn, stranded: Some(&mut walk) }));
     let cover = &outcome.cover;
     assert!(cover.helpers_searched >= 1, "a helper was searched: {cover:?}");
     assert!(cover.helpers.is_empty(), "and taken back: {cover:?}");
     assert_eq!(cover.left.len(), 1, "warned: {cover:?}");
     assert_eq!(struts, plain, "the field as the rule left it");
+}
+
+/// The host/child field: the test tip over air (member 0, a plate arm from
+/// layer 0), a CHILD over air beside it (member 1) landed on member 0's
+/// shaft at layer 10, and the far control (member 2). Both slide inward; the
+/// child's base follows its host's slide halfway (layer 10 of 20).
+fn host_child_field(grid: &Grid) -> Vec<SweepStrut> {
+    let host = straight(grid, 0, ROW, OVER_AIR, K_TOP, TIP_RADIUS_MM);
+    let mut child = straight(grid, 1, ROW + 15, OVER_AIR, K_TOP, TIP_RADIUS_MM);
+    child.landing = crate::Landing::Strut { id: 0, layer: 10 };
+    child.k_bottom = 10;
+    child.radius_mm = vec![TIP_RADIUS_MM; K_TOP - 10 + 1];
+    child.carried_mm2 = vec![0.0; K_TOP - 10 + 1];
+    vec![host, child, straight(grid, 2, ROW, 60, K_TOP, TIP_RADIUS_MM)]
+}
+
+/// REVIEW FIX (gpt-astra-high, 2026-10-16): the check reads the contacts of
+/// the SETTLED field as the lowering draws it, never a proposal's own
+/// lowering. Here the child's seat slides and its base follows its host's
+/// slide; the contact the check is handed for the child must be the disc the
+/// real adapter and lowering draw for the field the rule publishes, and NOT
+/// the disc of the child's proposal alone (its seat moved, its base where it
+/// was), which stands elsewhere. Real settle, real lowering; nothing scripted
+/// but the check's answer (nothing stranded).
+#[test]
+fn the_check_reads_the_contact_a_followed_child_is_drawn_with() {
+    let asked = RefCell::new(Vec::new());
+    let mut walk = |_: &[SweepStrut], moved: &[MovedSeat]| {
+        asked.borrow_mut().push(moved.to_vec());
+        Vec::new()
+    };
+    let (_, struts) = run_field(
+        &host_child_field,
+        Some(TipCover { reach_mm: 2.13, passes: 2, births: no_births(), drawn: &drawn, stranded: Some(&mut walk) }),
+    );
+    assert_eq!(struts[0].seat_face.footprint, Footprint::MovedOntoFace, "the host slides");
+    assert_eq!(struts[1].seat_face.footprint, Footprint::MovedOntoFace, "the child slides");
+    let follows = crate::footprint::followed_shifts(&struts);
+    assert!(follows[1].base_mm.is_some(), "anti-vacuity: the child's base follows its host");
+    let plan = plinth_core::LayerPlan::new(0.0, vec![H; LAYERS]).expect("a uniform plan");
+    let emitted = drawn(&struts);
+    let discs = plinth_support::tip_contact_discs(&emitted, &plan).expect("discs");
+    let real = discs[1].expect("the child's drawn disc");
+    let checked = asked
+        .borrow()
+        .last()
+        .and_then(|seats| seats.iter().find(|seat| seat.index == 1).copied())
+        .expect("the child was checked");
+    let contact = checked.contact_xy.expect("a contact");
+    assert!(
+        (contact[0] - real.centre_mm[0]).abs() < 1e-12 && (contact[1] - real.centre_mm[1]).abs() < 1e-12,
+        "checked {contact:?}, drawn {:?}",
+        real.centre_mm
+    );
+    // The proposal alone: the child's placed arm with its own seat move and
+    // its base where it stood.
+    let mut placed = host_child_field(&grid());
+    let placed_arms = arms(&grid(), &mut placed);
+    let shift = struts[1].seat_face.shift_mm;
+    let proposal = SweepArm {
+        seat_mm: geom_kernel::vec3::add(placed_arms[1].seat_mm, shift),
+        seat_face_point_mm: placed_arms[1].seat_face_point_mm.map(|point| geom_kernel::vec3::add(point, shift)),
+        ..placed_arms[1].clone()
+    };
+    let alone = plinth_support::tip_contact_discs(&[proposal], &plan).expect("disc")[0].expect("a disc");
+    assert!(
+        (alone.centre_mm[0] - real.centre_mm[0]).abs() > 1e-6,
+        "the follow moves the contact (proposal {:?}, drawn {:?}), or the test proves nothing",
+        alone.centre_mm,
+        real.centre_mm
+    );
 }

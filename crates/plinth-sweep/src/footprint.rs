@@ -229,6 +229,9 @@ pub struct TipCoverOutcome {
     /// Checks run over the moved field (walks, in the exact check): the path
     /// hits.
     pub checks: usize,
+    /// Whether the check ran once more on the EMITTED field (after the final
+    /// normals and ball growth; `lib.rs`), and found any slid tip to check.
+    pub final_check: bool,
     /// Slides standing at the last check whose ball still holds the seat the
     /// tip was placed for (`keeps_seat`'s first clause): their roots are
     /// where they were, so they are not walked.
@@ -304,6 +307,9 @@ pub struct CoverShortfall {
     pub max_u: f64,
     /// How far the blamed slide moved the seat, in mm.
     pub slide_mm: f64,
+    /// Found by the check on the EMITTED field (after the final normals and
+    /// ball growth), not by the footprint rule's own check: no repair ran.
+    pub late: bool,
 }
 
 /// **THE TIP COVER CHECK** (lane tc, 2026-10-16): a slide must leave every
@@ -376,6 +382,11 @@ pub(crate) struct TipCover<'a> {
     /// The up-sweep's births: the local check reads the births a slid tip
     /// holds as part of its demand.
     pub births: &'a crate::births::Births,
+    /// The arms the lowering draws for a field (`adapter::drawn_arms_in`: every
+    /// move, every follow of a moved host, every drawn-line offset): the
+    /// check reads its contacts from the SETTLED field drawn this way, never
+    /// from a proposal's own lowering (review fix, 2026-10-16).
+    pub drawn: &'a dyn Fn(&[SweepStrut]) -> Vec<SweepArm>,
     /// The EXACT check, opted into (`PLINTH_EXACT_COVER=1`): the full reach
     /// walk, the field and the slid seats in, the stranded cells out
     /// ([`crate::demand_replay::stranded_by_moves`]). `None`, the default: the
@@ -611,19 +622,7 @@ enum Verdict {
     /// Refused: the slide leaves ground over air.
     OffGround,
     /// Standing: the seat's shift and the samples of its real disc.
-    Verify {
-        shift: [f64; 3],
-        samples: Vec<Sample>,
-        /// The UNGROWN ball the file gets at the moved seat ([`Slid::ungrown`]):
-        /// what the tip-cover walk roots the moved tip on ([`TipCover`]).
-        ball: ([f64; 3], f64),
-        /// Whether that ball still holds the seat the tip was placed for
-        /// ([`holds_seat`]); a slide that does is never walked.
-        holds_seat: bool,
-        /// The centre of that disc in the plane: the contact the local
-        /// tip-cover check measures from.
-        contact_xy: [f64; 2],
-    },
+    Verify { shift: [f64; 3], samples: Vec<Sample> },
 }
 
 /// A tip's disc plane and the lattice laid in it.
@@ -1456,6 +1455,161 @@ pub(crate) fn contacts_keep_ground(
     kept
 }
 
+/// What the tip-cover check reads of a SETTLED field (review fix, 2026-10-16):
+/// the contacts are those of the discs the lowering draws for the field with
+/// every standing slide applied and every member following a moved host, not
+/// a proposal's own lowering (a proposal moves its seat but keeps its base,
+/// and a host's slide can then move that base).
+pub(crate) struct SettledCover {
+    /// The tips checked: every member whose drawn disc changed and whose ball
+    /// no longer holds the seat it was placed for, or that `always` names.
+    pub moved: Vec<crate::demand_replay::MovedSeat>,
+    /// Every member's drawn contact (disc centre in the plane, disc radius).
+    pub contacts: Vec<Option<([f64; 2], f64)>>,
+    /// Members with a standing slide of their own whose ball still holds
+    /// their seat (not checked).
+    pub holding: usize,
+}
+
+/// Derive [`SettledCover`] for `field` (the struts with every standing slide
+/// applied): ONE drawing of the field (`drawn`) and ONE batched
+/// [`plinth_support::tip_contact_discs`] call over the members whose arm
+/// changed from `placed_arms`.
+pub(crate) fn settled_cover(
+    field: &[SweepStrut],
+    placed_arms: &[SweepArm],
+    placed_discs: &[Option<TipContactDisc>],
+    drawn: &dyn Fn(&[SweepStrut]) -> Vec<SweepArm>,
+    layer_plan: &LayerPlan,
+    pitch: f64,
+    always: &[bool],
+) -> SettledCover {
+    let arms = drawn(field);
+    let changed: Vec<usize> = (0..arms.len().min(placed_arms.len()))
+        .filter(|&index| arms[index] != placed_arms[index])
+        .collect();
+    let picked: Vec<SweepArm> = changed.iter().map(|&index| arms[index].clone()).collect();
+    let derived = plinth_support::tip_contact_discs(&picked, layer_plan)
+        .unwrap_or_else(|_| vec![None; picked.len()]);
+    let mut finals: Vec<Option<TipContactDisc>> = placed_discs.to_vec();
+    finals.resize(field.len(), None);
+    for (&index, disc) in changed.iter().zip(derived) {
+        finals[index] = disc;
+    }
+    let contacts = finals
+        .iter()
+        .map(|disc| disc.map(|disc| ([disc.centre_mm[0], disc.centre_mm[1]], disc.radius_mm)))
+        .collect();
+    let mut moved = Vec::new();
+    let mut holding = 0;
+    for &index in &changed {
+        let (Some(placed), Some(last)) = (placed_discs.get(index).copied().flatten(), finals[index]) else {
+            continue;
+        };
+        let strut = &field[index];
+        let own = (strut.seat_face.footprint == Footprint::MovedOntoFace).then_some(strut.seat_face.shift_mm);
+        let holds = holds_seat(placed_arms[index].seat_mm, Slid::of(&last), pitch);
+        if holds && !always.get(index).copied().unwrap_or(false) {
+            holding += usize::from(own.is_some());
+            continue;
+        }
+        let shift = own.unwrap_or([0.0; 3]);
+        moved.push(crate::demand_replay::MovedSeat {
+            index,
+            xy_mm: [strut.center_mm[0] + shift[0], strut.center_mm[1] + shift[1]],
+            contact_radius_mm: last.radius_mm,
+            placed_ball: Some(Slid::of(&placed).ungrown()),
+            ball: Some(Slid::of(&last).ungrown()),
+            placed_contact_xy: Some([placed.centre_mm[0], placed.centre_mm[1]]),
+            contact_xy: Some([last.centre_mm[0], last.centre_mm[1]]),
+        });
+    }
+    SettledCover { moved, contacts, holding }
+}
+
+/// The cover components ([`cover_components`]) of every layer the moved tips'
+/// demand lies on, added to `cache` (one raster per layer, computed once).
+pub(crate) fn components_for(
+    grid: &Grid,
+    slices: &[Vec<SliceSolid>],
+    field: &[SweepStrut],
+    moved: &[crate::demand_replay::MovedSeat],
+    cache: &mut std::collections::BTreeMap<usize, Vec<u32>>,
+) {
+    for seat in moved {
+        let Some(strut) = field.get(seat.index) else {
+            continue;
+        };
+        let layers = std::iter::once(strut.k_top).chain(strut.held_births.iter().map(|key| key.0));
+        for layer in layers {
+            if cache.contains_key(&layer) {
+                continue;
+            }
+            if let Some(solids) = slices.get(layer) {
+                cache.insert(layer, cover_components(grid, solids));
+            }
+        }
+    }
+}
+
+/// Add to `cover.left` what the check on the EMITTED field found that the
+/// footprint rule had not already warned about (by member), flagged
+/// [`CoverShortfall::late`]; count the check.
+pub(crate) fn note_late_shortfalls(
+    grid: &Grid,
+    stranded: &[crate::demand_replay::StrandedCell],
+    cover: &mut TipCoverOutcome,
+) {
+    cover.final_check = true;
+    for mut row in shortfalls(grid, stranded) {
+        if cover.left.iter().any(|known| known.arm == row.arm) {
+            continue;
+        }
+        row.late = true;
+        cover.left.push(row);
+    }
+}
+
+/// The 8-connected pieces of one layer's cover (`u32::MAX` off the cover): what
+/// the local tip-cover check reads to keep a contact from covering a cell
+/// across air ([`crate::demand_replay::stranded_locally`]).
+pub(crate) fn cover_components(grid: &Grid, solids: &[SliceSolid]) -> Vec<u32> {
+    let mut scratch = RasterScratch::new(grid);
+    let mut masks = LayerMasks::default();
+    rasterize_into(grid, solids, &mut scratch, &mut masks);
+    let (rows, cols) = (grid.rows(), grid.cols());
+    let mut labels = vec![u32::MAX; grid.cells()];
+    let mut next = 0_u32;
+    let mut stack: Vec<usize> = Vec::new();
+    for start in 0..grid.cells() {
+        if !masks.cover.get(start).copied().unwrap_or(false) || labels[start] != u32::MAX {
+            continue;
+        }
+        labels[start] = next;
+        stack.push(start);
+        while let Some(at) = stack.pop() {
+            let (row, col) = (at / cols, at % cols);
+            for dr in -1_isize..=1 {
+                for dc in -1_isize..=1 {
+                    let (Some(r), Some(c)) = (row.checked_add_signed(dr), col.checked_add_signed(dc)) else {
+                        continue;
+                    };
+                    if r >= rows || c >= cols {
+                        continue;
+                    }
+                    let near = r * cols + c;
+                    if masks.cover[near] && labels[near] == u32::MAX {
+                        labels[near] = next;
+                        stack.push(near);
+                    }
+                }
+            }
+        }
+        next += 1;
+    }
+    labels
+}
+
 /// The shortfalls a tip-cover check left, one per blamed slide: its lowest
 /// stranded layer, its surface area, the surface's centre and its worst
 /// finite potential on its lowest layer. In member order.
@@ -1490,6 +1644,7 @@ fn shortfalls(grid: &Grid, stranded: &[crate::demand_replay::StrandedCell]) -> V
                     .filter(|u| u.is_finite())
                     .fold(0.0, f64::max),
                 slide_mm: 0.0,
+                late: false,
             })
         })
         .collect()
@@ -1856,16 +2011,6 @@ pub(crate) fn apply(
     // one of the move it was accepted with.
     let mut proposal_normal: Vec<Option<[f64; 3]>> = vec![None; searches.len()];
     let mut accepted_normal: Vec<Option<[f64; 3]>> = vec![None; searches.len()];
-    // The same for the ungrown ball at the moved seat (the tip cover roots a
-    // moved tip on it).
-    let mut proposal_ball: Vec<Option<([f64; 3], f64)>> = vec![None; searches.len()];
-    let mut accepted_ball: Vec<Option<([f64; 3], f64)>> = vec![None; searches.len()];
-    // And whether that ball still holds the placed seat ([`holds_seat`]).
-    let mut proposal_holds_seat = vec![false; searches.len()];
-    let mut accepted_holds_seat = vec![false; searches.len()];
-    // And the centre of its contact disc in the plane.
-    let mut proposal_contact: Vec<Option<[f64; 2]>> = vec![None; searches.len()];
-    let mut accepted_contact: Vec<Option<[f64; 2]>> = vec![None; searches.len()];
     // THE MOVE CHECK's state: every member's drawn ends before any move, the
     // own seat moves accepted so far (by member), and which search slot, if
     // any, each member's own move belongs to.
@@ -1894,8 +2039,11 @@ pub(crate) fn apply(
     let mut is_helper = vec![false; arms.len()];
     let mut cover_spawns = 0_usize;
     // The last walk: the slid seats it was asked about and its answer.
-    type Walked = (Vec<crate::demand_replay::MovedSeat>, Vec<crate::demand_replay::StrandedCell>);
+    type Seen = (Vec<crate::demand_replay::MovedSeat>, Vec<Option<([f64; 2], f64)>>);
+    type Walked = (Seen, Vec<crate::demand_replay::StrandedCell>);
     let mut cover_last_walk: Option<Walked> = None;
+    let mut cover_components_cache: std::collections::BTreeMap<usize, Vec<u32>> =
+        std::collections::BTreeMap::new();
     // THE TIP COVER's state ([`TipCover`]): per slot, the cells (in the plane,
     // on the tip's seat layer) a slide of it once stranded, which every later
     // candidate's root must reach; whether a slide of it was ever blamed; and
@@ -1908,13 +2056,7 @@ pub(crate) fn apply(
     // it holds its seat), kept from the first time the slide is blamed; and
     // whether an ONTO-FACE slide is kept, stranding and warned, because no
     // other on-face seat covers what it stranded.
-    type Chosen = (
-        [f64; 3],
-        Option<[f64; 3]>,
-        Option<([f64; 3], f64)>,
-        bool,
-        Option<[f64; 2]>,
-    );
+    type Chosen = ([f64; 3], Option<[f64; 3]>);
     let mut cover_original: Vec<Option<Chosen>> = vec![None; searches.len()];
     let mut cover_kept = vec![false; searches.len()];
     // Each turn of this loop either ends it, or takes back, replaces or keeps
@@ -2199,9 +2341,6 @@ pub(crate) fn apply(
             Verdict::Verify {
                 shift: geom_kernel::vec3::sub(moved.seat_mm, arms[search.arm].seat_mm),
                 samples,
-                ball: Slid::of(&disc).ungrown(),
-                holds_seat: holds_seat(arms[search.arm].seat_mm, Slid::of(&disc), pitch),
-                contact_xy: [disc.centre_mm[0], disc.centre_mm[1]],
             }
         };
         let verdicts: Vec<Verdict> = if proposals.len() >= PARALLEL_MIN_TIPS {
@@ -2230,10 +2369,7 @@ pub(crate) fn apply(
                     outcome.moves_refused_off_ground += 1;
                     refused_by_limits[slot] = true;
                 }
-                Verdict::Verify { shift, samples, ball, holds_seat, contact_xy } => {
-                    proposal_ball[slot] = Some(ball);
-                    proposal_holds_seat[slot] = holds_seat;
-                    proposal_contact[slot] = Some(contact_xy);
+                Verdict::Verify { shift, samples } => {
                     let first = verify_samples.len();
                     verify_samples.extend(samples);
                     verify_span.push((first, verify_samples.len()));
@@ -2280,9 +2416,6 @@ pub(crate) fn apply(
         for (slot, shift) in admitted {
             accepted[slot] = Some(shift);
             accepted_normal[slot] = proposal_normal[slot];
-            accepted_ball[slot] = proposal_ball[slot];
-            accepted_holds_seat[slot] = proposal_holds_seat[slot];
-            accepted_contact[slot] = proposal_contact[slot];
             own_accepted[searches[slot].arm] = Some(shift);
             resolved[slot] = true;
         }
@@ -2334,72 +2467,57 @@ pub(crate) fn apply(
     let Some(tip_cover) = cover.as_mut() else {
         break;
     };
-    // Only a slide whose ball let go of its placed seat (passed by the
-    // no-climb clause alone) moves a root; the others are not walked.
-    outcome.cover.slides_holding_seat = (0..accepted.len())
-        .filter(|&slot| accepted[slot].is_some() && accepted_holds_seat[slot])
-        .count();
-    let moved: Vec<crate::demand_replay::MovedSeat> = accepted
-        .iter()
-        .enumerate()
-        // A helper is always walked: its slide is there to move its root.
-        .filter(|(slot, _)| !accepted_holds_seat[*slot] || cover_helper_of[*slot].is_some())
-        .filter_map(|(slot, shift)| {
-            let shift = (*shift)?;
-            let index = search_arms[slot];
-            let centre = struts[index].center_mm;
-            Some(crate::demand_replay::MovedSeat {
-                index,
-                xy_mm: [centre[0] + shift[0], centre[1] + shift[1]],
-                contact_radius_mm: discs[index].map_or(0.0, |disc| disc.radius_mm),
-                placed_ball: discs[index].map(|disc| Slid::of(&disc).ungrown()),
-                ball: accepted_ball[slot],
-                placed_contact_xy: discs[index].map(|disc| [disc.centre_mm[0], disc.centre_mm[1]]),
-                contact_xy: accepted_contact[slot],
-            })
-        })
-        .collect();
+    // THE SETTLED FIELD: every standing slide applied (with the normal it
+    // was accepted with) and drawn as the lowering draws it, so every member
+    // that follows a moved host follows it here too. Only a tip whose drawn
+    // ball let go of its placed seat (a slide passed by the no-climb clause
+    // alone, or a member a host's slide re-tilted that far) is checked; a
+    // helper is always checked, its slide is there to move its contact.
+    let mut field: Vec<SweepStrut> = struts.to_vec();
+    let mut always = vec![false; field.len()];
+    for (slot, shift) in accepted.iter().enumerate() {
+        let Some(shift) = shift else { continue };
+        let member = &mut field[search_arms[slot]];
+        member.seat_face.shift_mm = *shift;
+        member.seat_face.footprint = Footprint::MovedOntoFace;
+        if let Some(normal) = accepted_normal[slot] {
+            member.seat_normal = normal;
+        }
+        always[search_arms[slot]] = cover_helper_of[slot].is_some();
+    }
+    let settled = settled_cover(&field, arms, &discs, tip_cover.drawn, layer_plan, pitch, &always);
+    outcome.cover.slides_holding_seat = settled.holding;
+    let moved = settled.moved;
     if moved.is_empty() {
         break;
     }
     outcome.cover.enabled = true;
     outcome.cover.exact = tip_cover.stranded.is_some();
-    // The walk is a pure function of the field (which this rule does not
-    // change) and the slid seats: a turn that leaves the slid seats as the
-    // last walk saw them (a re-search that admitted nothing, a kept slide
-    // with no helper) reads that walk's answer again.
+    // The check is a pure function of the settled field: a turn that leaves
+    // it as the last check saw it (a re-search that admitted nothing, a kept
+    // slide with no helper) reads that answer again.
     let first_walk = cover_last_walk.is_none();
+    let key = (moved, settled.contacts);
     let stranded = match &cover_last_walk {
-        Some((seats, cells)) if *seats == moved => cells.clone(),
+        Some((seen, cells)) if *seen == key => cells.clone(),
         _ => {
             outcome.cover.checks += 1;
             let cells = match tip_cover.stranded.as_mut() {
-                Some(walk) => walk(&*struts, &moved),
+                Some(walk) => walk(&*struts, &key.0),
                 None => {
-                    // Every tip's final contact: its placed disc's centre,
-                    // or the moved one where a slide stands.
-                    let mut contacts: Vec<Option<[f64; 2]>> = discs
-                        .iter()
-                        .map(|disc| disc.map(|disc| [disc.centre_mm[0], disc.centre_mm[1]]))
-                        .collect();
-                    for (slot, shift) in accepted.iter().enumerate() {
-                        if shift.is_some() {
-                            if let Some(contact) = accepted_contact[slot] {
-                                contacts[search_arms[slot]] = Some(contact);
-                            }
-                        }
-                    }
+                    components_for(grid, slices, &field, &key.0, &mut cover_components_cache);
                     crate::demand_replay::stranded_locally(
                         grid,
-                        &*struts,
+                        &field,
                         tip_cover.births,
-                        &contacts,
-                        &moved,
+                        &key.1,
+                        &cover_components_cache,
+                        &key.0,
                         tip_cover.reach_mm,
                     )
                 }
             };
-            cover_last_walk = Some((moved.clone(), cells.clone()));
+            cover_last_walk = Some((key.clone(), cells.clone()));
             cells
         }
     };
@@ -2509,15 +2627,7 @@ pub(crate) fn apply(
         let arm = search_arms[slot];
         cover_blamed[slot] = true;
         if cover_original[slot].is_none() {
-            cover_original[slot] = accepted[slot].map(|shift| {
-                (
-                    shift,
-                    accepted_normal[slot],
-                    accepted_ball[slot],
-                    accepted_holds_seat[slot],
-                    accepted_contact[slot],
-                )
-            });
+            cover_original[slot] = accepted[slot].map(|shift| (shift, accepted_normal[slot]));
         }
         let can_search = research && searches[slot].next < searches[slot].candidates.len();
         if !section_only[arm] {
@@ -2528,13 +2638,10 @@ pub(crate) fn apply(
                 // candidate replaced it; its neighbours are tried next.
                 cover_kept[slot] = true;
                 newly_kept.push(slot);
-                if let Some((shift, normal, ball, holds, contact)) = cover_original[slot] {
+                if let Some((shift, normal)) = cover_original[slot] {
                     if accepted[slot] != Some(shift) {
                         accepted[slot] = Some(shift);
-                        accepted_contact[slot] = contact;
                         accepted_normal[slot] = normal;
-                        accepted_ball[slot] = ball;
-                        accepted_holds_seat[slot] = holds;
                         changed = true;
                     }
                 }
@@ -2638,12 +2745,6 @@ pub(crate) fn apply(
             accepted.push(None);
             proposal_normal.push(None);
             accepted_normal.push(None);
-            proposal_ball.push(None);
-            accepted_ball.push(None);
-            proposal_holds_seat.push(false);
-            accepted_holds_seat.push(false);
-            proposal_contact.push(None);
-            accepted_contact.push(None);
             refused_by_limits.push(false);
             cover_targets.push(targets.clone());
             cover_blamed.push(false);
