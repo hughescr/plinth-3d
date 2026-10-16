@@ -744,12 +744,18 @@ digest sees it.
   `probe_*` columns): the prize an exact read memo could take.
 - **Lip-seat clearance memo (lane memo, 2026-10-15).** Every bounded solid-clearance row the
   lip-seat rule sends to the kernel (scan, read-ahead, followers) is kept by its exact kernel
-  inputs and bound in a memo the plan's prefix carries beside its model surface cell
-  (`clearance_memo.rs`), so the later `apply` calls of the plan and the second-contact re-plan
-  started from that prefix answer repeats without the kernel. Work counters
+  inputs and bound in a memo the plan's prefix carries (`clearance_memo.rs`), so the later
+  `apply` calls of the plan and the second-contact re-plan started from that prefix answer
+  repeats without the kernel. The re-plan reads them against the winner's surface where the
+  prefix built it early, else against a surface rebuilt from the same mesh and policy by the
+  same deterministic builder (the seed key requires both). Work counters
   `lip_seat.memo.hits`, `lip_seat.memo.misses`, `lip_seat.memo.unkept`. The table's allocated
   bytes are held to `PLINTH_SWEEP_LIPSEAT_MEMO_BYTES` (default 128 MiB; `0` turns the memo off;
-  a smaller limit changes speed, never the output). `PLINTH_SWEEP_VERIFY_LIPSEAT=1` also
+  a smaller limit changes speed, never the output). The limit is per memo, and every admitted
+  orientation pose's sweep has its own: a growth briefly holds the old and the new table, so
+  the worst-case table peak is about N x 192 MiB for N poses in flight (about 3.4 GiB at the
+  corpus width of 16-18 poses). No corpus run has filled one yet (unkept 0; Deinonychus's whole
+  run kept 0.57 M rows). `PLINTH_SWEEP_VERIFY_LIPSEAT=1` also
   re-reads every memo hit from the kernel and panics on a difference.
 
 ## Pose-search diagnostics: `DIR/<model>.orient.json`

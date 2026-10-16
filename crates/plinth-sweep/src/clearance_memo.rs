@@ -25,17 +25,33 @@
 //! result-inert telemetry (scratch stacks, counters). So a row's answer is a
 //! function of `(surface, the 5 inputs, the bound)` alone, whatever batch
 //! carries it. [`RowKey`] holds those ten numbers by their bits, and a memo
-//! holds rows of ONE surface (below), so a key that matches is the same
-//! question, and the kept answer is the kernel's answer, bit for bit.
+//! holds rows of ONE surface geometry (below), so a key that matches is the
+//! same question, and the kept answer is the kernel's answer, bit for bit.
 //!
-//! **One surface per memo, by ownership, not by address.** The memo lives
-//! in the plan's [`crate::sweep_state::Prefix`] beside the model surface cell
-//! it reads (`model_surface`), shared by every clone of that prefix as the
-//! cell is, and it is reached only through
-//! [`crate::head_join::HeadJoinContext::clearances`], whose `surface` is that
-//! same cell. A prefix is consumed only with the mesh it was built from
-//! ([`crate::sweep_state::EditSeed::miss`]), so the P2 re-plan that starts
-//! from the winner's prefix reads the winner's surface, the very same object.
+//! **One surface geometry per memo, by ownership, not by address.** The memo
+//! lives in the plan's [`crate::sweep_state::Prefix`], shared by every clone
+//! of that prefix, and it is reached only through
+//! [`crate::head_join::HeadJoinContext::clearances`], built in
+//! `plan_after_prefix` beside that remainder's surface cell. Which surface
+//! OBJECT that cell holds depends on when the surface is built:
+//!
+//! * **Early surface** (`Prefix::surface_early`: the up-sweep needed it): the
+//!   prefix's cell is shared by every clone, so the P2 re-plan that starts
+//!   from the winner's prefix reads the winner's surface, the very same
+//!   object.
+//! * **Late surface**: `plan_after_prefix` gives each remainder a fresh,
+//!   empty cell (so a remainder starts from the cell the prefix left), and
+//!   the first lip-seat or head-join read fills it with
+//!   [`crate::head_join::build_surface`]`(mesh, surface_index_pitch_mm,
+//!   surface_index_max_bytes)`. The memo is kept across that replacement, so
+//!   P2 reads the winner's rows against a surface rebuilt, not shared. It is
+//!   an equivalent surface: the builder is deterministic (the same vertices,
+//!   triangles and config build the same index, or the same `None`), and a
+//!   prefix is consumed only with the mesh and policy it was built from
+//!   ([`crate::sweep_state::EditSeed::miss`]: the seed key holds the mesh
+//!   content, the layers, the policy incl. the surface pitch and cap, and the
+//!   holes). So every surface a memo is read against answers every row as the
+//!   first one did.
 //!
 //! # Determinism and contention
 //!
