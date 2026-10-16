@@ -1657,7 +1657,9 @@ fn moved_root_cell(
     let (row, col) = clamped_cell(grid, target);
     let own = grid.index(row, col);
     let pitch = grid.pitch_mm();
-    if cover.get(own).copied().unwrap_or(false) || !(pitch > 0.0) {
+    if cover.get(own).copied().unwrap_or(false)
+        || pitch.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+    {
         return own;
     }
     let tolerance = seat.contact_radius_mm.max(0.0) + pitch;

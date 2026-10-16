@@ -270,6 +270,13 @@ pub struct TipCoverOutcome {
     /// (contact area governs, owner ruling 2026-08-30), and what they strand
     /// is in `left`, warned by area.
     pub kept: Vec<usize>,
+    /// THE NEIGHBOUR REPAIR: tips searched to slide over the cells a kept
+    /// slide strands (each held to every rule a slide is held to, and to its
+    /// shaft not being cut), and those whose slides stand at the end, by arm.
+    /// Helpers stand only where the kept slide then strands nothing; else
+    /// every one of its helpers is taken back.
+    pub helpers_searched: usize,
+    pub helpers: Vec<usize>,
     /// Shortfalls left after every repair, one per slide: what the kept
     /// onto-face slides strand (and anything the backstop left). Emitted,
     /// and warned about by area.
@@ -335,13 +342,22 @@ pub struct CoverShortfall {
 ///    it gives up only the shaft clearance the slide bought, and the lip-seat
 ///    census warns about its shaft, as it does for every tip no slide could
 ///    clear.
-/// 3. **An ONTO-FACE slide with no replacement is kept and warned.** Its tip's
-///    disc hung off its face; undoing the slide would take contact area from
-///    the tip (on Deinonychus it left one tip with no real contact at all),
-///    and contact area governs (owner ruling 2026-08-30). The slide the rule
-///    first chose stands, and what it strands is emitted and warned about by
-///    area ([`TipCoverOutcome::left`]): the place a neighbour's slide or a new
-///    small tip would go, neither of which this rule makes.
+/// 3. **An ONTO-FACE slide with no replacement is kept, and its NEIGHBOURS
+///    are tried (a).** Its tip's disc hung off its face; undoing the slide
+///    would take contact area from the tip (on Deinonychus it left one tip
+///    with no real contact at all), and contact area governs (owner ruling
+///    2026-08-30). The slide the rule first chose stands. Every seated,
+///    unheaded tip on its face, rooted on the layer the slide strands first,
+///    whose search can reach the stranded cells, is searched as a failing tip
+///    is (and as a section tip is: its slide must not cut its shaft), with
+///    those cells as the prefilter's targets; the next walk judges them, a
+///    helper that strands its own demand is taken back like a section slide,
+///    and if the kept slide still strands anything every one of its helpers
+///    is taken back (a helper moves only where it covers).
+/// 4. **Only then is the area warned** ([`TipCoverOutcome::left`]), the slide
+///    standing. A new small tip (b) is not made here: placing one by the
+///    normal path (seat, load sizing, slenderness, heads, clearance) needs a
+///    re-plan with the area seeded as demand.
 ///
 /// Each turn ends the loop or takes back, replaces or keeps a blamed slide,
 /// and re-search stops after `passes` turns, so the check ends; it runs
@@ -1726,10 +1742,11 @@ pub(crate) fn apply(
     }
     let mut searches: Vec<Search> = Vec::with_capacity(failing.len());
     let mut lattice: Vec<Sample> = Vec::new();
-    for &arm in &failing {
-        let Some((frame, offsets, _)) = &frames[arm] else {
-            continue;
-        };
+    // One tip's search: its lattice appended to `lattice`, its candidates
+    // nearest first. Also what the tip cover's NEIGHBOUR repair searches with
+    // ([`TipCover`]), so a helper is searched exactly as a failing tip is.
+    let search_for = |arm: usize, lattice: &mut Vec<Sample>| -> Option<Search> {
+        let (frame, offsets, _) = frames[arm].as_ref()?;
         // How far the lean put the disc centre from the seat, in the plane.
         let offset = geom_kernel::vec3::sub(frame.centre, arms[arm].seat_mm);
         let normal = geom_kernel::vec3::cross(frame.e1, frame.e2);
@@ -1767,7 +1784,7 @@ pub(crate) fn apply(
             .filter(|&(u, v)| (u, v) != (0, 0))
             .collect();
         candidates.sort_by_key(|&(u, v)| (u * u + v * v, u, v));
-        searches.push(Search {
+        Some(Search {
             arm,
             half_width,
             first,
@@ -1784,17 +1801,22 @@ pub(crate) fn apply(
                 disc_radius: discs[arm].map_or(0.0, |disc| disc.radius_mm),
                 normal: frame.normal,
             },
-        });
+        })
+    };
+    for &arm in &failing {
+        if let Some(search) = search_for(arm, &mut lattice) {
+            searches.push(search);
+        }
     }
     outcome.search_samples = lattice.len();
-    let lattice_hit = graded(grid, slices, surface, &lattice, &mut outcome.layers_rasterised);
+    let mut lattice_hit = graded(grid, slices, surface, &lattice, &mut outcome.layers_rasterised);
     if crate::cancel::cancelled() {
         return outcome;
     }
     // THE GROUND EACH SEARCHED TIP HOLDS (`keeps_ground`): one window per
     // tip, wide enough for its ball moved anywhere the search may take it,
     // every layer rasterised once.
-    let windows: Vec<GroundWindow> = if ground_check {
+    let windows_for = |searches: &[Search]| -> Vec<GroundWindow> {
         let balls: Vec<([f64; 3], f64)> =
             searches.iter().map(|search| search.slid.ungrown()).collect();
         let reach: Vec<f64> = searches
@@ -1805,29 +1827,9 @@ pub(crate) fn apply(
             })
             .collect();
         ground_windows(grid, slices, plate_z, height, &balls, &reach)
-    } else {
-        Vec::new()
     };
-    let ground_of = |slot: usize| {
-        windows.get(slot).map(|window| Ground {
-            grid,
-            window,
-            plate_z,
-            height,
-        })
-    };
-    let on_lattice = |search: &Search, u: i32, v: i32| -> bool {
-        let w = search.half_width;
-        if u.abs() > w || v.abs() > w {
-            return false;
-        }
-        #[expect(
-            clippy::cast_sign_loss,
-            reason = "both terms are shifted into 0..=2W before the cast"
-        )]
-        let index = search.first + ((u + w) as usize) * ((2 * w + 1) as usize) + (v + w) as usize;
-        lattice_hit.get(index).copied().unwrap_or(false)
-    };
+    let mut windows: Vec<GroundWindow> =
+        if ground_check { windows_for(&searches) } else { Vec::new() };
 
     // ---- stage 3: nearest candidate whose rigidly moved disc is all on the
     // face; then stage 4: re-derive the moved tips' discs through the
@@ -1862,7 +1864,18 @@ pub(crate) fn apply(
         }
     }
     let mut refused_by_limits = vec![false; searches.len()];
-    let search_arms: Vec<usize> = searches.iter().map(|search| search.arm).collect();
+    let mut search_arms: Vec<usize> = searches.iter().map(|search| search.arm).collect();
+    // THE NEIGHBOUR REPAIR's state ([`TipCover`]): per slot, the kept slide a
+    // helper slot was added to cover for; per kept slot, whether its helpers
+    // were added and whether they failed; per arm, whether it is a helper.
+    // A helper is searched as a section tip is (its disc is on its face, and
+    // a slide must not cut its shaft), so `section_only` is set for it.
+    let mut cover_helper_of: Vec<Option<usize>> = vec![None; searches.len()];
+    let mut cover_helpers_added = vec![false; searches.len()];
+    let mut cover_helpers_failed = vec![false; searches.len()];
+    let mut cover_retired = vec![false; searches.len()];
+    let mut is_helper = vec![false; arms.len()];
+    let mut cover_spawns = 0_usize;
     // THE TIP COVER's state ([`TipCover`]): per slot, the cells (in the plane,
     // on the tip's seat layer) a slide of it once stranded, which every later
     // candidate's root must reach; whether a slide of it was ever blamed; and
@@ -1882,10 +1895,31 @@ pub(crate) fn apply(
     // a blamed slide; re-search passes stop after `passes` turns, and after
     // them every blamed slide is undone or kept, so the number of turns is
     // bounded. The bound below is a backstop only.
-    let cover_turns_max =
-        2 * searches.len() + cover.as_ref().map_or(0, |cover| cover.passes as usize) + 2;
+    let cover_passes_max = cover.as_ref().map_or(0, |cover| cover.passes as usize);
     let mut cover_turns = 0_usize;
     loop {
+    // Read afresh each turn: the tip cover's neighbour repair appends
+    // searches, lattice grades and ground windows between turns.
+    let ground_of = |slot: usize| {
+        windows.get(slot).map(|window| Ground {
+            grid,
+            window,
+            plate_z,
+            height,
+        })
+    };
+    let on_lattice = |search: &Search, u: i32, v: i32| -> bool {
+        let w = search.half_width;
+        if u.abs() > w || v.abs() > w {
+            return false;
+        }
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "both terms are shifted into 0..=2W before the cast"
+        )]
+        let index = search.first + ((u + w) as usize) * ((2 * w + 1) as usize) + (v + w) as usize;
+        lattice_hit.get(index).copied().unwrap_or(false)
+    };
     while !pending.is_empty() {
         if crate::cancel::cancelled() {
             return outcome;
@@ -2279,7 +2313,8 @@ pub(crate) fn apply(
     let moved: Vec<crate::demand_replay::MovedSeat> = accepted
         .iter()
         .enumerate()
-        .filter(|(slot, _)| !accepted_holds_seat[*slot])
+        // A helper is always walked: its slide is there to move its root.
+        .filter(|(slot, _)| !accepted_holds_seat[*slot] || cover_helper_of[*slot].is_some())
         .filter_map(|(slot, shift)| {
             let shift = (*shift)?;
             let index = search_arms[slot];
@@ -2326,7 +2361,8 @@ pub(crate) fn apply(
         break;
     }
     cover_turns += 1;
-    if cover_turns > cover_turns_max {
+    // Each kept slide adds its helpers once and gives them fresh passes.
+    if cover_turns > 2 * searches.len() + cover_passes_max * (1 + cover_spawns) + 4 {
         // The backstop: never expected (each turn takes a slide back). What
         // is left is emitted and warned about by area.
         outcome.cover.left = shortfalls(grid, &stranded);
@@ -2342,6 +2378,33 @@ pub(crate) fn apply(
     // would hang the tip's disc off its face again, and contact area governs
     // (owner ruling 2026-08-30), so where nothing replaces it the slide the
     // rule first chose is kept and what it strands is warned about by area.
+    let mut changed = false;
+    // A kept slide whose helpers were added and that still strands: its
+    // helpers failed (all of them or none: a helper's slide is only worth
+    // its cost if the area is covered), so their slides are taken back.
+    for kept in 0..searches.len() {
+        if !(cover_kept[kept] && cover_helpers_added[kept] && !cover_helpers_failed[kept]) {
+            continue;
+        }
+        let kept_arm = search_arms[kept];
+        if !stranded.iter().any(|cell| cell.blamed == kept_arm) {
+            continue;
+        }
+        cover_helpers_failed[kept] = true;
+        for helper in 0..searches.len() {
+            if cover_helper_of[helper] != Some(kept) {
+                continue;
+            }
+            cover_retired[helper] = true;
+            if accepted[helper].is_some() {
+                accepted[helper] = None;
+                accepted_normal[helper] = None;
+                own_accepted[search_arms[helper]] = None;
+                changed = true;
+            }
+        }
+        pending.retain(|slot| !cover_retired[*slot]);
+    }
     let mut blamed_slots: Vec<usize> = stranded
         .iter()
         .filter_map(|cell| slot_of_member.get(cell.blamed).copied())
@@ -2349,12 +2412,14 @@ pub(crate) fn apply(
             slot != usize::MAX
                 && accepted.get(slot).is_some_and(Option::is_some)
                 && !cover_kept[slot]
+                && !cover_retired[slot]
         })
         .collect();
     blamed_slots.sort_unstable();
     blamed_slots.dedup();
-    if blamed_slots.is_empty() {
-        // Only kept onto-face slides strand anything: warned by area.
+    if blamed_slots.is_empty() && !changed {
+        // Only kept onto-face slides strand anything, and their helpers were
+        // tried: warned by area.
         outcome.cover.left = shortfalls(grid, &stranded);
         for row in &mut outcome.cover.left {
             row.slide_mm = slot_of_member
@@ -2365,11 +2430,12 @@ pub(crate) fn apply(
         break;
     }
     let research = cover_passes < tip_cover.passes;
-    if research {
+    if research && !blamed_slots.is_empty() {
         cover_passes += 1;
         outcome.cover.passes += 1;
     }
-    let mut changed = false;
+    // Kept slides of this turn, whose helpers are added after the loop.
+    let mut newly_kept: Vec<usize> = Vec::new();
     for &slot in &blamed_slots {
         let arm = search_arms[slot];
         cover_blamed[slot] = true;
@@ -2384,8 +2450,9 @@ pub(crate) fn apply(
                 pending.push(slot);
             } else {
                 // Kept: back to the slide the rule first chose, if a later
-                // candidate replaced it.
+                // candidate replaced it; its neighbours are tried next.
                 cover_kept[slot] = true;
+                newly_kept.push(slot);
                 if let Some((shift, normal, ball, holds)) = cover_original[slot] {
                     if accepted[slot] != Some(shift) {
                         accepted[slot] = Some(shift);
@@ -2419,6 +2486,105 @@ pub(crate) fn apply(
             })
             .collect();
         cover_targets[slot].extend(on_seat_layer);
+    }
+    // THE NEIGHBOUR REPAIR (a): for each slide kept this turn, the tips that
+    // can root the cells it strands try to slide to cover them. A helper is a
+    // seated, unheaded arm on its face, not searched already, rooted on the
+    // layer the kept slide strands first, whose search can reach those cells
+    // (its root within one lamina's reach plus its search radius of the
+    // farthest of them). It is searched exactly as a failing tip is
+    // (`search_for`: its lattice graded, its ground window, every rule a slide
+    // is held to), and as a section tip is (a slide must not cut its shaft),
+    // with the stranded cells as the prefilter's targets; nearest first.
+    for &kept in &newly_kept {
+        let kept_arm = search_arms[kept];
+        let Some(layer) = stranded
+            .iter()
+            .filter(|cell| cell.blamed == kept_arm)
+            .map(|cell| cell.layer)
+            .min()
+        else {
+            continue;
+        };
+        let targets: Vec<[f64; 2]> = stranded
+            .iter()
+            .filter(|cell| cell.blamed == kept_arm && cell.layer == layer)
+            .map(|cell| {
+                [
+                    grid.center_x_mm(grid.col_of(cell.cell)),
+                    grid.center_y_mm(grid.row_of(cell.cell)),
+                ]
+            })
+            .collect();
+        cover_helpers_added[kept] = true;
+        let first_new = searches.len();
+        let mut chosen: Vec<(f64, Search)> = Vec::new();
+        for (arm, strut) in struts.iter().enumerate() {
+            if strut.kind != crate::StrutKind::Arm
+                || strut.head.is_some()
+                || strut.k_top != layer
+                || slot_of_member[arm] != usize::MAX
+                || strut.seat_face.footprint != Footprint::OnFace
+                || frames[arm].is_none()
+            {
+                continue;
+            }
+            let farthest = targets
+                .iter()
+                .map(|cell| (cell[0] - strut.center_mm[0]).hypot(cell[1] - strut.center_mm[1]))
+                .fold(0.0, f64::max);
+            let start = lattice.len();
+            let Some(search) = search_for(arm, &mut lattice) else {
+                continue;
+            };
+            if farthest > cover_reach + f64::from(search.half_width) * pitch {
+                lattice.truncate(start);
+                continue;
+            }
+            chosen.push((farthest, search));
+        }
+        // Graded in one pass, nearest helper first.
+        let tail = graded(grid, slices, surface, &lattice[lattice_hit.len()..], &mut outcome.layers_rasterised);
+        lattice_hit.extend(tail);
+        chosen.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.arm.cmp(&b.1.arm)));
+        let added: Vec<Search> = chosen.into_iter().map(|(_, search)| search).collect();
+        if ground_check {
+            windows.extend(windows_for(&added));
+        }
+        for search in added {
+            let slot = searches.len();
+            let arm = search.arm;
+            slot_of_member[arm] = slot;
+            search_arms.push(arm);
+            searches.push(search);
+            accepted.push(None);
+            proposal_normal.push(None);
+            accepted_normal.push(None);
+            proposal_ball.push(None);
+            accepted_ball.push(None);
+            proposal_holds_seat.push(false);
+            accepted_holds_seat.push(false);
+            refused_by_limits.push(false);
+            cover_targets.push(targets.clone());
+            cover_blamed.push(false);
+            cover_original.push(None);
+            cover_kept.push(false);
+            cover_helper_of.push(Some(kept));
+            cover_helpers_added.push(false);
+            cover_helpers_failed.push(false);
+            cover_retired.push(false);
+            section_only[arm] = true;
+            is_helper[arm] = true;
+            pending.push(slot);
+        }
+        outcome.cover.helpers_searched += searches.len() - first_new;
+        if searches.len() > first_new {
+            // The helpers get passes of their own.
+            cover_spawns += 1;
+            cover_passes = 0;
+        } else {
+            cover_helpers_failed[kept] = true;
+        }
     }
     pending.sort_unstable();
     pending.dedup();
@@ -2468,6 +2634,12 @@ pub(crate) fn apply(
     }
     }
     for (slot, blamed) in cover_blamed.iter().enumerate() {
+        if cover_helper_of[slot].is_some() {
+            if accepted[slot].is_some() {
+                outcome.cover.helpers.push(search_arms[slot]);
+            }
+            continue;
+        }
         if *blamed {
             let arm = search_arms[slot];
             match (accepted[slot].is_some(), cover_kept[slot]) {
@@ -2484,7 +2656,9 @@ pub(crate) fn apply(
         match accepted[slot] {
             Some(shift) => {
                 let length = geom_kernel::vec3::norm(shift);
-                if section_only[arm] {
+                if is_helper[arm] {
+                    // Counted in `cover.helpers`.
+                } else if section_only[arm] {
                     outcome.tips_moved_for_section += 1;
                     outcome.moved_for_section.push(struts[arm].id);
                 } else {

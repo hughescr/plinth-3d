@@ -3822,7 +3822,9 @@ fn print_sweep_disclosure(
                  section slide(s) taken back, {} re-search pass(es), {} candidate(s) passed over \
                  for not reaching the stranded cells; tips reseated on another slide that keeps \
                  the cover {:?}; section slides undone (tip kept at its placed seat) {:?}; \
-                 onto-face slides kept, stranding (warned below) {:?}",
+                 onto-face slides kept {:?}; {} neighbour tip(s) searched to cover what a kept \
+                 slide strands, and those whose slides cover it {:?}; shortfalls left (warned \
+                 below) {}",
                 cover.slides_holding_seat,
                 cover.checks,
                 cover.found_surface_mm2,
@@ -3836,6 +3838,9 @@ fn print_sweep_disclosure(
                 cover.reseated,
                 cover.undone,
                 cover.kept,
+                cover.helpers_searched,
+                cover.helpers,
+                cover.left.len(),
             );
             for found in &cover.found_by_slide {
                 println!(
@@ -3857,8 +3862,10 @@ fn print_sweep_disclosure(
                 "[sweep {model}] WARNING the {:.4} mm slide of the tip of arm {} leaves {:.4} mm2 \
                  of the model's surface from layer {} (centred at x {:.3}, y {:.3} mm) beyond the \
                  reach the placed tips gave (worst U {:.3}; 0: no root reaches it at all); the \
-                 slide put the tip's disc onto its face and no other seat on the face covers \
-                 this, so the slide stands and the area is emitted as it is",
+                 slide put the tip's disc onto its face, no other seat of that tip on the face \
+                 covers this and no neighbouring tip on the same layer can slide to cover it \
+                 (no new tip is added at this stage), so the slide stands and the area is \
+                 emitted as it is",
                 left.slide_mm,
                 left.arm,
                 left.surface_mm2,

@@ -81,9 +81,17 @@ fn arms(grid: &Grid, struts: &mut [SweepStrut]) -> Vec<SweepArm> {
 /// The footprint rule over the field with the test tip over `col`, with or
 /// without a tip-cover check.
 fn run_at(col: usize, cover: Option<TipCover<'_>>) -> (FootprintOutcome, Vec<SweepStrut>) {
+    run_field(&|grid: &Grid| field(grid, col), cover)
+}
+
+/// The footprint rule over the field `make` lays out.
+fn run_field(
+    make: &dyn Fn(&Grid) -> Vec<SweepStrut>,
+    cover: Option<TipCover<'_>>,
+) -> (FootprintOutcome, Vec<SweepStrut>) {
     let grid = grid();
     let slices = slices();
-    let mut struts = field(&grid, col);
+    let mut struts = make(&grid);
     let arms = arms(&grid, &mut struts);
     let plan = plinth_core::LayerPlan::new(0.0, vec![H; LAYERS]).expect("a uniform plan");
     let keep_out = crate::drain::DrainKeepOut::none();
@@ -300,4 +308,97 @@ fn the_repair_is_the_same_on_any_pool() {
         assert_eq!(once(8), one);
     }
     assert_eq!(once(1), one);
+}
+
+/// The neighbour field: the test tip over air (member 0), the far control
+/// (member 1), and a NEIGHBOUR on the face at x 0.525 (member 2).
+fn neighbour_field(grid: &Grid) -> Vec<SweepStrut> {
+    let mut struts = field(grid, OVER_AIR);
+    struts.push(straight(grid, 2, ROW, 30, K_TOP, TIP_RADIUS_MM));
+    struts
+}
+
+/// A scripted walk for the neighbour repair: while member 0's slide stands,
+/// the cell at `target` is stranded, blamed on member 0, unless some slid
+/// root stands within `limit` of it.
+fn covered_by_any(
+    target: [f64; 2],
+    limit: f64,
+    asked: &RefCell<Vec<Vec<MovedSeat>>>,
+) -> impl FnMut(&[SweepStrut], &[MovedSeat]) -> Vec<StrandedCell> + '_ {
+    move |_: &[SweepStrut], moved: &[MovedSeat]| {
+        asked.borrow_mut().push(moved.to_vec());
+        let grid = grid();
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a fixture coordinate inside the grid"
+        )]
+        let cell = grid.index(
+            grid.row_coord(target[1]).floor() as usize,
+            grid.col_coord(target[0]).floor() as usize,
+        );
+        let slid = moved.iter().any(|seat| seat.index == 0);
+        let covered = moved.iter().any(|seat| distance(seat.xy_mm, target) <= limit);
+        if slid && !covered {
+            vec![StrandedCell { layer: K_TOP, cell, u: 1.5, blamed: 0, surface: true }]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// Repair (a), a NEIGHBOUR: the onto-face slide strands a cell 0.3 mm past
+/// the neighbour on the face, which no seat of the slid tip reaches. The slide
+/// is kept (undoing it would hang its disc off the face), and the neighbour
+/// is searched to cover the cell: it slides the least it must, the next walk
+/// finds nothing, and nothing is left to warn. SABOTAGE: with the neighbour
+/// out of reach (the target 1.3 mm across the face from it, and further from
+/// every other tip), no helper is searched and the area is warned, the field
+/// as the rule left it.
+#[test]
+fn a_neighbour_slides_to_cover_what_a_kept_slide_strands() {
+    let plain = run_field(&neighbour_field, None).1;
+    assert_eq!(plain[0].seat_face.footprint, Footprint::MovedOntoFace, "the test tip slides");
+    assert_eq!(plain[2].seat_face.footprint, Footprint::OnFace, "the neighbour is on its face");
+    let neighbour = root(&plain[2]);
+    let limit = 0.25;
+
+    let target = [neighbour[0] + 0.3, neighbour[1]];
+    let asked = RefCell::new(Vec::new());
+    let mut walk = covered_by_any(target, limit, &asked);
+    let (outcome, struts) =
+        run_field(&neighbour_field, Some(TipCover { reach_mm: limit, passes: 2, stranded: &mut walk }));
+    let cover = &outcome.cover;
+    assert_eq!(cover.kept, vec![0], "{cover:?}");
+    assert_eq!(cover.helpers, vec![2], "{cover:?}");
+    assert!(cover.helpers_searched >= 1 && cover.left.is_empty(), "{cover:?}");
+    assert_eq!(struts[0], plain[0], "the kept slide is the one the rule chose");
+    assert_eq!(struts[2].seat_face.footprint, Footprint::MovedOntoFace, "{cover:?}");
+    assert!(distance(root(&struts[2]), target) <= limit, "{:?}", root(&struts[2]));
+    assert_eq!(struts[1], plain[1], "the far control is untouched");
+
+    let far = [neighbour[0], neighbour[1] + 1.3];
+    let asked = RefCell::new(Vec::new());
+    let mut walk = covered_by_any(far, limit, &asked);
+    let (outcome, struts) =
+        run_field(&neighbour_field, Some(TipCover { reach_mm: limit, passes: 2, stranded: &mut walk }));
+    let cover = &outcome.cover;
+    assert_eq!(cover.kept, vec![0], "{cover:?}");
+    assert!(cover.helpers.is_empty(), "{cover:?}");
+    assert_eq!(cover.left.len(), 1, "warned: {cover:?}");
+    assert_eq!(struts, plain, "nothing moved for nothing");
+
+    // A helper whose slide does not close the gap (the walk asks for a root
+    // within 0.1 mm; the nearest seat the prefilter admits stands 0.25 mm
+    // off) is taken back: helpers stand only where they cover.
+    let asked = RefCell::new(Vec::new());
+    let mut walk = covered_by_any(target, 0.1, &asked);
+    let (outcome, struts) =
+        run_field(&neighbour_field, Some(TipCover { reach_mm: limit, passes: 2, stranded: &mut walk }));
+    let cover = &outcome.cover;
+    assert!(cover.helpers_searched >= 1, "a helper was searched: {cover:?}");
+    assert!(cover.helpers.is_empty(), "and taken back: {cover:?}");
+    assert_eq!(cover.left.len(), 1, "warned: {cover:?}");
+    assert_eq!(struts, plain, "the field as the rule left it");
 }
