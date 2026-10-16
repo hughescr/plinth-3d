@@ -1014,15 +1014,9 @@ pub fn run(
     }
     let settings = HollowSettings::from_request(request)?;
     let (solid, orientation) = model.into_parts();
-    // Write-only stage marks (X0, 2026-10-10); inert unless `--perf` is on.
-    let shell_mark = geom_kernel::perf::stage("hollow.create_shell");
-    let candidate = match create_shell_recording_repair(
-        solid.clone(),
-        settings,
-        H0AdmissionLimits::production(),
-    ) {
-        Ok(candidate) => candidate,
-        Err(failure) => {
+    let drilled = match shell_and_drill(&solid, settings)? {
+        ShellRoute::Drilled(drilled) => *drilled,
+        ShellRoute::ShellFailed(failure) => {
             let _convert_mark = geom_kernel::perf::stage("hollow.convert_to_solid");
             return convert_shell_failure_to_solid(
                 solid,
@@ -1031,6 +1025,66 @@ pub fn run(
                 settings.wall_thickness_mm(),
             );
         }
+    };
+    let reserve_history = orientation;
+    let hollowed = drilled.into_hollowed_model(reserve_history.clone());
+    Ok(HollowStageOutput::AwaitingInternalSupport(Box::new(
+        HollowedWithSolidReserve {
+            hollowed,
+            reserve_mesh: solid,
+            reserve_history,
+        },
+    )))
+}
+
+/// The drilled shell [`run`] would hand on for this oriented solid, or `None`
+/// when [`run`] would not hollow it (any solid decision, any error).
+///
+/// **Hollow first** (lane hf, 2026-10-16): the orientation search prices each
+/// production finalist on the shell that would print in that pose. This is the
+/// same function [`run`] calls, on the same oriented solid, so the shell, its
+/// drains and its vents are bit-for-bit the ones [`run`] makes if that pose
+/// wins; the winner-plan reuse key then compares them rather than trusting it.
+#[must_use]
+pub fn drilled_shell_for_pose(
+    solid: &Mesh,
+    request: &HollowRequest,
+) -> Option<drilling::HollowedAndDrilled> {
+    let constants = m0_constants().ok()?;
+    if &request.printer != constants.saturn4_ultra() {
+        return None;
+    }
+    let settings = HollowSettings::from_request(request).ok()?;
+    match shell_and_drill(solid, settings).ok()? {
+        ShellRoute::Drilled(drilled) => Some(*drilled),
+        ShellRoute::ShellFailed(_) => None,
+    }
+}
+
+/// Where [`shell_and_drill`] ended when it did not fail outright.
+enum ShellRoute {
+    Drilled(Box<drilling::HollowedAndDrilled>),
+    /// The shell itself could not be built; [`run`] converts this into a solid
+    /// decision or an error ([`convert_shell_failure_to_solid`]).
+    ShellFailed(HollowStageFailure),
+}
+
+/// The pose-dependent body of [`run`]: build the shell, plan its drains and
+/// drill it. One function, so [`run`] and [`drilled_shell_for_pose`] cannot
+/// drift apart.
+fn shell_and_drill(
+    solid: &Mesh,
+    settings: HollowSettings,
+) -> Result<ShellRoute, HollowStageFailure> {
+    // Write-only stage marks (X0, 2026-10-10); inert unless `--perf` is on.
+    let shell_mark = geom_kernel::perf::stage("hollow.create_shell");
+    let candidate = match create_shell_recording_repair(
+        solid.clone(),
+        settings,
+        H0AdmissionLimits::production(),
+    ) {
+        Ok(candidate) => candidate,
+        Err(failure) => return Ok(ShellRoute::ShellFailed(failure)),
     };
     drop(shell_mark);
     // Drain planning and drilling consume the candidate, and with it the only
@@ -1057,15 +1111,7 @@ pub fn run(
         )
         .with_planned_shell(cavity)
     })?;
-    let reserve_history = orientation;
-    let hollowed = drilled.into_hollowed_model(reserve_history.clone());
-    Ok(HollowStageOutput::AwaitingInternalSupport(Box::new(
-        HollowedWithSolidReserve {
-            hollowed,
-            reserve_mesh: solid,
-            reserve_history,
-        },
-    )))
+    Ok(ShellRoute::Drilled(Box::new(drilled)))
 }
 
 /// `run`'s own failure-to-solid-decision seam, factored out so it is

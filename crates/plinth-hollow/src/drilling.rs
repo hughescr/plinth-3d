@@ -402,6 +402,16 @@ impl HollowedAndDrilled {
     pub const fn evidence(&self) -> &DrillingEvidence {
         &self.evidence
     }
+    /// Every drilled DRAIN as `(entrance, outer exit, radius)`, in the order
+    /// [`Self::into_hollowed_model`] records them as [`DrainRecord`]s (the same
+    /// filter over the same holes, and the same three fields).
+    pub fn drain_bores(&self) -> impl Iterator<Item = ([Finite; 3], [Finite; 3], Finite)> + '_ {
+        self.evidence
+            .holes
+            .iter()
+            .filter(|hole| hole.role == HoleRole::Drain)
+            .map(|hole| (hole.center_mm, hole.exact_outer_exit_mm, hole.radius_mm))
+    }
     #[cfg(test)]
     fn with_test_diagnostics(mut self, count: usize) -> Self {
         self.drain_plan.append_test_diagnostics(count);

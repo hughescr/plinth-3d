@@ -152,6 +152,7 @@ pub fn stage_policy() -> StagePolicy {
         // The legacy engine reads no sweep plan, so there is nothing to reuse.
         winner_plan_reuse: plinth_pipeline::prepare::WinnerPlanReuse::Enabled,
         exact_delicacy: false,
+        hollow_first: false,
     }
 }
 

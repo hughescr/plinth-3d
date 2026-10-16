@@ -21,6 +21,7 @@ mod cylinder_drain_ring;
 mod deinonychus_witness_spots;
 mod dual_cavity_real_pipeline;
 mod first_artifact;
+mod hollow_first;
 mod lip_seat;
 mod load_gate_area_law;
 mod load_gate_warning_mode_corpus_survey;

@@ -22,7 +22,7 @@ use plinth_hollow::HollowRequest;
 use plinth_orient::PinnedBaseline;
 use plinth_pipeline::prepare::NotHollowed;
 use plinth_pipeline::{
-    prepare, registered_decimation_budget, registered_support_request, AssumedPrintSize,
+    registered_decimation_budget, registered_support_request, AssumedPrintSize,
     ModelPreparationOutcome, ModelPreparationReport, OrientationPolicy, PipelineError,
     PipelineExitCode, PreWriteGate, PrepareReport, PrepareRequest, SupportedGeometry,
     SweepModelWarnings,
@@ -73,7 +73,13 @@ pub fn execute(selection: PrepareSelection) -> ExitCode {
         Ok(request) => request,
         Err(error) => return fail(&error),
     };
-    match prepare(request) {
+    // `--hollow-first` forces hollow first on; without it the environment
+    // (`PLINTH_HOLLOW_FIRST=1`) decides, inside the pipeline.
+    let overrides = plinth_pipeline::prepare::StageOverrides {
+        reuse: None,
+        hollow_first: selection.hollow_first.then_some(true),
+    };
+    match plinth_pipeline::prepare::prepare_with_overrides(request, overrides) {
         Ok(report) => {
             print_report(&selection, &report);
             exit_code(report.exit_code())
@@ -251,6 +257,18 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
                 "orientation table curvature on the protected proxy (default; \
                  --exact-delicacy evaluates the full mesh, slower on a dense model, \
                  and can pick a different pose)"
+            }
+        );
+    }
+    // Said only when on: with it off the report is the one it always was.
+    if selection.hollow_first || plinth_pipeline::prepare::hollow_first_from_env() {
+        println!(
+            "  hollow first orientation finalists scored on each pose's drilled shell \
+             (EXPERIMENTAL; {})",
+            if selection.hollow_first {
+                "--hollow-first"
+            } else {
+                "PLINTH_HOLLOW_FIRST=1"
             }
         );
     }

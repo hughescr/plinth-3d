@@ -59,6 +59,7 @@ mod head_hookup;
 mod head_join;
 mod heads_everywhere;
 mod high_poly_keeps_every_rung;
+mod hollow_first;
 #[cfg(feature = "slow-tests")]
 mod joint_certificate;
 mod lattice_align;

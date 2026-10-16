@@ -68,14 +68,17 @@ drains, a different shell) misses and the field is planned as today. Nothing in 
 The landing and tip scars read per-face fragility and display from the orientation face table, indexed by
 face of the oriented solid. A drilled shell has other faces. The rule:
 
-- a shell face whose three vertices are bit-equal to a solid face's (same triangle; Manifold keeps faces the
-  Boolean does not cut) takes that face's fragility and display;
-- every other face (the cavity surface, bore walls, outer faces cut again at a bore mouth) is priced
-  **0 / 0**: a seat inside the cavity or a bore is never seen and the wall there is at least the registered
-  minimum wall, not a delicate feature.
+- KEPT: a shell face whose three vertices, in winding order, are bit-equal to a solid face's (the Boolean
+  keeps every face it does not cut) takes that face's fragility and display;
+- CUT AT A MOUTH: a face that is not kept but has a vertex bit-equal to a solid vertex (an outer face the
+  drill cut again) takes the values of the solid face at those vertices that faces most nearly its way;
+- every other face (the cavity surface, bore walls) is priced **0 / 0**: a seat inside the cavity or a bore
+  is never seen and the wall there is at least the registered minimum wall, not a delicate feature.
 
-The run log prints, per pose, how many faces and how much area were mapped and unmapped, so the size of the
-rule's reach is visible. This is the one new pricing choice in the lane and needs Craig's confirmation.
+No tolerance or constant is involved: the classes are decided by vertex bits. The run log prints, per pose,
+the face count and area of each class, so the rule's reach is visible (Sphere: kept 1237 mm2 of the solid's
+1254.5 mm2; the rest of the outside is cut at the three mouths). This is the one new pricing choice in the
+lane and needs Craig's confirmation.
 
 The analytic terms (height, peel corners, the analytic down-facing fold) stay on the solid table. The burden
 (arm count) counts every arm that seats on the model, interior arms included.
@@ -92,8 +95,9 @@ suspicious (a finalist near the cut on the shell).
 ## 6. Flag
 
 `--hollow-first` (CLI) or `PLINTH_HOLLOW_FIRST=1` (environment; any other value is off). Default off.
-It reaches `StagePolicy::hollow_first`. It has effect only on `--orient dense --placement sweep` with reuse on
-(the path that retains plans). Off: every sha is develop's. On: non-hollowed models measure the solid on every
+It reaches `StagePolicy::hollow_first`. It has effect only on `--orient dense --placement sweep`. With
+`--no-cache` the finalists are still measured on their shells (so the same pose wins) and only the reuse is
+off: the seal plans the shell itself, and the file must be the same bytes. Off: every sha is develop's. On: non-hollowed models measure the solid on every
 pose (the hollow stage refuses them per pose), so they stay byte-identical.
 
 ## 7. Lane spec

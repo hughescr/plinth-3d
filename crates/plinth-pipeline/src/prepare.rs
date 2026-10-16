@@ -904,6 +904,30 @@ pub struct StagePolicy {
     /// `--exact-delicacy`: the orientation table's delicacy curvature is
     /// evaluated on the full mesh rather than by the protected proxy.
     pub exact_delicacy: bool,
+    /// HOLLOW FIRST (`--hollow-first` or `PLINTH_HOLLOW_FIRST=1`; default off):
+    /// the orientation search's production finalists are measured on the
+    /// drilled shell the hollow stage makes for each pose, so the winner's
+    /// retained plan is the hollowed plan and the seal reuses it.
+    /// OUTPUT-CHANGING for hollowed models. `docs/plans/hollow-first-2026-10-16.md`.
+    /// Work that pre-computes the hollowed final sweep beside production has
+    /// nothing to do when this is on.
+    pub hollow_first: bool,
+}
+
+/// The environment switch for [`StagePolicy::hollow_first`]: on only when
+/// `PLINTH_HOLLOW_FIRST` is exactly `1`.
+#[must_use]
+pub fn hollow_first_from_env() -> bool {
+    std::env::var_os("PLINTH_HOLLOW_FIRST").is_some_and(|value| value == "1")
+}
+
+/// Per-run stage settings a caller may set over what the request implies.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StageOverrides {
+    /// See [`prepare_with_reuse`].
+    pub reuse: Option<WinnerPlanReuse>,
+    /// `Some(true)`: hollow first (`--hollow-first`), whatever the environment.
+    pub hollow_first: Option<bool>,
 }
 
 /// Whether the plan the orientation search measured for the winning pose may be
@@ -962,6 +986,7 @@ impl StagePolicy {
                 WinnerPlanReuse::Enabled
             },
             exact_delicacy: request.exact_delicacy,
+            hollow_first: hollow_first_from_env(),
         })
     }
 }
@@ -1011,6 +1036,25 @@ pub fn prepare_with_reuse(
     request: PrepareRequest,
     reuse: Option<WinnerPlanReuse>,
 ) -> Result<PrepareReport, PipelineError> {
+    prepare_with_overrides(
+        request,
+        StageOverrides {
+            reuse,
+            hollow_first: None,
+        },
+    )
+}
+
+/// [`prepare`] with [`StageOverrides`] applied over the policy the request
+/// implies (the CLI's `--hollow-first`; the tests' reuse sabotage).
+///
+/// # Errors
+///
+/// As [`prepare`].
+pub fn prepare_with_overrides(
+    request: PrepareRequest,
+    overrides: StageOverrides,
+) -> Result<PrepareReport, PipelineError> {
     let sources = enumerate_sources(&request.input_models_dir)?;
     std::fs::create_dir_all(&request.output_dir).map_err(|source| PipelineError::OutputFolder {
         path: request.output_dir.clone(),
@@ -1018,8 +1062,11 @@ pub fn prepare_with_reuse(
     })?;
     let mut policy = StagePolicy::for_request(&request)
         .map_err(|source| PipelineError::ResourcePolicy { source })?;
-    if let Some(reuse) = reuse {
+    if let Some(reuse) = overrides.reuse {
         policy.winner_plan_reuse = reuse;
+    }
+    if let Some(hollow_first) = overrides.hollow_first {
+        policy.hollow_first = hollow_first;
     }
 
     // **`--no-orient=<list>`, matched once over the whole folder** (owner spec
@@ -1373,6 +1420,7 @@ fn prepare_one(
         policy.placement,
         policy.winner_plan_reuse,
         policy.exact_delicacy,
+        policy.hollow_first.then_some(&policy.hollow),
     );
     // The orient timer covers orientation's own compute; the wait below is not
     // part of it (it is the diagnostics' tail, charged to their own stages).
@@ -1619,6 +1667,7 @@ fn orient_model(
     placement: crate::Placement,
     reuse: WinnerPlanReuse,
     exact_delicacy: bool,
+    hollow_first: Option<&HollowRequest>,
 ) -> Result<(OrientedModel, RetainedWinner, PendingOutput), Box<OrientStop>> {
     // Why no plan comes back from the arms that retain nothing.
     let absent = if reuse == WinnerPlanReuse::Disabled {
@@ -1677,7 +1726,12 @@ fn orient_model(
             // for the pose that won is handed to the seal, which would
             // otherwise plan the same field again. The legacy engine never
             // reads a sweep plan, so it keeps the plain measurer.
-            if placement == crate::Placement::Sweep && reuse != WinnerPlanReuse::Disabled {
+            // Hollow first measures through the retaining demand even with
+            // reuse off, so `--no-cache` changes where the plan is made and
+            // never which pose is chosen.
+            if placement == crate::Placement::Sweep
+                && (reuse != WinnerPlanReuse::Disabled || hollow_first.is_some())
+            {
                 // The sabotage needs a second finalist's plan, and the race
                 // withdraws certified losers in whatever order the threads
                 // finish, so it runs with the early stop off. The winner and
@@ -1687,21 +1741,29 @@ fn orient_model(
                 } else {
                     plinth_sweep::orient_demand::RetainingSweepDemand::production()
                 };
+                // HOLLOW FIRST: each finalist is measured on its own drilled
+                // shell, so the winner's plan is the hollowed plan the seal
+                // would otherwise sweep a second time.
+                let demand = match hollow_first {
+                    Some(request) => demand.hollow_first(request.clone()),
+                    None => demand,
+                };
                 let (oriented, pending) =
                     plinth_orient::search_and_orient_deferred(decimated, &request, Some(&demand))
                         .map_err(after_search)?;
                 let take_mark = plinth_sweep::perf::stage("orient.take_winner");
-                let winner = if reuse == WinnerPlanReuse::SabotageOtherPose {
-                    demand.take_other_pose_relabelled(oriented.mesh())
-                } else {
-                    demand.take_winner(oriented.mesh())
+                let winner = match reuse {
+                    WinnerPlanReuse::SabotageOtherPose => {
+                        demand.take_other_pose_relabelled(oriented.mesh())
+                    }
+                    WinnerPlanReuse::Enabled => demand.take_winner(oriented.mesh()),
+                    WinnerPlanReuse::Disabled => {
+                        drop(demand.drain());
+                        None
+                    }
                 };
                 drop(take_mark);
-                return Ok((
-                    oriented,
-                    winner.ok_or(plinth_sweep::orient_demand::ReuseMiss::NotRetained),
-                    pending,
-                ));
+                return Ok((oriented, winner.ok_or(absent), pending));
             }
             let demand = plinth_sweep::SweepDemand::production();
             plinth_orient::search_and_orient_deferred(decimated, &request, Some(&demand))

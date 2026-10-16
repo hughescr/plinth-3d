@@ -834,6 +834,19 @@ the stage that made it. It decides nothing.
   commit tiers all score on the exact table and the cuts keep their widths. With `exact-grid`
   too, the L1 and L2 proxy meshes are not built at all; alone, the proxy rung is still built
   because the grid reads it. It CHANGES the search: use `--no-cache`.
+- **Hollow first (`--hollow-first` or `PLINTH_HOLLOW_FIRST=1`; off by default; EXPERIMENTAL,
+  output-changing for hollowed models).** Each production finalist runs the hollow stage on
+  its own oriented solid (`plinth_hollow::drilled_shell_for_pose`, the body of
+  `plinth_hollow::run`) and is swept as that drilled shell with its drains and vents; a pose
+  the hollow stage does not hollow is swept as the solid, so a model that is never hollowed
+  keeps its bytes. The scars read the table's fields carried face by face onto the shell
+  (a face kept by the Boolean takes its solid face's values; the cavity, bore walls and
+  faces cut at a mouth are priced 0). The kept plan carries its holes, and the reuse key
+  compares them bit for bit (`ReuseMiss::HolesDiffer`), so the seal emits the winner's shell
+  plan instead of sweeping the shell again. The prefilter stays on the solid. `--no-cache`
+  still scores on the shells and only moves where the plan is made. Each finalist logs one
+  `[orient-demand] hollow-first pose …` line. Design and evidence:
+  `docs/plans/hollow-first-2026-10-16.md`.
 
 ## Surface fields: parallel walks, serial oracle
 
