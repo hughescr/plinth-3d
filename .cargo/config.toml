@@ -16,3 +16,14 @@
 # See docs/development.md, "Build flags and allocator".
 [target.aarch64-apple-darwin]
 rustflags = ["-C", "target-cpu=apple-m3"]
+
+# Worker stack for every thread that cargo starts a program under, in particular rayon's global
+# pool, which the tests' bare `par_iter` calls build lazily with a 2 MiB default stack. A worker
+# that waits at a parallel region runs other queued jobs, and one of those can be a whole pose's
+# sweep (about 90 KiB of stack each), so a loaded test run could nest enough sweeps to overflow
+# 2 MiB and abort the test program. The CLI's own pool is built with 8 MiB; this gives the tests the
+# same. `geom_kernel::par::WORKER_STACK_BYTES` is that number, and
+# `rust/geom_kernel/tests/it/worker_stack.rs` fails if this line is missing or smaller.
+# Programs run outside cargo are not covered; set `RUST_MIN_STACK=8388608` for them.
+[env]
+RUST_MIN_STACK = "8388608"
