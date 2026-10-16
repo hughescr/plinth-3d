@@ -258,13 +258,21 @@ pub struct TipCoverOutcome {
     /// keeps every cell rooted (repair (a): the tip reseats itself), by arm
     /// (strut index, as the other footprint lists name them).
     pub reseated: Vec<usize>,
-    /// Tips whose slide was undone (repair (c)), by arm. A tip searched
-    /// for its section keeps its seat and the lip-seat census warns about its
-    /// shaft; a tip whose disc hung off its face keeps its seat as a
-    /// [`crate::Footprint::MoveRefused`] and is warned about.
+    /// Tips whose slide was undone (repair (c)), by arm: slides searched for
+    /// the tip's section (its disc was on its face before the slide), so the
+    /// tip keeps its placed seat and the lip-seat census warns about its
+    /// shaft. (A slide the rule of the finished field then refuses leaves the
+    /// tip as a [`crate::Footprint::MoveRefused`], warned.)
     pub undone: Vec<usize>,
-    /// Shortfalls left after every repair (never expected: undoing every
-    /// slide restores the placed field): emitted, and warned about by area.
+    /// ONTO-FACE slides (the tip's disc hung off its face before the slide)
+    /// that still strand demand and that no other on-face seat replaced, by
+    /// arm: kept, because undoing them would take contact area from the tip
+    /// (contact area governs, owner ruling 2026-08-30), and what they strand
+    /// is in `left`, warned by area.
+    pub kept: Vec<usize>,
+    /// Shortfalls left after every repair, one per slide: what the kept
+    /// onto-face slides strand (and anything the backstop left). Emitted,
+    /// and warned about by area.
     pub left: Vec<CoverShortfall>,
 }
 
@@ -315,24 +323,30 @@ pub struct CoverShortfall {
 ///
 /// # The repair, cheapest first
 ///
-/// 1. **The tip reseats itself (a).** A blamed slide is taken back and its tip
-///    goes on down its own candidate list (the nearest on-face seats first),
-///    held to every rule a slide is held to, and to one more: its root must
-///    lie within one lamina's straight reach of every cell its slide had
-///    stranded on its seat layer (a prefilter; the next walk is the judge).
-///    No resin is added and no other tip moves. Bounded by `passes`.
-/// 2. **The slide is undone (c).** A tip still blamed after the passes keeps
-///    its placed seat: exactly the cover it was placed for, at no resin. A tip
-///    moved for its section alone had its whole disc on the face, so it gives
-///    up only the shaft clearance the slide bought (the lip-seat census warns
-///    about it, as it does for every tip no slide could clear); a tip whose
-///    disc hung off its face keeps its seat as a refused move and is warned
-///    about.
+/// 1. **The tip reseats itself (a).** The blamed tip goes on down its own
+///    candidate list (the nearest on-face seats first), held to every rule a
+///    slide is held to, and to one more: its root must lie within one
+///    lamina's straight reach of every cell its slide had stranded on its
+///    seat layer (a prefilter; the next walk is the judge). No resin is added
+///    and no other tip moves. Bounded by `passes`.
+/// 2. **A SECTION slide is undone (c).** A tip moved for its section alone
+///    had its whole disc on the face before it moved, so its placed seat
+///    gives exactly the cover it was placed for at no resin and no contact;
+///    it gives up only the shaft clearance the slide bought, and the lip-seat
+///    census warns about its shaft, as it does for every tip no slide could
+///    clear.
+/// 3. **An ONTO-FACE slide with no replacement is kept and warned.** Its tip's
+///    disc hung off its face; undoing the slide would take contact area from
+///    the tip (on Deinonychus it left one tip with no real contact at all),
+///    and contact area governs (owner ruling 2026-08-30). The slide the rule
+///    first chose stands, and what it strands is emitted and warned about by
+///    area ([`TipCoverOutcome::left`]): the place a neighbour's slide or a new
+///    small tip would go, neither of which this rule makes.
 ///
-/// Each step takes back at least one slide or advances a search, so the
-/// check ends; it runs serially in slot order, so it never depends on thread
-/// timing. A field none of whose slides strands anything is left exactly as
-/// it was.
+/// Each turn ends the loop or takes back, replaces or keeps a blamed slide,
+/// and re-search stops after `passes` turns, so the check ends; it runs
+/// serially in slot order, so it never depends on thread timing. A field none
+/// of whose slides strands anything is left exactly as it was.
 pub(crate) struct TipCover<'a> {
     /// One lamina's straight reach, `κ·h`, in mm: the re-search prefilter.
     pub reach_mm: f64,
@@ -1857,10 +1871,19 @@ pub(crate) fn apply(
     let mut cover_blamed = vec![false; searches.len()];
     let mut cover_passes = 0_u32;
     let cover_reach = cover.as_ref().map_or(f64::INFINITY, |cover| cover.reach_mm);
-    // Each turn of this loop either ends it or takes back at least one slide;
-    // a taken-back slide is searched again at most `passes` times, so the
-    // number of turns is bounded. The bound below is a backstop only.
-    let cover_turns_max = searches.len() + cover.as_ref().map_or(0, |cover| cover.passes as usize) + 2;
+    // Per slot: the slide the rule first chose (shift, normal, ball, whether
+    // it holds its seat), kept from the first time the slide is blamed; and
+    // whether an ONTO-FACE slide is kept, stranding and warned, because no
+    // other on-face seat covers what it stranded.
+    type Chosen = ([f64; 3], Option<[f64; 3]>, Option<([f64; 3], f64)>, bool);
+    let mut cover_original: Vec<Option<Chosen>> = vec![None; searches.len()];
+    let mut cover_kept = vec![false; searches.len()];
+    // Each turn of this loop either ends it, or takes back, replaces or keeps
+    // a blamed slide; re-search passes stop after `passes` turns, and after
+    // them every blamed slide is undone or kept, so the number of turns is
+    // bounded. The bound below is a backstop only.
+    let cover_turns_max =
+        2 * searches.len() + cover.as_ref().map_or(0, |cover| cover.passes as usize) + 2;
     let mut cover_turns = 0_usize;
     loop {
     while !pending.is_empty() {
@@ -2309,18 +2332,36 @@ pub(crate) fn apply(
         outcome.cover.left = shortfalls(grid, &stranded);
         break;
     }
-    // Every blamed slot, in slot order: its slide is taken back; it is
-    // searched again from its next candidate while passes remain, with the
-    // cells its slide stranded on its seat layer as the prefilter's targets.
+    // Every blamed slot, in slot order, except an onto-face slide already
+    // kept: it is searched again from its next candidate while passes remain,
+    // with the cells its slide stranded on its seat layer as the prefilter's
+    // targets. A SECTION slide is taken back first (its disc was on its face
+    // before it moved, so the placed seat costs no contact): undone if the
+    // search finds nothing. An ONTO-FACE slide stands while it is searched
+    // and is replaced only by a seat that is on the face too: undoing it
+    // would hang the tip's disc off its face again, and contact area governs
+    // (owner ruling 2026-08-30), so where nothing replaces it the slide the
+    // rule first chose is kept and what it strands is warned about by area.
     let mut blamed_slots: Vec<usize> = stranded
         .iter()
         .filter_map(|cell| slot_of_member.get(cell.blamed).copied())
-        .filter(|&slot| slot != usize::MAX && accepted.get(slot).is_some_and(Option::is_some))
+        .filter(|&slot| {
+            slot != usize::MAX
+                && accepted.get(slot).is_some_and(Option::is_some)
+                && !cover_kept[slot]
+        })
         .collect();
     blamed_slots.sort_unstable();
     blamed_slots.dedup();
     if blamed_slots.is_empty() {
+        // Only kept onto-face slides strand anything: warned by area.
         outcome.cover.left = shortfalls(grid, &stranded);
+        for row in &mut outcome.cover.left {
+            row.slide_mm = slot_of_member
+                .get(row.arm)
+                .and_then(|&slot| accepted.get(slot).copied().flatten())
+                .map_or(0.0, geom_kernel::vec3::norm);
+        }
         break;
     }
     let research = cover_passes < tip_cover.passes;
@@ -2328,14 +2369,44 @@ pub(crate) fn apply(
         cover_passes += 1;
         outcome.cover.passes += 1;
     }
+    let mut changed = false;
     for &slot in &blamed_slots {
         let arm = search_arms[slot];
-        accepted[slot] = None;
-        accepted_normal[slot] = None;
-        own_accepted[arm] = None;
-        refused_by_limits[slot] = true;
         cover_blamed[slot] = true;
-        outcome.cover.slides_taken_back += 1;
+        if cover_original[slot].is_none() {
+            cover_original[slot] = accepted[slot].map(|shift| {
+                (shift, accepted_normal[slot], accepted_ball[slot], accepted_holds_seat[slot])
+            });
+        }
+        let can_search = research && searches[slot].next < searches[slot].candidates.len();
+        if !section_only[arm] {
+            if can_search {
+                pending.push(slot);
+            } else {
+                // Kept: back to the slide the rule first chose, if a later
+                // candidate replaced it.
+                cover_kept[slot] = true;
+                if let Some((shift, normal, ball, holds)) = cover_original[slot] {
+                    if accepted[slot] != Some(shift) {
+                        accepted[slot] = Some(shift);
+                        accepted_normal[slot] = normal;
+                        accepted_ball[slot] = ball;
+                        accepted_holds_seat[slot] = holds;
+                        changed = true;
+                    }
+                }
+            }
+        } else {
+            accepted[slot] = None;
+            accepted_normal[slot] = None;
+            own_accepted[arm] = None;
+            refused_by_limits[slot] = true;
+            outcome.cover.slides_taken_back += 1;
+            changed = true;
+            if can_search {
+                pending.push(slot);
+            }
+        }
         let k_top = struts[arm].k_top;
         let on_seat_layer: Vec<[f64; 2]> = stranded
             .iter()
@@ -2348,21 +2419,18 @@ pub(crate) fn apply(
             })
             .collect();
         cover_targets[slot].extend(on_seat_layer);
-        if research && searches[slot].next < searches[slot].candidates.len() {
-            pending.push(slot);
-        }
     }
     pending.sort_unstable();
     pending.dedup();
-    // A slide taken back takes back what the members joined to it followed:
-    // every slide left is judged again on the drawn ends, as `settle` does
-    // after a section take-back.
+    // A slide taken back (or put back) changes what the members joined to it
+    // follow: every slide left is judged again on the drawn ends, as `settle`
+    // does after a section take-back.
     let left: Vec<(usize, [f64; 3])> = accepted
         .iter()
         .enumerate()
         .filter_map(|(slot, shift)| shift.map(|shift| (slot, shift)))
         .collect();
-    if !left.is_empty() {
+    if changed && !left.is_empty() {
         let mut kept = vec![false; accepted.len()];
         let admitted = check_moves(
             MoveCheck {
@@ -2402,10 +2470,10 @@ pub(crate) fn apply(
     for (slot, blamed) in cover_blamed.iter().enumerate() {
         if *blamed {
             let arm = search_arms[slot];
-            if accepted[slot].is_some() {
-                outcome.cover.reseated.push(arm);
-            } else {
-                outcome.cover.undone.push(arm);
+            match (accepted[slot].is_some(), cover_kept[slot]) {
+                (true, true) => outcome.cover.kept.push(arm),
+                (true, false) => outcome.cover.reseated.push(arm),
+                (false, _) => outcome.cover.undone.push(arm),
             }
         }
     }

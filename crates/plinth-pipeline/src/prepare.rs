@@ -3819,10 +3819,10 @@ fn print_sweep_disclosure(
                  placed for (not walked); {} reach walk(s) over the slid field; the slides as \
                  first settled left {:.4} mm2 of model surface ({} cells, {} with what is built \
                  on them) beyond the placed reach, blamed on {} slide(s), worst U {:.3}; {} \
-                 slide(s) taken back, {} re-search pass(es), {} candidate(s) passed over for \
-                 not reaching the stranded cells; tips reseated on another slide that keeps the \
-                 cover {:?}; slides undone (tip kept at its placed seat) {:?}; shortfalls left \
-                 {}",
+                 section slide(s) taken back, {} re-search pass(es), {} candidate(s) passed over \
+                 for not reaching the stranded cells; tips reseated on another slide that keeps \
+                 the cover {:?}; section slides undone (tip kept at its placed seat) {:?}; \
+                 onto-face slides kept, stranding (warned below) {:?}",
                 cover.slides_holding_seat,
                 cover.checks,
                 cover.found_surface_mm2,
@@ -3835,13 +3835,13 @@ fn print_sweep_disclosure(
                 cover.candidates_refused,
                 cover.reseated,
                 cover.undone,
-                cover.left.len(),
+                cover.kept,
             );
             for found in &cover.found_by_slide {
                 println!(
                     "[sweep {model}] tip cover: the {:.4} mm slide of the tip of arm {} left \
                      {:.4} mm2 of layer {} (centred at x {:.3}, y {:.3} mm) beyond the placed \
-                     reach, worst U {:.3}; repaired as listed above",
+                     reach, worst U {:.3} (0: no root reaches it at all); handled as listed above",
                     found.slide_mm,
                     found.arm,
                     found.surface_mm2,
@@ -3854,9 +3854,12 @@ fn print_sweep_disclosure(
         }
         for left in &cover.left {
             println!(
-                "[sweep {model}] WARNING the slide of the tip of arm {} leaves {:.4} mm2 of the \
-                 model's surface at layer {} (centred at x {:.3}, y {:.3} mm) beyond the reach \
-                 of every tip (worst U {:.3}); no repair covered it, so it is emitted as it is",
+                "[sweep {model}] WARNING the {:.4} mm slide of the tip of arm {} leaves {:.4} mm2 \
+                 of the model's surface from layer {} (centred at x {:.3}, y {:.3} mm) beyond the \
+                 reach the placed tips gave (worst U {:.3}; 0: no root reaches it at all); the \
+                 slide put the tip's disc onto its face and no other seat on the face covers \
+                 this, so the slide stands and the area is emitted as it is",
+                left.slide_mm,
                 left.arm,
                 left.surface_mm2,
                 left.layer,

@@ -241,39 +241,38 @@ fn a_slide_that_strands_demand_is_reseated_where_it_covers_it() {
     assert_eq!(cover.reseated, vec![0], "{cover:?}");
     assert!(cover.undone.is_empty() && cover.left.is_empty(), "{cover:?}");
     assert_eq!(cover.found_cells, 1);
-    assert_eq!(cover.slides_taken_back, 1);
+    assert_eq!(cover.slides_taken_back, 0, "an onto-face slide stands until it is replaced");
+    assert!(cover.kept.is_empty(), "{cover:?}");
     assert_eq!(cover.checks, 2, "one walk found it, one confirmed the repair");
     assert_eq!(struts[1], plain[1], "the control tip is untouched");
 }
 
-/// Repair (c): no slide anywhere reaches the cell, so after the passes the
-/// slide is undone; the tip, whose disc hung off its face, keeps its placed
-/// seat as a refused move (warned), never a refusal of the model. SABOTAGE:
-/// with the check off the stranding slide stands (the anti-vacuity run).
+/// No other seat on the face reaches the cell: the tip's disc hung off its
+/// face before the slide, so undoing it would take contact area from the tip;
+/// the slide the rule first chose stands, the field is the unchecked one, and
+/// the stranded area is named in `left` (warned), never a refusal. The
+/// re-search ran and the walks stop. SABOTAGE: undoing the slide instead
+/// (the rule before the keep) leaves the tip `MoveRefused` with its disc
+/// hanging off the face.
 #[test]
-fn a_slide_no_reseat_can_save_is_undone() {
+fn an_onto_face_slide_no_reseat_can_save_is_kept_and_warned() {
     let (_, plain) = unchecked();
     let target = [2.9, 0.1];
     let asked = RefCell::new(Vec::new());
     let mut walk = scripted(target, 0.05, &asked);
     let (outcome, struts) = run(Some(TipCover { reach_mm: 0.05, passes: 2, stranded: &mut walk }));
     let cover = &outcome.cover;
-    assert!(
-        matches!(struts[0].seat_face.footprint, Footprint::MoveRefused { .. }),
-        "{:?} {cover:?}",
-        struts[0].seat_face.footprint
-    );
-    assert!(struts[0].seat_face.shift_mm.iter().all(|v| v.abs() < 1e-12), "the placed seat");
-    assert_eq!(cover.undone, vec![0], "{cover:?}");
-    assert!(cover.left.is_empty(), "nothing is left uncovered: {cover:?}");
-    assert!(outcome.moves_refused.iter().any(|(arm, _)| *arm == 0), "warned as a refused move");
-    // The first walk and at most one per re-search pass (here the prefilter
-    // passes over every candidate left, so none is walked); the undone field
-    // has no slide left to walk.
-    assert!((1..=1 + 2).contains(&cover.checks), "bounded by the passes: {cover:?}");
+    assert_eq!(struts, plain, "the slide the rule chose stands: {cover:?}");
+    assert_eq!(cover.kept, vec![0], "{cover:?}");
+    assert!(cover.undone.is_empty() && cover.reseated.is_empty(), "{cover:?}");
+    assert_eq!(cover.left.len(), 1, "the stranded area is warned: {cover:?}");
+    assert_eq!(cover.left[0].arm, 0);
+    assert!(cover.left[0].surface_mm2 > 0.0 && cover.left[0].slide_mm > 0.0, "{cover:?}");
     assert!(cover.candidates_refused > 0, "the re-search ran: {cover:?}");
+    // The first walk, and one after the passes to name what the kept slide
+    // strands; bounded by the passes.
+    assert!((2..=2 + 2).contains(&cover.checks), "bounded by the passes: {cover:?}");
     assert_eq!(asked.borrow().len(), cover.checks);
-    assert_eq!(struts[1], plain[1], "the control tip is untouched");
 }
 
 /// The repair does not depend on thread timing: the reseat run, on pools of
