@@ -223,7 +223,11 @@ pub struct FootprintOutcome {
 pub struct TipCoverOutcome {
     /// Whether the check ran (a field with no slide never asks it).
     pub enabled: bool,
-    /// Reach walks run over the moved field: the path hits.
+    /// Whether it was the EXACT check (the full reach walk,
+    /// `PLINTH_EXACT_COVER=1`) rather than the default LOCAL one.
+    pub exact: bool,
+    /// Checks run over the moved field (walks, in the exact check): the path
+    /// hits.
     pub checks: usize,
     /// Slides standing at the last check whose ball still holds the seat the
     /// tip was placed for (`keeps_seat`'s first clause): their roots are
@@ -369,8 +373,14 @@ pub(crate) struct TipCover<'a> {
     pub reach_mm: f64,
     /// Re-search passes before every slide still blamed is undone.
     pub passes: u32,
-    /// The walk: the field and the slid seats in, the stranded cells out.
-    pub stranded: &'a mut StrandedWalk<'a>,
+    /// The up-sweep's births: the local check reads the births a slid tip
+    /// holds as part of its demand.
+    pub births: &'a crate::births::Births,
+    /// The EXACT check, opted into (`PLINTH_EXACT_COVER=1`): the full reach
+    /// walk, the field and the slid seats in, the stranded cells out
+    /// ([`crate::demand_replay::stranded_by_moves`]). `None`, the default: the
+    /// LOCAL check ([`crate::demand_replay::stranded_locally`]).
+    pub stranded: Option<&'a mut StrandedWalk<'a>>,
 }
 
 /// The tip-cover walk ([`TipCover::stranded`]): the field and its slid seats
@@ -610,6 +620,9 @@ enum Verdict {
         /// Whether that ball still holds the seat the tip was placed for
         /// ([`holds_seat`]); a slide that does is never walked.
         holds_seat: bool,
+        /// The centre of that disc in the plane: the contact the local
+        /// tip-cover check measures from.
+        contact_xy: [f64; 2],
     },
 }
 
@@ -1850,6 +1863,9 @@ pub(crate) fn apply(
     // And whether that ball still holds the placed seat ([`holds_seat`]).
     let mut proposal_holds_seat = vec![false; searches.len()];
     let mut accepted_holds_seat = vec![false; searches.len()];
+    // And the centre of its contact disc in the plane.
+    let mut proposal_contact: Vec<Option<[f64; 2]>> = vec![None; searches.len()];
+    let mut accepted_contact: Vec<Option<[f64; 2]>> = vec![None; searches.len()];
     // THE MOVE CHECK's state: every member's drawn ends before any move, the
     // own seat moves accepted so far (by member), and which search slot, if
     // any, each member's own move belongs to.
@@ -1892,7 +1908,13 @@ pub(crate) fn apply(
     // it holds its seat), kept from the first time the slide is blamed; and
     // whether an ONTO-FACE slide is kept, stranding and warned, because no
     // other on-face seat covers what it stranded.
-    type Chosen = ([f64; 3], Option<[f64; 3]>, Option<([f64; 3], f64)>, bool);
+    type Chosen = (
+        [f64; 3],
+        Option<[f64; 3]>,
+        Option<([f64; 3], f64)>,
+        bool,
+        Option<[f64; 2]>,
+    );
     let mut cover_original: Vec<Option<Chosen>> = vec![None; searches.len()];
     let mut cover_kept = vec![false; searches.len()];
     // Each turn of this loop either ends it, or takes back, replaces or keeps
@@ -2179,6 +2201,7 @@ pub(crate) fn apply(
                 samples,
                 ball: Slid::of(&disc).ungrown(),
                 holds_seat: holds_seat(arms[search.arm].seat_mm, Slid::of(&disc), pitch),
+                contact_xy: [disc.centre_mm[0], disc.centre_mm[1]],
             }
         };
         let verdicts: Vec<Verdict> = if proposals.len() >= PARALLEL_MIN_TIPS {
@@ -2207,9 +2230,10 @@ pub(crate) fn apply(
                     outcome.moves_refused_off_ground += 1;
                     refused_by_limits[slot] = true;
                 }
-                Verdict::Verify { shift, samples, ball, holds_seat } => {
+                Verdict::Verify { shift, samples, ball, holds_seat, contact_xy } => {
                     proposal_ball[slot] = Some(ball);
                     proposal_holds_seat[slot] = holds_seat;
+                    proposal_contact[slot] = Some(contact_xy);
                     let first = verify_samples.len();
                     verify_samples.extend(samples);
                     verify_span.push((first, verify_samples.len()));
@@ -2258,6 +2282,7 @@ pub(crate) fn apply(
             accepted_normal[slot] = proposal_normal[slot];
             accepted_ball[slot] = proposal_ball[slot];
             accepted_holds_seat[slot] = proposal_holds_seat[slot];
+            accepted_contact[slot] = proposal_contact[slot];
             own_accepted[searches[slot].arm] = Some(shift);
             resolved[slot] = true;
         }
@@ -2329,6 +2354,8 @@ pub(crate) fn apply(
                 contact_radius_mm: discs[index].map_or(0.0, |disc| disc.radius_mm),
                 placed_ball: discs[index].map(|disc| Slid::of(&disc).ungrown()),
                 ball: accepted_ball[slot],
+                placed_contact_xy: discs[index].map(|disc| [disc.centre_mm[0], disc.centre_mm[1]]),
+                contact_xy: accepted_contact[slot],
             })
         })
         .collect();
@@ -2336,6 +2363,7 @@ pub(crate) fn apply(
         break;
     }
     outcome.cover.enabled = true;
+    outcome.cover.exact = tip_cover.stranded.is_some();
     // The walk is a pure function of the field (which this rule does not
     // change) and the slid seats: a turn that leaves the slid seats as the
     // last walk saw them (a re-search that admitted nothing, a kept slide
@@ -2345,7 +2373,32 @@ pub(crate) fn apply(
         Some((seats, cells)) if *seats == moved => cells.clone(),
         _ => {
             outcome.cover.checks += 1;
-            let cells = (tip_cover.stranded)(&*struts, &moved);
+            let cells = match tip_cover.stranded.as_mut() {
+                Some(walk) => walk(&*struts, &moved),
+                None => {
+                    // Every tip's final contact: its placed disc's centre,
+                    // or the moved one where a slide stands.
+                    let mut contacts: Vec<Option<[f64; 2]>> = discs
+                        .iter()
+                        .map(|disc| disc.map(|disc| [disc.centre_mm[0], disc.centre_mm[1]]))
+                        .collect();
+                    for (slot, shift) in accepted.iter().enumerate() {
+                        if shift.is_some() {
+                            if let Some(contact) = accepted_contact[slot] {
+                                contacts[search_arms[slot]] = Some(contact);
+                            }
+                        }
+                    }
+                    crate::demand_replay::stranded_locally(
+                        grid,
+                        &*struts,
+                        tip_cover.births,
+                        &contacts,
+                        &moved,
+                        tip_cover.reach_mm,
+                    )
+                }
+            };
             cover_last_walk = Some((moved.clone(), cells.clone()));
             cells
         }
@@ -2457,7 +2510,13 @@ pub(crate) fn apply(
         cover_blamed[slot] = true;
         if cover_original[slot].is_none() {
             cover_original[slot] = accepted[slot].map(|shift| {
-                (shift, accepted_normal[slot], accepted_ball[slot], accepted_holds_seat[slot])
+                (
+                    shift,
+                    accepted_normal[slot],
+                    accepted_ball[slot],
+                    accepted_holds_seat[slot],
+                    accepted_contact[slot],
+                )
             });
         }
         let can_search = research && searches[slot].next < searches[slot].candidates.len();
@@ -2469,9 +2528,10 @@ pub(crate) fn apply(
                 // candidate replaced it; its neighbours are tried next.
                 cover_kept[slot] = true;
                 newly_kept.push(slot);
-                if let Some((shift, normal, ball, holds)) = cover_original[slot] {
+                if let Some((shift, normal, ball, holds, contact)) = cover_original[slot] {
                     if accepted[slot] != Some(shift) {
                         accepted[slot] = Some(shift);
+                        accepted_contact[slot] = contact;
                         accepted_normal[slot] = normal;
                         accepted_ball[slot] = ball;
                         accepted_holds_seat[slot] = holds;
@@ -2582,6 +2642,8 @@ pub(crate) fn apply(
             accepted_ball.push(None);
             proposal_holds_seat.push(false);
             accepted_holds_seat.push(false);
+            proposal_contact.push(None);
+            accepted_contact.push(None);
             refused_by_limits.push(false);
             cover_targets.push(targets.clone());
             cover_blamed.push(false);

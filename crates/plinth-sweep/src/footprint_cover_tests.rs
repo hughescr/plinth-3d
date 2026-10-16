@@ -47,6 +47,11 @@ fn grid() -> Grid {
     lay_out_at(ORIGIN_X, 0.0, H, COLS, ROWS)
 }
 
+fn no_births() -> &'static crate::births::Births {
+    static NONE: std::sync::OnceLock<crate::births::Births> = std::sync::OnceLock::new();
+    NONE.get_or_init(crate::births::Births::none)
+}
+
 /// The slab: x 0..3, y 0..6, z 1.0..1.5.
 fn slab() -> plinth_mesh::Mesh {
     // `make_box` centres x and y on the translate and stands the box on its z.
@@ -191,7 +196,7 @@ fn a_slide_that_still_holds_its_seat_is_not_walked() {
     let asked = RefCell::new(Vec::new());
     let mut walk = scripted([2.9, 0.1], 0.0, &asked);
     let (outcome, struts) =
-        run_at(OVER_EDGE, Some(TipCover { reach_mm: 2.13, passes: 2, stranded: &mut walk }));
+        run_at(OVER_EDGE, Some(TipCover { reach_mm: 2.13, passes: 2, births: no_births(), stranded: Some(&mut walk) }));
     assert!(asked.borrow().is_empty(), "walked: {:?}", asked.borrow());
     assert_eq!(outcome.cover.slides_holding_seat, 1, "{:?}", outcome.cover);
     assert!(!outcome.cover.enabled && outcome.cover.checks == 0);
@@ -209,7 +214,7 @@ fn a_slide_that_keeps_its_cover_is_left_alone() {
         asked.borrow_mut().push(moved.to_vec());
         Vec::new()
     };
-    let (outcome, struts) = run(Some(TipCover { reach_mm: 2.13, passes: 2, stranded: &mut walk }));
+    let (outcome, struts) = run(Some(TipCover { reach_mm: 2.13, passes: 2, births: no_births(), stranded: Some(&mut walk) }));
     assert_eq!(asked.borrow().len(), 1, "one walk over the slid field: {:?}", outcome.cover);
     assert_eq!(asked.borrow()[0].len(), 1, "the one slid tip was walked");
     assert_eq!(struts, plain_struts, "the field is exactly the unchecked one");
@@ -238,7 +243,7 @@ fn a_slide_that_strands_demand_is_reseated_where_it_covers_it() {
     assert!(distance(landed, target) > limit, "the unchecked slide strands the target");
     let asked = RefCell::new(Vec::new());
     let mut walk = scripted(target, limit, &asked);
-    let (outcome, struts) = run(Some(TipCover { reach_mm: limit, passes: 2, stranded: &mut walk }));
+    let (outcome, struts) = run(Some(TipCover { reach_mm: limit, passes: 2, births: no_births(), stranded: Some(&mut walk) }));
     let cover = &outcome.cover;
     assert_eq!(struts[0].seat_face.footprint, Footprint::MovedOntoFace, "{cover:?}");
     assert!(
@@ -268,7 +273,7 @@ fn an_onto_face_slide_no_reseat_can_save_is_kept_and_warned() {
     let target = [2.9, 0.1];
     let asked = RefCell::new(Vec::new());
     let mut walk = scripted(target, 0.05, &asked);
-    let (outcome, struts) = run(Some(TipCover { reach_mm: 0.05, passes: 2, stranded: &mut walk }));
+    let (outcome, struts) = run(Some(TipCover { reach_mm: 0.05, passes: 2, births: no_births(), stranded: Some(&mut walk) }));
     let cover = &outcome.cover;
     assert_eq!(struts, plain, "the slide the rule chose stands: {cover:?}");
     assert_eq!(cover.kept, vec![0], "{cover:?}");
@@ -297,7 +302,7 @@ fn the_repair_is_the_same_on_any_pool() {
             let asked = RefCell::new(Vec::new());
             let mut walk = scripted(target, 0.3, &asked);
             let (outcome, struts) =
-                run(Some(TipCover { reach_mm: 0.3, passes: 2, stranded: &mut walk }));
+                run(Some(TipCover { reach_mm: 0.3, passes: 2, births: no_births(), stranded: Some(&mut walk) }));
             drop(walk);
             (format!("{outcome:?}"), struts, format!("{:?}", asked.into_inner()))
         })
@@ -368,7 +373,7 @@ fn a_neighbour_slides_to_cover_what_a_kept_slide_strands() {
     let asked = RefCell::new(Vec::new());
     let mut walk = covered_by_any(target, limit, &asked);
     let (outcome, struts) =
-        run_field(&neighbour_field, Some(TipCover { reach_mm: limit, passes: 2, stranded: &mut walk }));
+        run_field(&neighbour_field, Some(TipCover { reach_mm: limit, passes: 2, births: no_births(), stranded: Some(&mut walk) }));
     let cover = &outcome.cover;
     assert_eq!(cover.kept, vec![0], "{cover:?}");
     assert_eq!(cover.helpers, vec![2], "{cover:?}");
@@ -382,7 +387,7 @@ fn a_neighbour_slides_to_cover_what_a_kept_slide_strands() {
     let asked = RefCell::new(Vec::new());
     let mut walk = covered_by_any(far, limit, &asked);
     let (outcome, struts) =
-        run_field(&neighbour_field, Some(TipCover { reach_mm: limit, passes: 2, stranded: &mut walk }));
+        run_field(&neighbour_field, Some(TipCover { reach_mm: limit, passes: 2, births: no_births(), stranded: Some(&mut walk) }));
     let cover = &outcome.cover;
     assert_eq!(cover.kept, vec![0], "{cover:?}");
     assert!(cover.helpers.is_empty(), "{cover:?}");
@@ -395,7 +400,7 @@ fn a_neighbour_slides_to_cover_what_a_kept_slide_strands() {
     let asked = RefCell::new(Vec::new());
     let mut walk = covered_by_any(target, 0.1, &asked);
     let (outcome, struts) =
-        run_field(&neighbour_field, Some(TipCover { reach_mm: limit, passes: 2, stranded: &mut walk }));
+        run_field(&neighbour_field, Some(TipCover { reach_mm: limit, passes: 2, births: no_births(), stranded: Some(&mut walk) }));
     let cover = &outcome.cover;
     assert!(cover.helpers_searched >= 1, "a helper was searched: {cover:?}");
     assert!(cover.helpers.is_empty(), "and taken back: {cover:?}");

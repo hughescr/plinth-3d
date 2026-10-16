@@ -3815,8 +3815,8 @@ fn print_sweep_disclosure(
         let cover = &footprint.cover;
         if cover.enabled || cover.slides_holding_seat > 0 {
             println!(
-                "[sweep {model}] tip cover: {} slide(s) whose ball still holds the seat it was \
-                 placed for (not walked); {} reach walk(s) over the slid field; the slides as \
+                "[sweep {model}] tip cover ({}): {} slide(s) whose ball still holds the seat it \
+                 was placed for (not checked); {} check(s) over the slid field; the slides as \
                  first settled left {:.4} mm2 of model surface ({} cells, {} with what is built \
                  on them) beyond the placed reach, blamed on {} slide(s), worst U {:.3}; {} \
                  section slide(s) taken back, {} re-search pass(es), {} candidate(s) passed over \
@@ -3825,6 +3825,11 @@ fn print_sweep_disclosure(
                  onto-face slides kept {:?}; {} neighbour tip(s) searched to cover what a kept \
                  slide strands, and those whose slides cover it {:?}; shortfalls left (warned \
                  below) {}",
+                if cover.exact {
+                    "EXACT: the full reach walk, PLINTH_EXACT_COVER=1"
+                } else {
+                    "local: each slid tip's own demand, straight reach from the drawn contacts"
+                },
                 cover.slides_holding_seat,
                 cover.checks,
                 cover.found_surface_mm2,

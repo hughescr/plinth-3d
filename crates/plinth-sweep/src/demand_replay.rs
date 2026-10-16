@@ -1521,6 +1521,109 @@ pub(crate) struct MovedSeat {
     /// HOLDS at the seat layer moved ([`moved_root_cell`]).
     pub placed_ball: Option<([f64; 3], f64)>,
     pub ball: Option<([f64; 3], f64)>,
+    /// The centre of the contact disc the lowering draws, before and after
+    /// the slide, in the plane: where the LOCAL check measures from
+    /// ([`stranded_locally`]).
+    pub placed_contact_xy: Option<[f64; 2]>,
+    pub contact_xy: Option<[f64; 2]>,
+}
+
+/// **The local tip-cover check** (the default; lane tc, 2026-10-16): each slid
+/// tip's OWN demand, the cells it rooted when it was placed (its
+/// `covered_demand` on its seat layer, and the cells of the births it holds by
+/// footprint), held against the straight reach of one lamina (`κ·h`,
+/// 2.13 mm) from the tips' drawn contacts.
+///
+/// A cell is stranded when it lay within reach of the slid tip's PLACED
+/// contact (the disc centre the lowering drew before the slide: the one point
+/// of its contact patch, as lane unroot's `SEEDCENTRE` rooting), and lies
+/// beyond reach of the FINAL contact of every tip seated on the cell's layer
+/// (`final_contacts`, per member: the moved contact where a tip slid). The
+/// distance is the straight Euclidean length in the plane, the limit the file
+/// measurement uses. No reach walk, no carried field: it reads the assignment
+/// placement made, so it costs a few distances per demand cell.
+///
+/// What it does not see, by design: a cell the slid tip rooted only through
+/// the material under it (a carried column) or along a path longer than the
+/// straight line, and anything above the seat layer. The full walk
+/// ([`stranded_by_moves`], `PLINTH_EXACT_COVER=1`) sees all of it.
+///
+/// `u` of a stranded cell is its distance over the reach; each cell is
+/// blamed on the first moved tip (in `moved` order) whose demand holds it.
+pub(crate) fn stranded_locally(
+    grid: &Grid,
+    struts: &[SweepStrut],
+    births: &crate::births::Births,
+    final_contacts: &[Option<[f64; 2]>],
+    moved: &[MovedSeat],
+    reach_mm: f64,
+) -> Vec<StrandedCell> {
+    let mut stranded = Vec::new();
+    if reach_mm.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+        return stranded;
+    }
+    let centre = |cell: usize| [grid.center_x_mm(grid.col_of(cell)), grid.center_y_mm(grid.row_of(cell))];
+    let distance = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+    // Each moved tip's demand, in its order.
+    let demands: Vec<(&MovedSeat, Vec<(usize, usize)>)> = moved
+        .iter()
+        .filter_map(|seat| {
+            let strut = struts.get(seat.index)?;
+            let mut demand: Vec<(usize, usize)> =
+                strut.covered_demand.iter().map(|&cell| (strut.k_top, cell)).collect();
+            for &(layer, id) in &strut.held_births {
+                if let Some(birth) = births.at(layer).iter().find(|birth| birth.id == id) {
+                    demand.extend(birth.cells.iter().map(|&cell| (layer, cell)));
+                }
+            }
+            Some((seat, demand))
+        })
+        .collect();
+    // The final contacts of the tips seated on each layer asked about.
+    let mut on_layer: std::collections::BTreeMap<usize, Vec<[f64; 2]>> = std::collections::BTreeMap::new();
+    for (_, demand) in &demands {
+        for &(layer, _) in demand {
+            on_layer.entry(layer).or_insert_with(|| {
+                struts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, strut)| strut.kind == crate::StrutKind::Arm && strut.k_top == layer)
+                    .filter_map(|(index, _)| final_contacts.get(index).copied().flatten())
+                    .collect()
+            });
+        }
+    }
+    let mut seen: std::collections::BTreeSet<(usize, usize)> = std::collections::BTreeSet::new();
+    for (seat, demand) in demands {
+        let Some(placed) = seat.placed_contact_xy else {
+            continue;
+        };
+        for (layer, cell) in demand {
+            if cell >= grid.cells() || seen.contains(&(layer, cell)) {
+                continue;
+            }
+            let at = centre(cell);
+            if distance(at, placed) > reach_mm {
+                continue;
+            }
+            let nearest = on_layer
+                .get(&layer)
+                .into_iter()
+                .flatten()
+                .map(|&contact| distance(at, contact))
+                .fold(f64::INFINITY, f64::min);
+            if nearest > reach_mm {
+                seen.insert((layer, cell));
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "a distance over the reach, a few units at most, kept as the walk's f32"
+                )]
+                let u = (nearest / reach_mm) as f32;
+                stranded.push(StrandedCell { layer, cell, u, blamed: seat.index, surface: true });
+            }
+        }
+    }
+    stranded
 }
 
 /// **A demand cell a set of seat moves left unrooted** that the placed seats
@@ -2790,6 +2893,8 @@ mod tests {
                 contact_radius_mm: 0.1,
                 placed_ball: None,
                 ball: None,
+                placed_contact_xy: None,
+                contact_xy: None,
             }];
         (stranded_by_moves(&context, &struts, &moved), grid)
     }
@@ -2871,8 +2976,59 @@ mod tests {
             contact_radius_mm: 0.1,
             placed_ball: ball,
             ball,
+            placed_contact_xy: None,
+            contact_xy: None,
         }];
         let stranded = stranded_by_moves(&context, &struts, &moved);
+        assert!(stranded.is_empty(), "{stranded:?}");
+    }
+
+    // ---- the LOCAL check (the default) -------------------------------------
+
+    use super::stranded_locally;
+
+    /// `S1`'s arms at x 0.9 and 3.1 on layer 20; the second was assigned the
+    /// cells at x 3.0 and 3.9 when it was placed, and its contact slides from
+    /// x 3.1 to `to_x`. Hand-derived, Euclidean in the plane.
+    fn local(to_x: f64) -> (Vec<StrandedCell>, Grid) {
+        let (grid, _) = plan_grid(0.0, -0.5, 4.0, 0.5, LAYERS, H, 1.0, u64::MAX);
+        let mut struts = vec![arm(&grid, 0, 0.9, 20), arm(&grid, 1, 3.1, 20)];
+        struts[1].covered_demand = vec![cell_at(&grid, 3.0, 0.0), cell_at(&grid, 3.9, 0.0)];
+        let contact = |strut: &SweepStrut| Some(strut.center_mm);
+        let mut contacts: Vec<Option<[f64; 2]>> = struts.iter().map(contact).collect();
+        let slid = [to_x, 0.0];
+        contacts[1] = Some(slid);
+        let moved = [MovedSeat {
+            index: 1,
+            xy_mm: slid,
+            contact_radius_mm: 0.1,
+            placed_ball: None,
+            ball: None,
+            placed_contact_xy: contact(&struts[1]),
+            contact_xy: Some(slid),
+        }];
+        let births = crate::births::Births::none();
+        (stranded_locally(&grid, &struts, &births, &contacts, &moved, 2.13), grid)
+    }
+
+    /// Slid to x 1.5: the cell at x 3.9 (about 0.8 mm from the placed
+    /// contact) is 2.4 mm from the slid contact and 3.0 mm from the other
+    /// arm, past 2.13 mm, so it is stranded, blamed on the slid arm; the cell
+    /// at x 3.0 (1.5 mm from the slid contact) is not.
+    #[test]
+    fn the_local_check_strands_an_assigned_cell_the_slide_left_beyond_reach() {
+        let (stranded, grid) = local(1.5);
+        assert_eq!(stranded.len(), 1, "{stranded:?}");
+        let cell = stranded[0];
+        assert_eq!((cell.layer, cell.blamed), (20, 1));
+        assert!((grid.center_x_mm(grid.col_of(cell.cell)) - 3.9).abs() < 0.05);
+        assert!(f64::from(cell.u) > 1.0, "{cell:?}");
+    }
+
+    /// Slid only to x 3.0: both assigned cells stay in reach.
+    #[test]
+    fn the_local_check_leaves_a_slide_that_keeps_its_cells_in_reach() {
+        let (stranded, _) = local(3.0);
         assert!(stranded.is_empty(), "{stranded:?}");
     }
 }

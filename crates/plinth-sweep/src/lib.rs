@@ -1079,6 +1079,14 @@ pub struct SweepPolicy {
     /// supported is important"). **On in production.** Off only for its
     /// sabotage drill.
     pub tip_cover: bool,
+    /// Whether the tip cover uses the EXACT check, the up-sweep's full reach
+    /// walk over the slid field (`demand_replay::stranded_by_moves`), instead
+    /// of the default LOCAL check (`demand_replay::stranded_locally`: each slid
+    /// tip's own demand against one lamina's straight reach from the drawn
+    /// contacts). **Off in production**: the walk costs about one up-sweep per
+    /// slid field (214 s of a Cylinder run). `PLINTH_EXACT_COVER=1` turns it on,
+    /// for audits.
+    pub exact_cover: bool,
     /// Whether the clearance re-route also re-lands a model landing whose
     /// foot, sized for the load it passes on the sized field, does not lie
     /// wholly on the model (fix lane A 2026-10-12). **On in production.** Off
@@ -1253,6 +1261,7 @@ impl SweepPolicy {
             graze_heads: true,
             footprint_ground: true,
             tip_cover: true,
+            exact_cover: std::env::var_os("PLINTH_EXACT_COVER").is_some_and(|value| value == "1"),
             refit_model_feet: true,
             per_event_sizing: true,
             unrooted_routing: true,
@@ -4675,10 +4684,14 @@ pub(crate) fn finish(
         };
         demand_replay::stranded_by_moves(&context, struts, moved)
     };
+    // The LOCAL check by default; the full walk only where it is opted into.
+    let exact_walk: Option<&mut footprint::StrandedWalk<'_>> =
+        if policy.exact_cover { Some(&mut cover_walk) } else { None };
     let tip_cover = policy.tip_cover.then_some(footprint::TipCover {
         reach_mm: policy.kappa * height,
         passes: policy.strut_removal_passes,
-        stranded: &mut cover_walk,
+        births: &env.births,
+        stranded: exact_walk,
     });
     let footprint = footprint::apply(
         &sweep_plan.grid,
