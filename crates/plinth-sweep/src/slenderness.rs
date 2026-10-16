@@ -2221,6 +2221,8 @@ pub(crate) fn apply_ties_with_model(
     let height = context.layer_height_mm;
     let first_new = struts.len();
     let mut state = TieState::build(context, struts);
+    // S0 (traced runs only): the dry conflict probe of a judge/commit split.
+    let mut s0 = S0Ties::start();
     outcome.landing_ties_held_late = state
         .ties
         .iter()
@@ -2236,6 +2238,7 @@ pub(crate) fn apply_ties_with_model(
     // so the rounds are bounded by the same bound the remedies are.
     'rounds: for _round in 0..=context.max_struts {
         crate::perf::add(crate::PerfWork::BraceRounds, 1);
+        s0.round(struts, &state);
         let before = applied;
         let mut queued = vec![false; struts.len()];
         // BRANCHES BEFORE THEIR TRUNKS. Thickening a member raises every trunk
@@ -2275,7 +2278,7 @@ pub(crate) fn apply_ties_with_model(
             if let Some(flag) = queued.get_mut(index) {
                 *flag = false;
             }
-            for _attempt in 0..=context.max_struts {
+            for attempt in 0..=context.max_struts {
                 if crate::cancel::cancelled() {
                     return applied;
                 }
@@ -2311,6 +2314,11 @@ pub(crate) fn apply_ties_with_model(
                 // spaced; the member is measured again before the next one.
                 // A mast plans its own layer ([`mast_tie_layer`]).
                 let k = tie_layer(&run, 1, extra_ties(&run).max(1));
+                if attempt == 0 {
+                    if let Some(k) = k {
+                        s0.judge(context, struts, &state, index, k);
+                    }
+                }
                 // A FURTHER PLANE GOES TO A LAYER THE MEMBER IS ALREADY TIED
                 // AT, where that layer alone cuts the run into pieces inside
                 // the limit: its planes are then credited together there
@@ -2467,6 +2475,7 @@ pub(crate) fn apply_ties_with_model(
             break;
         }
     }
+    s0.finish(applied, struts.len());
     prune_unneeded_crosses(context, &state, struts, first_new, outcome);
     let reads = state.thicken_reads.get();
     outcome.thicken_slots_flagged += reads.flagged;
@@ -2475,6 +2484,134 @@ pub(crate) fn apply_ties_with_model(
     outcome.thicken_slots_undecided += reads.undecided;
     outcome.thicken_members_hidden += reads.hidden_members;
     applied
+}
+
+/// **S0 (p2design, 2026-10-15): the dry conflict probe of a tie judge/commit
+/// split**, traced runs only (`perf::enabled`), write-only: one
+/// `s0.tie.pass` row per pass. At each round's start every member's print is
+/// taken; each member whose first attempt of the round reaches a tie layer
+/// is "judged", and is a "conflict" when its read set (itself, its landing
+/// chain, and every shaft within the thickest brace's reach at that layer, as
+/// [`partner_candidates`] reads them) holds a member added this round or
+/// whose print changed since the round began. A judge/commit split that
+/// judged every member on the round-start field would re-judge exactly the
+/// conflicts.
+struct S0Ties {
+    on: bool,
+    started: Option<std::time::Instant>,
+    rounds: u64,
+    judged: u64,
+    conflicts: u64,
+    prints: Vec<u64>,
+}
+
+impl S0Ties {
+    fn start() -> Self {
+        let on = crate::perf::enabled();
+        Self {
+            on,
+            started: on.then(std::time::Instant::now),
+            rounds: 0,
+            judged: 0,
+            conflicts: 0,
+            prints: Vec::new(),
+        }
+    }
+
+    fn print(struts: &[SweepStrut], state: &TieState, member: usize) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        if let Some(strut) = struts.get(member) {
+            (strut.cell, strut.k_top, strut.k_bottom, &strut.path).hash(&mut hasher);
+            for radius in &strut.thickened_mm {
+                radius.to_bits().hash(&mut hasher);
+            }
+            match strut.landing {
+                Landing::Plate => 0_u8.hash(&mut hasher),
+                Landing::Model { layer } => (1_u8, layer).hash(&mut hasher),
+                Landing::Strut { id, layer } => (2_u8, id, layer).hash(&mut hasher),
+            }
+        }
+        state.ties.get(member).map_or(0, Vec::len).hash(&mut hasher);
+        if let Some(profile) = state.profiles.get(member) {
+            for radius in profile {
+                radius.to_bits().hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
+    fn round(&mut self, struts: &[SweepStrut], state: &TieState) {
+        if !self.on {
+            return;
+        }
+        self.rounds += 1;
+        self.prints = (0..struts.len()).map(|member| Self::print(struts, state, member)).collect();
+    }
+
+    fn judge(&mut self, context: &SlendernessContext<'_>, struts: &[SweepStrut], state: &TieState, member: usize, k: usize) {
+        if !self.on {
+            return;
+        }
+        self.judged += 1;
+        let changed = |at: usize| {
+            self.prints
+                .get(at)
+                .is_none_or(|&was| was != Self::print(struts, state, at))
+        };
+        let Some(strut) = struts.get(member) else {
+            return;
+        };
+        // Itself and its landing chain (a thickening raises every trunk below).
+        let mut chain = vec![member];
+        let mut at = strut;
+        while let Landing::Strut { id, .. } = at.landing {
+            let host = id as usize;
+            if chain.contains(&host) || chain.len() > struts.len() {
+                break;
+            }
+            chain.push(host);
+            let Some(next) = struts.get(host) else {
+                break;
+            };
+            at = next;
+        }
+        let here = strut.cell_at(k);
+        let reach_mm = context.law.thickest_brace_reach_mm();
+        let near = struts.iter().enumerate().filter(|(_, other)| {
+            other.id != strut.id
+                && other.kind != StrutKind::Brace
+                && other.kind != StrutKind::Tie
+                && other.k_bottom != usize::MAX
+                && other.k_bottom <= k
+                && k <= other.k_top
+                && {
+                    let distance_mm = crate::cell_distance_mm(context.grid, here, other.cell_at(k));
+                    distance_mm > 0.0 && distance_mm <= reach_mm
+                }
+        });
+        let conflict = chain.iter().any(|&at| changed(at)) || near.map(|(at, _)| at).any(changed);
+        self.conflicts += u64::from(conflict);
+    }
+
+    fn finish(&self, applied: usize, members: usize) {
+        if !self.on {
+            return;
+        }
+        crate::perf::row(
+            crate::perf::Rows::TiePass,
+            &[
+                self.rounds,
+                self.judged,
+                self.conflicts,
+                crate::perf::count(applied),
+                crate::perf::count(members),
+                self.started.map_or(0, |started| {
+                    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+                }),
+            ],
+        );
+    }
 }
 
 /// A layer inside `run` at which a cross already ties the member and which,

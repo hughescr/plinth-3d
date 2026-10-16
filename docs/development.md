@@ -699,6 +699,22 @@ digest sees it.
   `perf::add` from the file that owns the site (`plinth_sweep::perf` re-exports it for
   `plinth-pipeline`). `crates/plinth-sweep/tests/it/perf_counters.rs` runs a real sweep at 1
   and 8 threads and compares the sidecars.
+- **Light mode: `PLINTH_PERF_LIGHT=1`** beside `--perf`. Counters, spans, pose frames, stage
+  marks and the light row kinds stay on; the per-batch and per-layer trace (the `clear.batch`,
+  `down.*`, `tip.batch`, `brace.partner_search` and `lip.round` rows, the reuse probe's
+  hashing, `perf.count_overhead`) and the pose-search diagnostics are off, so the stage and
+  pose times read at near-untraced speed (a full `--perf` run overstates the sizing about
+  2.7x). `perf::enabled()` is the full-trace gate; `perf::on()` is light-or-full. The sidecar
+  says `"light": true`.
+- **P2 design measurements (S0, 2026-10-15).** Row kinds `s0.lip.apply`, `s0.lip.apply_b`,
+  `s0.lip.apply_open` (one each per `lip_seat::apply` call: jobs, rounds, commits, the driver
+  thread's time by part, the stored path tests' staleness today and under a per-cell /
+  per-member read set, boundary-2 refusals by kind, rounds by open jobs) and
+  `s0.removal.attempt` (one per removal attempt) are stored in light mode; `s0.tie.pass` (the
+  dry conflict probe of a tie judge/commit split) and `s0.member.print` (per member at nine
+  stage marks, to diff a second-contact re-plan against the winner) only in a full trace. The
+  span `s0.finish_after_publish` times what a chooser early exit would skip. The columns are
+  documented on `Rows::cols`.
 
 ## Pose-search diagnostics: `DIR/<model>.orient.json`
 

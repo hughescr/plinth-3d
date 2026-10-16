@@ -1145,6 +1145,18 @@ impl Pending {
 struct StampedIndex {
     index: ColumnHistory,
     generation: u64,
+    /// S0 (measurement only, `perf` on): the generation at which each grid
+    /// column and each member last changed, so a stale stored path test can
+    /// be graded against a per-cell / per-member read set. Never read by the
+    /// pass itself.
+    s0: Option<S0Gens>,
+}
+
+/// [`StampedIndex::s0`]: per column and per member, the generation of the
+/// last stamp that touched it.
+struct S0Gens {
+    cell: Vec<u64>,
+    strut: Vec<u64>,
 }
 
 impl StampedIndex {
@@ -1152,6 +1164,7 @@ impl StampedIndex {
         Self {
             index,
             generation: 0,
+            s0: None,
         }
     }
 
@@ -1169,7 +1182,348 @@ impl StampedIndex {
         if !skip {
             self.generation += 1;
         }
+        if let Some(gens) = self.s0.as_mut() {
+            let generation = self.generation;
+            for cell in strut.path.iter().map(|&cell| cell as usize).chain([strut.cell]) {
+                if let Some(slot) = gens.cell.get_mut(cell) {
+                    *slot = generation;
+                }
+            }
+            if let Some(slot) = gens.strut.get_mut(strut.id as usize) {
+                *slot = generation;
+            }
+        }
         self.index.stamp_strut(strut, layer_height_mm);
+    }
+
+    /// S0: mark member `member` changed at the current generation (a host a
+    /// commit landed on; its lock flag changed, which S2's read set tags).
+    fn s0_touch(&mut self, member: usize) {
+        let generation = self.generation;
+        if let Some(slot) = self.s0.as_mut().and_then(|gens| gens.strut.get_mut(member)) {
+            *slot = generation;
+        }
+    }
+
+    /// S0: whether a path test stored at `generation` for `job`'s candidate
+    /// `candidate` with answer `found` is stale under S2's read set: a column
+    /// of the mover's or a child's path, or the mover, a child or the host,
+    /// changed after it was asked.
+    fn s0_stale_fine(&self, generation: u64, job: &Pending, candidate: Candidate, found: Option<&Found>) -> bool {
+        let Some(gens) = self.s0.as_ref() else {
+            return true;
+        };
+        let after = |slot: Option<&u64>| slot.is_some_and(|&at| at > generation);
+        let host = match candidate.landing {
+            Landing::Strut { id, .. } => Some(id as usize),
+            Landing::Plate | Landing::Model { .. } => None,
+        };
+        let members = std::iter::once(job.index).chain(job.children.iter().copied()).chain(host);
+        if members.into_iter().any(|member| after(gens.strut.get(member))) {
+            return true;
+        }
+        found.is_some_and(|(path, children)| {
+            path.iter()
+                .chain(children.iter().flat_map(|(_, _, child_path)| child_path.iter()))
+                .any(|&cell| after(gens.cell.get(cell as usize)))
+        })
+    }
+}
+
+/// S0 (p2design, 2026-10-15): what one [`apply`] call's path tests and
+/// read-ahead add up on this thread, written to the `s0.lip.*` rows when the
+/// call ends. Measurement only: nothing in the pass reads it. A nested call
+/// on the same thread (a stolen pose) saves and restores its caller's tally.
+#[derive(Clone, Copy)]
+struct S0Tally {
+    propose_calls: u64,
+    propose_ns: u64,
+    window_ns: u64,
+    stale_today: u64,
+    stale_fine: u64,
+    stored_valid: u64,
+    ahead_rows: u64,
+    memo_reads: u64,
+    memo_repeats: u64,
+}
+
+impl S0Tally {
+    const ZERO: Self = Self {
+        propose_calls: 0,
+        propose_ns: 0,
+        window_ns: 0,
+        stale_today: 0,
+        stale_fine: 0,
+        stored_valid: 0,
+        ahead_rows: 0,
+        memo_reads: 0,
+        memo_repeats: 0,
+    };
+}
+
+thread_local! {
+    static S0_TALLY: std::cell::Cell<S0Tally> = const { std::cell::Cell::new(S0Tally::ZERO) };
+    /// The within-sweep memo probe (traced runs): the sweep it belongs to (its
+    /// column history's address) and the trial-read keys seen in it.
+    static S0_MEMO: std::cell::RefCell<(usize, std::collections::HashSet<u64>)> =
+        std::cell::RefCell::new((0, std::collections::HashSet::new()));
+}
+
+/// Add to this thread's [`S0Tally`]. Call only with `perf` on.
+fn s0_tally(add: impl FnOnce(&mut S0Tally)) {
+    S0_TALLY.with(|cell| {
+        let mut tally = cell.get();
+        add(&mut tally);
+        cell.set(tally);
+    });
+}
+
+/// Nanoseconds since `since`.
+fn s0_ns(since: std::time::Instant) -> u64 {
+    u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// S0, traced runs only: one mover trial read the read-ahead sends to the
+/// kernel, keyed by what the read is a function of (the mover's seat, its
+/// radius profile, the candidate and the path); counts it and whether the
+/// same key was read earlier in this sweep.
+fn s0_memo(context: &SlendernessContext<'_>, strut: &SweepStrut, arm: Option<&SweepArm>, candidate: Candidate, path: &[u32]) {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (strut.cell, strut.k_top, candidate.cell, candidate.k_bottom, path).hash(&mut hasher);
+    match candidate.landing {
+        Landing::Plate => 0_u8.hash(&mut hasher),
+        Landing::Model { layer } => (1_u8, layer).hash(&mut hasher),
+        Landing::Strut { id, layer } => (2_u8, id, layer).hash(&mut hasher),
+    }
+    if let Some(arm) = arm {
+        for radius in &arm.radius_profile_mm {
+            radius.to_bits().hash(&mut hasher);
+        }
+    }
+    let key = hasher.finish();
+    let sweep = std::ptr::from_ref(context.history) as usize;
+    let repeat = S0_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        if memo.0 != sweep {
+            memo.0 = sweep;
+            memo.1.clear();
+        }
+        !memo.1.insert(key)
+    });
+    s0_tally(|tally| {
+        tally.memo_reads += 1;
+        tally.memo_repeats += u64::from(repeat);
+    });
+}
+
+/// S0: the driver-thread parts of one [`apply`] call (`s0.lip.apply` rows).
+#[derive(Clone, Copy)]
+enum S0Part {
+    Price,
+    B1,
+    Trial,
+    Standing,
+    Ahead,
+    Follow,
+    Bites,
+    Seats,
+    B2,
+}
+
+/// S0: one [`apply`] call's own counts and part times, and the clock. Every
+/// method is one branch when `perf` is off.
+struct S0Apply {
+    on: bool,
+    started: Option<std::time::Instant>,
+    mark: Option<std::time::Instant>,
+    ns: [u64; 9],
+    saved: S0Tally,
+    rounds: u64,
+    proposals: u64,
+    b1_refused: u64,
+    longest_slot: usize,
+    longest_cands: u64,
+    longest_accept_plus1: u64,
+    cand_total: u64,
+    b2_lock: u64,
+    b2_reask: u64,
+    b2_reask_refused: u64,
+    seat_pairs: u64,
+    bite_arms: u64,
+    bite_known: u64,
+    nubs: u64,
+    by_open_rounds: [u64; 4],
+    by_open_ns: [u64; 4],
+    round_open: usize,
+    round_started: Option<std::time::Instant>,
+    refused_before: [usize; 5],
+}
+
+impl S0Apply {
+    fn start(outcome: &LipSeatOutcome) -> Self {
+        let on = crate::perf::on();
+        let now = on.then(std::time::Instant::now);
+        let saved = if on {
+            S0_TALLY.with(|cell| cell.replace(S0Tally::ZERO))
+        } else {
+            S0Tally::ZERO
+        };
+        Self {
+            on,
+            started: now,
+            mark: now,
+            ns: [0; 9],
+            saved,
+            rounds: 0,
+            proposals: 0,
+            b1_refused: 0,
+            longest_slot: usize::MAX,
+            longest_cands: 0,
+            longest_accept_plus1: 0,
+            cand_total: 0,
+            b2_lock: 0,
+            b2_reask: 0,
+            b2_reask_refused: 0,
+            seat_pairs: 0,
+            bite_arms: 0,
+            bite_known: 0,
+            nubs: 0,
+            by_open_rounds: [0; 4],
+            by_open_ns: [0; 4],
+            round_open: 0,
+            round_started: None,
+            refused_before: Self::refused(outcome),
+        }
+    }
+
+    const fn refused(outcome: &LipSeatOutcome) -> [usize; 5] {
+        [
+            outcome.candidates_refused_clearance,
+            outcome.candidates_refused_plate,
+            outcome.candidates_refused_roots,
+            outcome.candidates_refused_measured,
+            outcome.candidates_refused_slender,
+        ]
+    }
+
+    /// Charge the time since the last mark to `part`.
+    fn lap(&mut self, part: S0Part) {
+        if let Some(mark) = self.mark {
+            let now = std::time::Instant::now();
+            self.ns[part as usize] += u64::try_from(now.duration_since(mark).as_nanos()).unwrap_or(u64::MAX);
+            self.mark = Some(now);
+        }
+    }
+
+    fn jobs(&mut self, pending: &[Pending]) {
+        if !self.on {
+            return;
+        }
+        for (slot, job) in pending.iter().enumerate() {
+            let len = job.candidates.len() as u64;
+            self.cand_total += len;
+            if len > self.longest_cands {
+                self.longest_cands = len;
+                self.longest_slot = slot;
+            }
+        }
+    }
+
+    fn round_start(&mut self, open: usize) {
+        if self.on {
+            self.round_open = open;
+            self.round_started = Some(std::time::Instant::now());
+            self.rounds += 1;
+        }
+    }
+
+    fn round_end(&mut self) {
+        if let Some(started) = self.round_started.take() {
+            let bucket = match self.round_open {
+                0 | 1 => 0,
+                2 | 3 => 1,
+                4..=11 => 2,
+                _ => 3,
+            };
+            self.by_open_rounds[bucket] += 1;
+            self.by_open_ns[bucket] += s0_ns(started);
+        }
+    }
+
+    /// Write the rows and give the caller's tally back.
+    fn finish(self, clearance: bool, jobs: usize, commits: usize, outcome: &LipSeatOutcome) {
+        if !self.on {
+            return;
+        }
+        let tally = S0_TALLY.with(|cell| cell.replace(self.saved));
+        let wall = self.started.map_or(0, s0_ns);
+        let count = crate::perf::count;
+        let after = Self::refused(outcome);
+        let delta = |at: usize| count(after[at].saturating_sub(self.refused_before[at]));
+        crate::perf::row(
+            crate::perf::Rows::LipApply,
+            &[
+                u64::from(clearance),
+                count(jobs),
+                self.rounds,
+                self.proposals,
+                count(commits),
+                self.b1_refused,
+                self.cand_total,
+                self.longest_cands,
+                self.longest_accept_plus1,
+                tally.propose_calls,
+                tally.propose_ns,
+                wall,
+                self.ns[S0Part::Price as usize],
+                self.ns[S0Part::B1 as usize],
+                self.ns[S0Part::Trial as usize],
+                self.ns[S0Part::B2 as usize],
+            ],
+        );
+        crate::perf::row(
+            crate::perf::Rows::LipApplyB,
+            &[
+                self.ns[S0Part::Standing as usize],
+                self.ns[S0Part::Ahead as usize],
+                tally.window_ns,
+                self.ns[S0Part::Follow as usize],
+                self.ns[S0Part::Bites as usize],
+                self.ns[S0Part::Seats as usize],
+                tally.stale_today,
+                tally.stale_fine,
+                tally.stored_valid,
+                self.b2_lock,
+                self.b2_reask,
+                self.b2_reask_refused,
+                self.seat_pairs,
+                self.bite_arms,
+                self.bite_known,
+                tally.ahead_rows,
+            ],
+        );
+        crate::perf::row(
+            crate::perf::Rows::LipApplyOpen,
+            &[
+                self.by_open_rounds[0],
+                self.by_open_rounds[1],
+                self.by_open_rounds[2],
+                self.by_open_rounds[3],
+                self.by_open_ns[0],
+                self.by_open_ns[1],
+                self.by_open_ns[2],
+                self.by_open_ns[3],
+                delta(0),
+                delta(1),
+                delta(2),
+                delta(3),
+                delta(4),
+                self.nubs,
+                tally.memo_reads,
+                tally.memo_repeats,
+            ],
+        );
     }
 }
 
@@ -1232,6 +1586,9 @@ fn take_path_test(
     };
     match job.take_tested(ledger, at) {
         Some(tested) if tested.generation == index.generation() => {
+            if crate::perf::on() {
+                s0_tally(|tally| tally.stored_valid += 1);
+            }
             if verify_lip_seat() {
                 verify_lip_seat_reuse("round", tested.found.as_deref(), ask(job).as_ref());
             }
@@ -1240,7 +1597,17 @@ fn take_path_test(
                 .found
                 .map(|found| std::rc::Rc::try_unwrap(found).unwrap_or_else(|shared| (*shared).clone()))
         }
-        _ => ask(job),
+        Some(stale) => {
+            if crate::perf::on() {
+                let fine = index.s0_stale_fine(stale.generation, job, candidate, stale.found.as_deref());
+                s0_tally(|tally| {
+                    tally.stale_today += 1;
+                    tally.stale_fine += u64::from(fine);
+                });
+            }
+            ask(job)
+        }
+        None => ask(job),
     }
 }
 
@@ -1733,6 +2100,10 @@ fn read_movers(
     };
     let mut rows: Vec<Row> = Vec::new();
     let mut ahead_hits = 0_usize;
+    // S0 measurement gates (write-only; nothing below branches on them but
+    // the measurement itself).
+    let s0_on = crate::perf::on();
+    let traced = crate::perf::enabled();
     for (proposal, &first) in proposals.iter().zip(first_of) {
         let job = &mut pending[proposal.slot];
         if job
@@ -1746,6 +2117,9 @@ fn read_movers(
             continue;
         }
         call_bytes += trial_bytes(&trial[first]);
+        if traced {
+            s0_memo(context, &struts[job.index], arms.get(job.index), proposal.candidate, &proposal.path);
+        }
         rows.push(Row {
             slot: proposal.slot,
             at: proposal.at,
@@ -1756,6 +2130,7 @@ fn read_movers(
             at_least: at_least(standing_reads, job.index, proposal.candidate.landing),
         });
         let end = proposal.at.saturating_add(job.window).min(job.candidates.len());
+        let window_started = s0_on.then(std::time::Instant::now);
         for at in proposal.at + 1..end {
             if job.ahead.contains_key(&at) {
                 continue;
@@ -1792,6 +2167,9 @@ fn read_movers(
                 break;
             }
             call_bytes += row_bytes;
+            if traced {
+                s0_memo(context, &struts[job.index], arms.get(job.index), candidate, &found.0);
+            }
             rows.push(Row {
                 slot: proposal.slot,
                 at,
@@ -1802,8 +2180,16 @@ fn read_movers(
                 at_least: at_least(standing_reads, job.index, candidate.landing),
             });
         }
+        if let Some(started) = window_started {
+            let ns = s0_ns(started);
+            s0_tally(|tally| tally.window_ns += ns);
+        }
         let job = &mut pending[proposal.slot];
         job.window = job.window.saturating_mul(2).min(READ_AHEAD_MAX);
+    }
+    if s0_on {
+        let sent = crate::perf::count(rows.len());
+        s0_tally(|tally| tally.ahead_rows += sent);
     }
     crate::perf::add(crate::PerfWork::LipSeatMoverReads, crate::perf::count(proposals.len()));
     crate::perf::add(crate::PerfWork::LipSeatMoverReadsAhead, crate::perf::count(ahead_hits));
@@ -2006,6 +2392,7 @@ pub(crate) fn apply(
     outcome: &mut LipSeatOutcome,
 ) -> Vec<Relanding> {
     let _perf_span = crate::perf::span(crate::perf::Span::LipApply);
+    let mut s0 = S0Apply::start(outcome);
     let context = joins.slender;
     let surface = joins.surface();
     let tier = joins.clearance_mm;
@@ -2018,6 +2405,12 @@ pub(crate) fn apply(
     let mut index = ColumnHistory::new(context.grid);
     crate::congestion::stamp_all(&mut index, struts, context.layer_height_mm);
     let mut index = StampedIndex::new(index);
+    if s0.on {
+        index.s0 = Some(S0Gens {
+            cell: vec![0; context.grid.cells()],
+            strut: vec![0; struts.len()],
+        });
+    }
     // The roots on the plate, as the congestion census sizes them, on the
     // profiles the survey drew.
     let flare_factor = if context.flare_factor.is_finite() && context.flare_factor > 0.0 {
@@ -2237,6 +2630,9 @@ pub(crate) fn apply(
         });
     }
 
+    s0.jobs(&pending);
+    s0.lap(S0Part::Price);
+
     // ---- stages 2 and 3, in rounds: each pending arm's next candidate whose
     // path clears, then all of them measured by the lowering in one call.
     let mut moved: Vec<Relanding> = Vec::new();
@@ -2252,6 +2648,7 @@ pub(crate) fn apply(
         if crate::cancel::cancelled() {
             return moved;
         }
+        s0.round_start(open.len());
         let mut proposals: Vec<Proposal> = Vec::new();
         for &slot in &open {
             let job = &mut pending[slot];
@@ -2285,11 +2682,17 @@ pub(crate) fn apply(
                         });
                         break;
                     }
-                    None => outcome.candidates_refused_path += 1,
+                    None => {
+                        outcome.candidates_refused_path += 1;
+                        s0.b1_refused += 1;
+                    }
                 }
             }
         }
+        s0.proposals += proposals.len() as u64;
+        s0.lap(S0Part::B1);
         if proposals.is_empty() {
+            s0.round_end();
             break;
         }
         // Every proposal drawn as the lowering will draw it: the arm with its
@@ -2354,6 +2757,7 @@ pub(crate) fn apply(
                 )
             })
             .collect();
+        s0.lap(S0Part::Trial);
         // THE SOLID, not only the centreline: each moved member's drawn
         // segment against the model, as the head-join rule measures a moved
         // lander (the kernel's clearance, its own seat zone untested, and its
@@ -2431,6 +2835,7 @@ pub(crate) fn apply(
                 for (&member, &first) in movers.iter().zip(&first_of) {
                     before[first] = standing_reads.before(member, struts);
                 }
+                s0.lap(S0Part::Standing);
                 prefetched = read_movers(
                     &frame,
                     context,
@@ -2446,6 +2851,7 @@ pub(crate) fn apply(
                     &mut ledger,
                     &mut after,
                 );
+                s0.lap(S0Part::Ahead);
                 let clears: Vec<bool> = proposals
                     .iter()
                     .zip(&first_of)
@@ -2543,6 +2949,7 @@ pub(crate) fn apply(
                 clears
             }
         };
+        s0.lap(S0Part::Follow);
         // Every member of a proposal whose mover clears, as the lowering
         // measures its seat bite: one call for the round.
         let mut measured: Vec<Option<ShaftSeatBite>> = vec![None; rows];
@@ -2570,6 +2977,10 @@ pub(crate) fn apply(
                             .map(move |offset| group.and_then(|group| group.get(offset)).copied())
                     })
                     .collect();
+                if s0.on {
+                    s0.bite_arms += arms_read.len() as u64;
+                    s0.bite_known += known.iter().filter(|read| read.is_some()).count() as u64;
+                }
                 let bites = plinth_support::tip_shaft_seat_bites_with(&arms_read, &known, layer_plan)
                     .unwrap_or_else(|_| vec![None; arms_read.len()]);
                 if verify_lip_seat() && known.iter().any(Option::is_some) {
@@ -2586,6 +2997,7 @@ pub(crate) fn apply(
                 }
             }
         }
+        s0.lap(S0Part::Bites);
         // **Whether the standing arm's tip and the lean's tip seat**, for
         // each proposal the slenderness law refuses (the test in the loop
         // below, evaluated here on the same inputs): one batched contact read
@@ -2614,6 +3026,7 @@ pub(crate) fn apply(
         let mut seating: Vec<Option<(TipContact, TipContact)>> = vec![None; proposals.len()];
         {
             let asked: Vec<usize> = (0..proposals.len()).filter(|&at| refused_lean[at]).collect();
+            s0.seat_pairs += asked.len() as u64;
             if !asked.is_empty() {
                 let pairs: Vec<(usize, &SweepArm, &SweepArm)> = asked
                     .iter()
@@ -2630,6 +3043,7 @@ pub(crate) fn apply(
                 }
             }
         }
+        s0.lap(S0Part::Seats);
         for (at_proposal, ((proposal, &first), hidden_slots)) in
             proposals.into_iter().zip(&first_of).zip(hidden_of).enumerate()
         {
@@ -2745,6 +3159,7 @@ pub(crate) fn apply(
             // it, and 182 stood on air). `locked` is set on every new host and
             // every child already moved, so one test covers both.
             if locked[index_of] || proposal.children.iter().any(|(child, _, _)| locked[*child]) {
+                s0.b2_lock += 1;
                 continue;
             }
             // The index and the field know the moves already taken this
@@ -2775,6 +3190,7 @@ pub(crate) fn apply(
                 }
                 Some((proposal.path.clone(), proposal.children.clone()))
             } else {
+                s0.b2_reask += 1;
                 propose(
                     context,
                     &index,
@@ -2789,6 +3205,7 @@ pub(crate) fn apply(
                 *path == proposal.path && *children == proposal.children
             }) else {
                 outcome.candidates_refused_path += 1;
+                s0.b2_reask_refused += 1;
                 continue;
             };
             // **A LEAN THE SLENDERNESS LAW CANNOT HOLD IS NOT TAKEN** (Q1,
@@ -2883,6 +3300,7 @@ pub(crate) fn apply(
                     }
                     let job = &mut pending[proposal.slot];
                     job.next = job.candidates.len();
+                    s0.nubs += 1;
                     continue;
                 }
                 if keeps_arm {
@@ -2954,6 +3372,10 @@ pub(crate) fn apply(
                 if let Some(flag) = locked.get_mut(host as usize) {
                     *flag = true;
                 }
+                index.s0_touch(host as usize);
+            }
+            if proposal.slot == s0.longest_slot {
+                s0.longest_accept_plus1 = proposal.at as u64 + 1;
             }
             outcome.relanded_ids.push(id);
             outcome.arms_relanded += 1;
@@ -2971,6 +3393,8 @@ pub(crate) fn apply(
             }
         }
         open.retain(|slot| !done[*slot] && pending[*slot].next < pending[*slot].candidates.len());
+        s0.lap(S0Part::B2);
+        s0.round_end();
     }
     for (slot, job) in pending.iter().enumerate() {
         if done[slot] {
@@ -2985,6 +3409,7 @@ pub(crate) fn apply(
             }
         }
     }
+    s0.finish(trigger.is_clearance(), pending.len(), moved.len(), outcome);
     moved
 }
 
@@ -3393,6 +3818,29 @@ pub(crate) fn put_back(
 /// `None` when the parent no longer stands where the candidate found it or a
 /// path is blocked.
 fn propose(
+    context: &SlendernessContext<'_>,
+    index: &ColumnHistory,
+    struts: &[SweepStrut],
+    mover: usize,
+    candidate: Candidate,
+    children: &[usize],
+    transitive: bool,
+) -> Option<(Vec<u32>, Vec<Follow>)> {
+    // S0: every path test is counted and timed on the thread that asks it.
+    let started = crate::perf::on().then(std::time::Instant::now);
+    let answer = propose_now(context, index, struts, mover, candidate, children, transitive);
+    if let Some(started) = started {
+        let ns = s0_ns(started);
+        s0_tally(|tally| {
+            tally.propose_calls += 1;
+            tally.propose_ns += ns;
+        });
+    }
+    answer
+}
+
+/// [`propose`], unmeasured.
+fn propose_now(
     context: &SlendernessContext<'_>,
     index: &ColumnHistory,
     struts: &[SweepStrut],
