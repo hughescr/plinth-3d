@@ -119,6 +119,10 @@ pub struct SweepEnv {
     pub(crate) vents: Vec<DrainSpec>,
     pub(crate) reach: ReachSummary,
     pub(crate) unrooted: UnrootedColumns,
+    /// The up-sweep's births, shared with the prefix (written by nothing after
+    /// the up-sweep): the tip-cover walk reads them as the placement did
+    /// ([`crate::footprint::TipCover`]).
+    pub(crate) births: Arc<births::Births>,
     pub(crate) sizing: SizingPolicy,
     pub(crate) law: LeanLaw,
     pub(crate) slenderness_law: SlendernessLaw,

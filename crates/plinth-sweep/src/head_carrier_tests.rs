@@ -680,6 +680,7 @@ fn the_footprint_rule_never_slides_a_headed_arm() {
         H,
         &limits,
         false,
+        None,
         |members: &[usize], _: &[plinth_support::SweepArm], _: &[[f64; 3]]| {
             vec![[0.0, 0.0, -1.0]; members.len()]
         },

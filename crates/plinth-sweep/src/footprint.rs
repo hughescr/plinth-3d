@@ -213,7 +213,135 @@ pub struct FootprintOutcome {
     pub tips_off_face_at_rim_only: usize,
     pub layers_rasterised: usize,
     pub rounds: usize,
+    /// THE TIP COVER (lane tc, 2026-10-16): what the slides did to the
+    /// support the placed tips gave, and how it was put back ([`TipCover`]).
+    pub cover: TipCoverOutcome,
 }
+
+/// **What the tip-cover check found and did** (lane tc, 2026-10-16).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TipCoverOutcome {
+    /// Whether the check ran (a field with no slide never asks it).
+    pub enabled: bool,
+    /// Reach walks run over the moved field: the path hits.
+    pub checks: usize,
+    /// What the FIRST check found, before any repair: surface cells (a cell
+    /// whose column was not stranded one layer down), all cells including
+    /// the ones inheriting a stranded cell below, the surface area in mm², and
+    /// the slides blamed. Zero on a field whose slides all keep their cover.
+    pub found_surface_cells: usize,
+    pub found_cells: usize,
+    pub found_surface_mm2: f64,
+    pub found_slides: usize,
+    /// The largest finite potential among the found cells on each blamed
+    /// slide's lowest stranded layer (`U = 1` is the placement's 2.13 mm
+    /// reach; above it a cell carries its column's potential up and adds its
+    /// own run, which is not the reach the surface was left at). Reporting
+    /// only; zero where every such cell is out of reach altogether.
+    pub found_max_u: f64,
+    /// What the first check found, one row per blamed slide (its lowest
+    /// stranded layer, the surface area there, the patch's centre, its worst
+    /// potential). Reporting only: where the repairs happened.
+    pub found_by_slide: Vec<CoverShortfall>,
+    /// Slides taken back because the field they left stranded demand, and
+    /// candidates the re-search passed over because their root would not
+    /// reach the cells the slide had stranded (the re-search prefilter).
+    pub slides_taken_back: usize,
+    pub candidates_refused: usize,
+    /// Re-search passes run (bounded by [`TipCover::passes`]).
+    pub passes: usize,
+    /// Tips whose slide stranded demand and that found ANOTHER slide that
+    /// keeps every cell rooted (repair (a): the tip reseats itself), by arm
+    /// (strut index, as the other footprint lists name them).
+    pub reseated: Vec<usize>,
+    /// Tips whose slide was undone (repair (c)), by arm. A tip searched
+    /// for its section keeps its seat and the lip-seat census warns about its
+    /// shaft; a tip whose disc hung off its face keeps its seat as a
+    /// [`crate::Footprint::MoveRefused`] and is warned about.
+    pub undone: Vec<usize>,
+    /// Shortfalls left after every repair (never expected: undoing every
+    /// slide restores the placed field): emitted, and warned about by area.
+    pub left: Vec<CoverShortfall>,
+}
+
+/// **Demand a slide left uncovered and nothing repaired** (warned, never
+/// refused).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CoverShortfall {
+    /// The moved member blamed.
+    pub arm: usize,
+    /// The lowest layer of the patch, and its surface area (every surface
+    /// cell blamed on the slide, on any layer).
+    pub layer: usize,
+    pub surface_mm2: f64,
+    /// The centre of the patch's surface cells, in the build frame.
+    pub centre_mm: [f64; 2],
+    /// The worst finite potential on the patch's lowest layer (`U = 1` is the
+    /// reach; zero where no root reaches any of it).
+    pub max_u: f64,
+    /// How far the blamed slide moved the seat, in mm.
+    pub slide_mm: f64,
+}
+
+/// **THE TIP COVER CHECK** (lane tc, 2026-10-16): a slide must leave every
+/// demand cell the placed tips rooted still rooted by the tips as they are
+/// drawn.
+///
+/// # The defect
+///
+/// [`keeps_seat`] passes a slide that does not climb, and on a flat ceiling
+/// every slide is level, so any slide within the search radius was taken.
+/// Nothing re-ran the reach after it. On the approved Cylinder file one tip on
+/// the underside of the lid, inside the hollow, slid 1.25 mm for its section
+/// and left about 2.3 mm² of the lid's first layer up to 2.57 mm from the
+/// nearest root, past the 2.13 mm reach the tips were placed for (lane unroot,
+/// `perf-2026-10-14/unroot/RESULTS.md`).
+///
+/// # The check
+///
+/// After the slides have settled (`settle`), the up-sweep's own reach
+/// potential is walked over the field twice, placed roots against slid roots
+/// ([`crate::demand_replay::stranded_by_moves`]); every cell the placed roots
+/// rooted and the slid ones do not is blamed on the slide that was covering
+/// it. No new limit: the reach is the placement's own.
+///
+/// # The repair, cheapest first
+///
+/// 1. **The tip reseats itself (a).** A blamed slide is taken back and its tip
+///    goes on down its own candidate list (the nearest on-face seats first),
+///    held to every rule a slide is held to, and to one more: its root must
+///    lie within one lamina's straight reach of every cell its slide had
+///    stranded on its seat layer (a prefilter; the next walk is the judge).
+///    No resin is added and no other tip moves. Bounded by `passes`.
+/// 2. **The slide is undone (c).** A tip still blamed after the passes keeps
+///    its placed seat: exactly the cover it was placed for, at no resin. A tip
+///    moved for its section alone had its whole disc on the face, so it gives
+///    up only the shaft clearance the slide bought (the lip-seat census warns
+///    about it, as it does for every tip no slide could clear); a tip whose
+///    disc hung off its face keeps its seat as a refused move and is warned
+///    about.
+///
+/// Each step takes back at least one slide or advances a search, so the
+/// check ends; it runs serially in slot order, so it never depends on thread
+/// timing. A field none of whose slides strands anything is left exactly as
+/// it was.
+pub(crate) struct TipCover<'a> {
+    /// One lamina's straight reach, `κ·h`, in mm: the re-search prefilter.
+    pub reach_mm: f64,
+    /// Re-search passes before every slide still blamed is undone.
+    pub passes: u32,
+    /// The walk: the field and the slid seats in, the stranded cells out.
+    pub stranded: &'a mut StrandedWalk<'a>,
+}
+
+/// The tip-cover walk ([`TipCover::stranded`]): the field and its slid seats
+/// in, the demand cells they strand out
+/// ([`crate::demand_replay::stranded_by_moves`] in production).
+pub(crate) type StrandedWalk<'a> = dyn FnMut(
+        &[SweepStrut],
+        &[crate::demand_replay::MovedSeat],
+    ) -> Vec<crate::demand_replay::StrandedCell>
+    + 'a;
 
 /// **What a footprint move may not break** (review-fixes 2026-09-29).
 ///
@@ -417,6 +545,9 @@ struct CandidateWalk {
     /// counted) the ones refused by the ground check.
     refused_off_seat: usize,
     refused_off_ground: usize,
+    /// Candidates refused because their root would not reach the cells the
+    /// tip's last slide stranded ([`TipCover`]'s re-search prefilter).
+    refused_cover: usize,
 }
 
 /// One proposal's verdict after the lowering re-derived its disc.
@@ -431,7 +562,13 @@ enum Verdict {
     /// Refused: the slide leaves ground over air.
     OffGround,
     /// Standing: the seat's shift and the samples of its real disc.
-    Verify { shift: [f64; 3], samples: Vec<Sample> },
+    Verify {
+        shift: [f64; 3],
+        samples: Vec<Sample>,
+        /// The UNGROWN ball the file gets at the moved seat ([`Slid::ungrown`]):
+        /// what the tip-cover walk roots the moved tip on ([`TipCover`]).
+        ball: ([f64; 3], f64),
+    },
 }
 
 /// A tip's disc plane and the lattice laid in it.
@@ -1255,6 +1392,45 @@ pub(crate) fn contacts_keep_ground(
     kept
 }
 
+/// The shortfalls a tip-cover check left, one per blamed slide: its lowest
+/// stranded layer, its surface area, the surface's centre and its worst
+/// finite potential on its lowest layer. In member order.
+fn shortfalls(grid: &Grid, stranded: &[crate::demand_replay::StrandedCell]) -> Vec<CoverShortfall> {
+    let mut arms: Vec<usize> = stranded.iter().map(|cell| cell.blamed).collect();
+    arms.sort_unstable();
+    arms.dedup();
+    arms.into_iter()
+        .filter_map(|arm| {
+            let cells: Vec<&crate::demand_replay::StrandedCell> =
+                stranded.iter().filter(|cell| cell.blamed == arm).collect();
+            let layer = cells.iter().map(|cell| cell.layer).min()?;
+            let base: Vec<&&crate::demand_replay::StrandedCell> =
+                cells.iter().filter(|cell| cell.surface).collect();
+            #[expect(clippy::cast_precision_loss, reason = "cell counts are small")]
+            let count = base.len() as f64;
+            let centre = base.iter().fold([0.0, 0.0], |sum, cell| {
+                [
+                    sum[0] + grid.center_x_mm(grid.col_of(cell.cell)),
+                    sum[1] + grid.center_y_mm(grid.row_of(cell.cell)),
+                ]
+            });
+            Some(CoverShortfall {
+                arm,
+                layer,
+                surface_mm2: count * grid.cell_area_mm2(),
+                centre_mm: [centre[0] / count.max(1.0), centre[1] / count.max(1.0)],
+                max_u: cells
+                    .iter()
+                    .filter(|cell| cell.layer == layer)
+                    .map(|cell| f64::from(cell.u))
+                    .filter(|u| u.is_finite())
+                    .fold(0.0, f64::max),
+                slide_mm: 0.0,
+            })
+        })
+        .collect()
+}
+
 /// The integer lattice offsets inside a disc of `radius` pitches, centre first.
 #[expect(
     clippy::cast_possible_truncation,
@@ -1395,6 +1571,7 @@ pub(crate) fn apply(
     height: f64,
     limits: &MoveLimits<'_>,
     ground_check: bool,
+    mut cover: Option<TipCover<'_>>,
     mut remeasure: impl FnMut(&[usize], &[SweepArm], &[[f64; 3]]) -> Vec<[f64; 3]>,
 ) -> FootprintOutcome {
     let mut outcome = FootprintOutcome::default();
@@ -1629,6 +1806,10 @@ pub(crate) fn apply(
     // one of the move it was accepted with.
     let mut proposal_normal: Vec<Option<[f64; 3]>> = vec![None; searches.len()];
     let mut accepted_normal: Vec<Option<[f64; 3]>> = vec![None; searches.len()];
+    // The same for the ungrown ball at the moved seat (the tip cover roots a
+    // moved tip on it).
+    let mut proposal_ball: Vec<Option<([f64; 3], f64)>> = vec![None; searches.len()];
+    let mut accepted_ball: Vec<Option<([f64; 3], f64)>> = vec![None; searches.len()];
     // THE MOVE CHECK's state: every member's drawn ends before any move, the
     // own seat moves accepted so far (by member), and which search slot, if
     // any, each member's own move belongs to.
@@ -1645,6 +1826,20 @@ pub(crate) fn apply(
     }
     let mut refused_by_limits = vec![false; searches.len()];
     let search_arms: Vec<usize> = searches.iter().map(|search| search.arm).collect();
+    // THE TIP COVER's state ([`TipCover`]): per slot, the cells (in the plane,
+    // on the tip's seat layer) a slide of it once stranded, which every later
+    // candidate's root must reach; whether a slide of it was ever blamed; and
+    // the re-search passes run.
+    let mut cover_targets: Vec<Vec<[f64; 2]>> = vec![Vec::new(); searches.len()];
+    let mut cover_blamed = vec![false; searches.len()];
+    let mut cover_passes = 0_u32;
+    let cover_reach = cover.as_ref().map_or(f64::INFINITY, |cover| cover.reach_mm);
+    // Each turn of this loop either ends it or takes back at least one slide;
+    // a taken-back slide is searched again at most `passes` times, so the
+    // number of turns is bounded. The bound below is a backstop only.
+    let cover_turns_max = searches.len() + cover.as_ref().map_or(0, |cover| cover.passes as usize) + 2;
+    let mut cover_turns = 0_usize;
+    loop {
     while !pending.is_empty() {
         if crate::cancel::cancelled() {
             return outcome;
@@ -1677,7 +1872,10 @@ pub(crate) fn apply(
                 proposal: None,
                 refused_off_seat: 0,
                 refused_off_ground: 0,
+                refused_cover: 0,
             };
+            let targets = &cover_targets[slot];
+            let root = struts[search.arm].center_mm;
             while walk.next < search.candidates.len() {
                 let (i, j) = search.candidates[walk.next];
                 walk.next += 1;
@@ -1710,6 +1908,19 @@ pub(crate) fn apply(
                     walk.refused_off_ground += 1;
                     continue;
                 }
+                // THE TIP COVER's prefilter: a tip whose earlier slide
+                // stranded demand only takes a seat whose root reaches those
+                // cells again (the next reach walk is the judge).
+                if !targets.is_empty() {
+                    let at = [root[0] + slide[0], root[1] + slide[1]];
+                    if targets
+                        .iter()
+                        .any(|cell| (cell[0] - at[0]).hypot(cell[1] - at[1]) > cover_reach)
+                    {
+                        walk.refused_cover += 1;
+                        continue;
+                    }
+                }
                 walk.proposal = Some((i, j));
                 break;
             }
@@ -1735,6 +1946,7 @@ pub(crate) fn apply(
             searches[walk.slot].next = walk.next;
             outcome.moves_refused_off_seat += walk.refused_off_seat;
             outcome.moves_refused_off_ground += walk.refused_off_ground;
+            outcome.cover.candidates_refused += walk.refused_cover;
             refused_by_limits[walk.slot] |= walk.refused_off_seat > 0;
             if let Some(step) = walk.proposal {
                 proposals.push((walk.slot, step));
@@ -1881,6 +2093,7 @@ pub(crate) fn apply(
             Verdict::Verify {
                 shift: geom_kernel::vec3::sub(moved.seat_mm, arms[search.arm].seat_mm),
                 samples,
+                ball: Slid::of(&disc).ungrown(),
             }
         };
         let verdicts: Vec<Verdict> = if proposals.len() >= PARALLEL_MIN_TIPS {
@@ -1909,7 +2122,8 @@ pub(crate) fn apply(
                     outcome.moves_refused_off_ground += 1;
                     refused_by_limits[slot] = true;
                 }
-                Verdict::Verify { shift, samples } => {
+                Verdict::Verify { shift, samples, ball } => {
+                    proposal_ball[slot] = Some(ball);
                     let first = verify_samples.len();
                     verify_samples.extend(samples);
                     verify_span.push((first, verify_samples.len()));
@@ -1956,6 +2170,7 @@ pub(crate) fn apply(
         for (slot, shift) in admitted {
             accepted[slot] = Some(shift);
             accepted_normal[slot] = proposal_normal[slot];
+            accepted_ball[slot] = proposal_ball[slot];
             own_accepted[searches[slot].arm] = Some(shift);
             resolved[slot] = true;
         }
@@ -2000,6 +2215,168 @@ pub(crate) fn apply(
                 .collect()
         },
     );
+
+    // ---- the tip cover ([`TipCover`]): the field the settled slides leave,
+    // walked against the placed field; a slide that strands demand is taken
+    // back and its tip searched again, or, past the passes, left at its seat.
+    let Some(tip_cover) = cover.as_mut() else {
+        break;
+    };
+    let moved: Vec<crate::demand_replay::MovedSeat> = accepted
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, shift)| {
+            let shift = (*shift)?;
+            let index = search_arms[slot];
+            let centre = struts[index].center_mm;
+            Some(crate::demand_replay::MovedSeat {
+                index,
+                xy_mm: [centre[0] + shift[0], centre[1] + shift[1]],
+                contact_radius_mm: discs[index].map_or(0.0, |disc| disc.radius_mm),
+                placed_ball: discs[index].map(|disc| Slid::of(&disc).ungrown()),
+                ball: accepted_ball[slot],
+            })
+        })
+        .collect();
+    if moved.is_empty() {
+        break;
+    }
+    outcome.cover.enabled = true;
+    outcome.cover.checks += 1;
+    let stranded = (tip_cover.stranded)(&*struts, &moved);
+    if crate::cancel::cancelled() {
+        return outcome;
+    }
+    if outcome.cover.checks == 1 {
+        let found = &mut outcome.cover;
+        found.found_cells = stranded.len();
+        found.found_surface_cells = stranded.iter().filter(|cell| cell.surface).count();
+        #[expect(clippy::cast_precision_loss, reason = "cell counts are small")]
+        let surface = found.found_surface_cells as f64;
+        found.found_surface_mm2 = surface * grid.cell_area_mm2();
+        let mut blamed: Vec<usize> = stranded.iter().map(|cell| cell.blamed).collect();
+        blamed.sort_unstable();
+        blamed.dedup();
+        found.found_slides = blamed.len();
+        found.found_by_slide = shortfalls(grid, &stranded);
+        found.found_max_u = found.found_by_slide.iter().map(|row| row.max_u).fold(0.0, f64::max);
+        for row in &mut found.found_by_slide {
+            row.slide_mm = slot_of_member
+                .get(row.arm)
+                .and_then(|&slot| accepted.get(slot).copied().flatten())
+                .map_or(0.0, geom_kernel::vec3::norm);
+        }
+    }
+    if stranded.is_empty() {
+        break;
+    }
+    cover_turns += 1;
+    if cover_turns > cover_turns_max {
+        // The backstop: never expected (each turn takes a slide back). What
+        // is left is emitted and warned about by area.
+        outcome.cover.left = shortfalls(grid, &stranded);
+        break;
+    }
+    // Every blamed slot, in slot order: its slide is taken back; it is
+    // searched again from its next candidate while passes remain, with the
+    // cells its slide stranded on its seat layer as the prefilter's targets.
+    let mut blamed_slots: Vec<usize> = stranded
+        .iter()
+        .filter_map(|cell| slot_of_member.get(cell.blamed).copied())
+        .filter(|&slot| slot != usize::MAX && accepted.get(slot).is_some_and(Option::is_some))
+        .collect();
+    blamed_slots.sort_unstable();
+    blamed_slots.dedup();
+    if blamed_slots.is_empty() {
+        outcome.cover.left = shortfalls(grid, &stranded);
+        break;
+    }
+    let research = cover_passes < tip_cover.passes;
+    if research {
+        cover_passes += 1;
+        outcome.cover.passes += 1;
+    }
+    for &slot in &blamed_slots {
+        let arm = search_arms[slot];
+        accepted[slot] = None;
+        accepted_normal[slot] = None;
+        own_accepted[arm] = None;
+        refused_by_limits[slot] = true;
+        cover_blamed[slot] = true;
+        outcome.cover.slides_taken_back += 1;
+        let k_top = struts[arm].k_top;
+        let on_seat_layer: Vec<[f64; 2]> = stranded
+            .iter()
+            .filter(|cell| cell.blamed == arm && cell.layer == k_top)
+            .map(|cell| {
+                [
+                    grid.center_x_mm(grid.col_of(cell.cell)),
+                    grid.center_y_mm(grid.row_of(cell.cell)),
+                ]
+            })
+            .collect();
+        cover_targets[slot].extend(on_seat_layer);
+        if research && searches[slot].next < searches[slot].candidates.len() {
+            pending.push(slot);
+        }
+    }
+    pending.sort_unstable();
+    pending.dedup();
+    // A slide taken back takes back what the members joined to it followed:
+    // every slide left is judged again on the drawn ends, as `settle` does
+    // after a section take-back.
+    let left: Vec<(usize, [f64; 3])> = accepted
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, shift)| shift.map(|shift| (slot, shift)))
+        .collect();
+    if !left.is_empty() {
+        let mut kept = vec![false; accepted.len()];
+        let admitted = check_moves(
+            MoveCheck {
+                grid,
+                plate_z,
+                height,
+                limits,
+                struts,
+                before_ends: &before_ends,
+                own_accepted: &no_moves,
+                slot_of_member: &slot_of_member,
+                search_arms: &search_arms,
+            },
+            left.clone(),
+            &mut refused_by_limits,
+            &mut outcome,
+        );
+        for (slot, _) in admitted {
+            kept[slot] = true;
+        }
+        for (slot, _) in left {
+            if !kept[slot] {
+                accepted[slot] = None;
+                accepted_normal[slot] = None;
+                own_accepted[search_arms[slot]] = None;
+                outcome.moves_taken_back_limits += 1;
+            }
+        }
+    }
+    // The re-search reads the moves standing (`settle` may have taken some
+    // back without the round state knowing).
+    own_accepted.fill(None);
+    for (slot, shift) in accepted.iter().enumerate() {
+        own_accepted[search_arms[slot]] = *shift;
+    }
+    }
+    for (slot, blamed) in cover_blamed.iter().enumerate() {
+        if *blamed {
+            let arm = search_arms[slot];
+            if accepted[slot].is_some() {
+                outcome.cover.reseated.push(arm);
+            } else {
+                outcome.cover.undone.push(arm);
+            }
+        }
+    }
 
     // ---- publish: moves, their consequence for branches, and knife edges.
     for (slot, search) in searches.iter().enumerate() {
@@ -2610,6 +2987,10 @@ mod ground_tests {
 #[cfg(test)]
 #[path = "footprint_ground_tests.rs"]
 mod ground_oracle_tests;
+
+#[cfg(test)]
+#[path = "footprint_cover_tests.rs"]
+mod cover_tests;
 
 #[cfg(test)]
 mod move_check_tests {

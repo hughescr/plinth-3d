@@ -1073,6 +1073,12 @@ pub struct SweepPolicy {
     /// air ([`footprint`]'s ground check, fix lane A 2026-10-12). **On in
     /// production.** Off only for its sabotage drill.
     pub footprint_ground: bool,
+    /// Whether a footprint slide must leave every demand cell the placed tips
+    /// rooted still within the reach of a tip as drawn ([`footprint::TipCover`],
+    /// lane tc 2026-10-16; Craig: "ensuring that the final model is fully
+    /// supported is important"). **On in production.** Off only for its
+    /// sabotage drill.
+    pub tip_cover: bool,
     /// Whether the clearance re-route also re-lands a model landing whose
     /// foot, sized for the load it passes on the sized field, does not lie
     /// wholly on the model (fix lane A 2026-10-12). **On in production.** Off
@@ -1246,6 +1252,7 @@ impl SweepPolicy {
             clearance_reroute: true,
             graze_heads: true,
             footprint_ground: true,
+            tip_cover: true,
             refit_model_feet: true,
             per_event_sizing: true,
             unrooted_routing: true,
@@ -1717,6 +1724,14 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_footprint_ground(mut self) -> Self {
         self.footprint_ground = false;
+        self
+    }
+
+    /// Let a footprint slide strand demand the placed tips rooted (the rule
+    /// before 2026-10-16). **Sabotage only.**
+    #[must_use]
+    pub const fn without_tip_cover(mut self) -> Self {
+        self.tip_cover = false;
         self
     }
 
@@ -3988,6 +4003,7 @@ fn plan_after_prefix(
         vents: vents.to_vec(),
         reach,
         unrooted,
+        births,
         sizing,
         law,
         slenderness_law,
@@ -4633,6 +4649,37 @@ pub(crate) fn finish(
     // ONE face table for every re-measurement of this pass (each proposed
     // slide's and the emitted field's), built on the first slid tip.
     let seat_faces = footprint_normal::LazyFaceTable::default();
+    // THE TIP COVER (lane tc, 2026-10-16): the slides are held to the reach
+    // the placed tips gave, walked as the up-sweep walked it. Its layer cache
+    // is built on the first walk only (a field with no slide asks none).
+    let cover_cache: std::cell::OnceCell<layer_cache::LayerCache<'_>> = std::cell::OnceCell::new();
+    let mut cover_walk = |struts: &[SweepStrut], moved: &[demand_replay::MovedSeat]| {
+        let cache = cover_cache.get_or_init(|| layer_cache::LayerCache::build(&env.grid, slices));
+        let context = demand_replay::ReplayContext {
+            grid: &env.grid,
+            slices,
+            layer_cache: Some(cache),
+            planes: &env.planes,
+            mesh,
+            kappa: policy.kappa,
+            layer_height_mm: height,
+            layers,
+            straight_reach: policy.straight_reach,
+            creep_weight: policy.creep_weight,
+            creep_overhang_cut: policy.creep_overhang_cut,
+            overhang_centre_deg: policy.overhang_centre_deg,
+            overhang_transition_deg: policy.overhang_transition_deg,
+            max_restarts: policy.strut_removal_passes,
+            first_loss_ratio: policy.kappa_first_loss / policy.kappa,
+            births: &env.births,
+        };
+        demand_replay::stranded_by_moves(&context, struts, moved)
+    };
+    let tip_cover = policy.tip_cover.then_some(footprint::TipCover {
+        reach_mm: policy.kappa * height,
+        passes: policy.strut_removal_passes,
+        stranded: &mut cover_walk,
+    });
     let footprint = footprint::apply(
         &sweep_plan.grid,
         slices,
@@ -4644,6 +4691,7 @@ pub(crate) fn finish(
         height,
         &limits,
         policy.footprint_ground,
+        tip_cover,
         |members: &[usize], moved: &[plinth_support::SweepArm], shifts: &[[f64; 3]]| {
             let sites: Vec<Option<footprint_normal::TipSite>> = members
                 .iter()
@@ -4666,6 +4714,9 @@ pub(crate) fn finish(
             normals
         },
     );
+    // The tip cover's layer cache is read by nothing after the rule: give its
+    // bytes back to the pool now, not at the end of the finish.
+    drop(cover_cache);
     // A cancelled `footprint::apply` leaves between its stages with a partial
     // outcome; it must not reach the runs or the report below.
     cancel::checkpoint()?;

@@ -101,6 +101,9 @@ pub(crate) enum Class {
     KnifeEdge,
     /// A footprint move refused. `a` = member.
     MoveRefused,
+    /// Demand a footprint slide left beyond reach and no repair covered.
+    /// `a` = the slid member.
+    CoverShort,
     /// A disc off its face after the final normal. `a` = member.
     OffFace,
     /// A seat trim that bites the shaft. `a` = member.
@@ -803,7 +806,14 @@ fn classify_report(
         moves_refused_section: _, moved_for_section: _, section_moves_taken_back: _,
         moves_taken_back_limits: _, settle_rechecks: _, disc_samples: _, search_samples: _,
         verify_samples: _, tips_off_face_at_rim_only: _, layers_rasterised: _, rounds: _,
+        cover,
     } = seat_footprint;
+    for shortfall in &cover.left {
+        warnings.push(Warning {
+            key: Key::of(Class::CoverShort, id_of(struts, shortfall.arm)),
+            severity: shortfall.surface_mm2,
+        });
+    }
     for &(index, disc_on_face) in knife_edges {
         warnings.push(Warning {
             key: Key::of(Class::KnifeEdge, id_of(struts, index)),

@@ -3810,6 +3810,59 @@ fn print_sweep_disclosure(
                 fraction * 100.0
             );
         }
+        // THE TIP COVER (lane tc, 2026-10-16): what the slides would have left
+        // beyond the reach the placed tips gave, and how it was put back.
+        let cover = &footprint.cover;
+        if cover.enabled {
+            println!(
+                "[sweep {model}] tip cover: {} reach walk(s) over the slid field; the slides as \
+                 first settled left {:.4} mm2 of model surface ({} cells, {} with what is built \
+                 on them) beyond the placed reach, blamed on {} slide(s), worst U {:.3}; {} \
+                 slide(s) taken back, {} re-search pass(es), {} candidate(s) passed over for \
+                 not reaching the stranded cells; tips reseated on another slide that keeps the \
+                 cover {:?}; slides undone (tip kept at its placed seat) {:?}; shortfalls left \
+                 {}",
+                cover.checks,
+                cover.found_surface_mm2,
+                cover.found_surface_cells,
+                cover.found_cells,
+                cover.found_slides,
+                cover.found_max_u,
+                cover.slides_taken_back,
+                cover.passes,
+                cover.candidates_refused,
+                cover.reseated,
+                cover.undone,
+                cover.left.len(),
+            );
+            for found in &cover.found_by_slide {
+                println!(
+                    "[sweep {model}] tip cover: the {:.4} mm slide of the tip of arm {} left \
+                     {:.4} mm2 of layer {} (centred at x {:.3}, y {:.3} mm) beyond the placed \
+                     reach, worst U {:.3}; repaired as listed above",
+                    found.slide_mm,
+                    found.arm,
+                    found.surface_mm2,
+                    found.layer,
+                    found.centre_mm[0],
+                    found.centre_mm[1],
+                    found.max_u,
+                );
+            }
+        }
+        for left in &cover.left {
+            println!(
+                "[sweep {model}] WARNING the slide of the tip of arm {} leaves {:.4} mm2 of the \
+                 model's surface at layer {} (centred at x {:.3}, y {:.3} mm) beyond the reach \
+                 of every tip (worst U {:.3}); no repair covered it, so it is emitted as it is",
+                left.arm,
+                left.surface_mm2,
+                left.layer,
+                left.centre_mm[0],
+                left.centre_mm[1],
+                left.max_u,
+            );
+        }
         // THE REAL CONTACT (Craig 2026-10-12): the model surface inside every
         // seated tip's drawn ball, against its planned disc, and the balls
         // grown until it reaches plan.
