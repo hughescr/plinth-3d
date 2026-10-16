@@ -85,8 +85,11 @@ impl core::fmt::Debug for DeferredStageShake {
 /// the sweep would have put it. Returns whether a check was pending. A plan
 /// whose check already ran (or was never deferred) is left as it is.
 pub fn complete_for_emission(plan: &mut SweepPlan) -> bool {
+    // The rigid-body share reading is deferred the same way
+    // ([`crate::deferred_rigid`]) and is completed here too.
+    let rigid = crate::deferred_rigid::complete_rigid_share(plan);
     let Some(deferred) = plan.deferred_stage_shake.take() else {
-        return false;
+        return rigid;
     };
     plan.report.slenderness_lane.stage_shake = deferred.run();
     true

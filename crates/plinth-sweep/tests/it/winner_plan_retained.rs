@@ -122,8 +122,12 @@ fn a_retained_plan_is_the_plan_the_seal_computes() {
                 "{threads} threads: the frame ledger classified pairs"
             );
             assert!(
-                retained.plan.report.rigid_share.events_solved > 0,
-                "{threads} threads: the rigid-share diagnostic solved events"
+                retained.plan.deferred_rigid_share.is_some(),
+                "{threads} threads: the rigid-share diagnostic is deferred, not run"
+            );
+            assert!(
+                !retained.plan.report.rigid_share.ran,
+                "{threads} threads: the rigid-share diagnostic has not run in the measurement"
             );
             assert!(
                 retained.plan.deferred_stage_shake.is_some(),
@@ -142,6 +146,11 @@ fn a_retained_plan_is_the_plan_the_seal_computes() {
                 "{threads} threads: the shake check ran on completion"
             );
             assert!(got.deferred_stage_shake.is_none());
+            assert!(got.deferred_rigid_share.is_none());
+            assert!(
+                got.report.rigid_share.events_solved > 0,
+                "{threads} threads: the rigid-share diagnostic solved events on completion"
+            );
             assert_eq!(
                 format!("{got:?}"),
                 format!("{want:?}"),

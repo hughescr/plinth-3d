@@ -330,6 +330,98 @@ pub fn write(model: &SupportedModel, request: &EmitRequest) -> Result<EmitReport
     settle_staged(&staging, &request.target_path, staged)
 }
 
+/// A finished and audited artifact that sits BESIDE its target, not at it
+/// (perf lane `ov`, 2026-10-15).
+///
+/// [`write_speculative`] makes one while the caller does not yet know whether
+/// the model it was built from is the one that will be emitted; [`commit`] then
+/// does exactly what [`write`] does last (rename onto the target, make the name
+/// durable), and dropping or [`discard`]ing it removes the file. Until a commit
+/// nothing exists at the target path, whatever happens to the process.
+///
+/// [`commit`]: StagedArtifact::commit
+/// [`discard`]: StagedArtifact::discard
+#[derive(Debug)]
+pub struct StagedArtifact {
+    staging: PathBuf,
+    target: PathBuf,
+    report: EmitReport,
+}
+
+impl StagedArtifact {
+    /// Put the file at its target, as [`write`] would have: the report this
+    /// returns is the one [`write`] returns for the same model and request.
+    ///
+    /// # Errors
+    ///
+    /// The target cannot be taken (`TargetUnavailable`) or its name cannot be
+    /// made durable (`DurabilitySyncFailed`), as for [`write`].
+    pub fn commit(self) -> Result<EmitReport, EmitError> {
+        // `write` clears an earlier run's kept unreadable bytes before it
+        // starts; at the point a commit puts a file at the target they are no
+        // more evidence about this run than they were then.
+        let _ = std::fs::remove_file(failed_audit_path(&self.target));
+        settle_staged(&self.staging, &self.target, Ok(self.report.clone()))
+    }
+
+    /// Remove the file; nothing is left beside the target.
+    pub fn discard(self) {
+        // `Drop` removes it.
+    }
+}
+
+impl Drop for StagedArtifact {
+    fn drop(&mut self) {
+        // After a commit the rename has already moved it, so this finds
+        // nothing and says nothing.
+        let _ = std::fs::remove_file(&self.staging);
+    }
+}
+
+/// [`write`] without the last step: the file is written and audited beside the
+/// target (under a name no [`write`] uses) and nothing is put at the target.
+///
+/// The bytes are those [`write`] writes, since the same code builds them; only
+/// the file name differs while they sit beside the target. **Any failure
+/// removes the file and leaves the caller to run [`write`] for the real
+/// verdict**, so an error is always reported by the one path that owns it.
+///
+/// # Errors
+///
+/// As [`write`], except that the path inside an unreadable-file error names the
+/// speculative file.
+pub fn write_speculative(
+    model: &SupportedModel,
+    request: &EmitRequest,
+) -> Result<StagedArtifact, EmitError> {
+    validate_target(&request.target_path)?;
+    let staging = speculative_staging_path(&request.target_path);
+    let _ = std::fs::remove_file(&staging);
+    match write_staged(model, request, &staging) {
+        Ok(report) => Ok(StagedArtifact {
+            staging,
+            target: request.target_path.clone(),
+            report,
+        }),
+        Err(error) => {
+            let _ = std::fs::remove_file(&staging);
+            Err(error)
+        }
+    }
+}
+
+/// The staging sibling [`write_speculative`] builds: never the one [`write`]
+/// uses, so a real write that follows a discarded speculation cannot meet it.
+fn speculative_staging_path(target: &Path) -> PathBuf {
+    const SPECULATIVE_SUFFIX: &str = ".plinth-speculative";
+    let mut name = target
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_default();
+    name.push(SPECULATIVE_SUFFIX);
+    target.with_file_name(name)
+}
+
 /// What [`write`] does with the staging file once the audit has spoken: a
 /// file that reads back is renamed onto `target`; an unreadable one is kept
 /// at [`failed_audit_path`]; any other failure removes both.
@@ -4715,6 +4807,65 @@ mod tests {
             staging_path(&target).display()
         );
         std::fs::remove_file(target).unwrap();
+    }
+
+    /// A speculative write puts nothing at the target until it is committed; the
+    /// committed file is byte for byte the file [`write`] makes, with the same
+    /// report; a discarded one leaves nothing at all.
+    #[test]
+    fn a_speculative_write_commits_to_the_bytes_write_makes_and_discards_clean() {
+        let primitives = vec![
+            primitive(
+                SupportSegmentKind::ContactSphere,
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 3.0],
+            ),
+            primitive(SupportSegmentKind::Member, [0.0, 0.0, 8.0], [0.0, 0.0, 9.0]),
+        ];
+        let model = fixture_model(primitives, 3.0);
+        let direct = fixture_path("speculative-direct.chitubox");
+        let committed = fixture_path("speculative-committed.chitubox");
+        let discarded = fixture_path("speculative-discarded.chitubox");
+        let request = |target: &Path| EmitRequest {
+            target_path: target.to_path_buf(),
+            printer: printer(),
+        };
+
+        let direct_report = write(&model, &request(&direct)).expect("the real write");
+
+        let staged = write_speculative(&model, &request(&committed)).expect("the speculative write");
+        assert!(!committed.exists(), "nothing sits at the target before the commit");
+        assert!(speculative_staging_path(&committed).exists());
+        let committed_report = staged.commit().expect("the commit");
+        assert!(committed.exists());
+        assert!(
+            !speculative_staging_path(&committed).exists(),
+            "the commit moved the staging file"
+        );
+        assert_eq!(
+            std::fs::read(&direct).unwrap(),
+            std::fs::read(&committed).unwrap(),
+            "the committed file is the file `write` makes"
+        );
+        assert_eq!(committed_report.artifact_path, committed);
+        assert_eq!(
+            (committed_report.support_record_count, committed_report.artifact_bytes),
+            (direct_report.support_record_count, direct_report.artifact_bytes)
+        );
+        assert_eq!(committed_report.seat_trim, direct_report.seat_trim);
+        assert_eq!(committed_report.audit_findings, direct_report.audit_findings);
+
+        let staged = write_speculative(&model, &request(&discarded)).expect("the speculative write");
+        staged.discard();
+        assert!(!discarded.exists());
+        assert!(!speculative_staging_path(&discarded).exists());
+        // A real write after a discarded speculation meets nothing of it.
+        write(&model, &request(&discarded)).expect("the real write after a discard");
+        assert!(discarded.exists());
+
+        for path in [direct, committed, discarded] {
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     /// THIS TEST DOES NOT CALL [`write`], AND DOES NOT COVER ITS ERROR ARM.

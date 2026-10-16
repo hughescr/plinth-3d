@@ -47,6 +47,7 @@ pub mod cancel;
 pub mod cavity;
 pub mod congestion;
 pub mod contact_growth;
+pub mod deferred_rigid;
 pub mod deferred_shake;
 pub(crate) mod demand_replay;
 pub mod down_sweep;
@@ -80,6 +81,7 @@ pub mod model_feet;
 pub mod model_landing;
 pub(crate) mod model_tie;
 pub mod orient_demand;
+pub mod overlap;
 pub mod peel;
 pub mod per_event;
 pub(crate) mod provenance;
@@ -109,11 +111,15 @@ use geom_kernel::perf::Work as PerfWork;
 
 pub use adapter::{arms_of, to_primitives, LoadStepTaper, SweepEmission};
 pub use congestion::{CongestionCensus, CongestionOutcome, CongestionReport};
+pub use deferred_rigid::{
+    complete_rigid_share, store_rigid_share, take_deferred_rigid_share, DeferredRigidShare,
+};
 pub use deferred_shake::complete_for_emission;
 pub use drain::{DrainKeepOut, DrainSpec, DrainVerdict, EscapeReport};
 pub use limits::SweepLimits;
 pub use model_landing::{model_landing_scar, model_landings, ModelLanding, ModelLandingScar};
 pub use orient_demand::{burden_cm2, SweepDemand};
+pub use overlap::overlap;
 pub use peel::{PeelFieldMode, PeelFieldStats};
 pub use report::{PathHits, SweepRunReport};
 pub use slenderness::{
@@ -605,6 +611,11 @@ pub struct SweepPlan {
     /// deferred it: the snapshot [`complete_for_emission`] runs. `None` on every
     /// plan that ran the check in the sweep, and on a completed plan.
     pub deferred_stage_shake: Option<Box<deferred_shake::DeferredStageShake>>,
+    /// The rigid-body share reading, when [`SweepPolicy::rigid_share_capture`]
+    /// deferred it: the snapshot [`complete_rigid_share`] (or
+    /// [`complete_for_emission`]) runs. `None` on every plan that ran the
+    /// reading in the sweep, and on a completed plan.
+    pub deferred_rigid_share: Option<deferred_rigid::DeferredRigidShare>,
 }
 
 impl SweepPlan {
@@ -1113,6 +1124,16 @@ pub struct SweepPolicy {
     /// Capture wins over [`Self::stage_shake_diagnostic`]: with capture on, the
     /// check never runs in the sweep.
     pub stage_shake_capture: bool,
+    /// Whether the rigid-body share reading ([`rigid_share`]) is DEFERRED the
+    /// way the shake check is under [`Self::stage_shake_capture`]: the sweep
+    /// stores a snapshot of exactly what the reading reads
+    /// ([`deferred_rigid::DeferredRigidShare`]) and [`complete_rigid_share`]
+    /// runs it later, with the same numbers, on the plan that is emitted
+    /// only. Off for every emitted field; on in the orientation search's
+    /// production measurement of the finalists and in the second contact's
+    /// re-plan, both of which are often not emitted. Has no effect with
+    /// [`Self::rigid_share_diagnostic`] off.
+    pub rigid_share_capture: bool,
     /// How the second contact is made ([`contact_growth::SecondContactMode`]):
     /// `Replan` (the default) is today's way: on the real models the edit is
     /// always discarded, so the edit modes only add cost. `EditThenReplan`
@@ -1230,6 +1251,7 @@ impl SweepPolicy {
             rigid_share_diagnostic: true,
             stage_shake_diagnostic: true,
             stage_shake_capture: false,
+            rigid_share_capture: false,
             second_contact_mode: contact_growth::SecondContactMode::from_env()
                 .map_err(SweepError::Registry)?,
             second_contact_withdraw_rounds: 2,
@@ -2042,9 +2064,16 @@ fn replan_and_choose(
         }
         miss.is_none()
     });
-    let second = cancel::without_token(|| match prefix_seed {
-        Some(seed) => run_sweep_from_prefix(seed, mesh, plan, policy, drains, vents, caps),
-        None => run_sweep_inner(mesh, plan, policy, drains, vents, Some(caps)),
+    // The re-plan's rigid-body reading is a warning only and nothing the
+    // chooser below reads, so it is deferred and run only if the re-plan is
+    // kept (perf lane `ov`); on most corpus models it is discarded.
+    let capped_policy = SweepPolicy {
+        rigid_share_capture: true,
+        ..*policy
+    };
+    let mut second = cancel::without_token(|| match prefix_seed {
+        Some(seed) => run_sweep_from_prefix(seed, mesh, plan, &capped_policy, drains, vents, caps),
+        None => run_sweep_inner(mesh, plan, &capped_policy, drains, vents, Some(caps)),
     })?;
     let outcome = contact_growth::SecondContactOutcome {
         mode,
@@ -2067,6 +2096,9 @@ fn replan_and_choose(
     // slenderness law cannot hold is not a gain.
     let kept_second = outcome.second_shortfall_mm2 < outcome.first_shortfall_mm2
         && outcome.second_unbraced <= outcome.first_unbraced;
+    if kept_second {
+        complete_rigid_share(&mut second);
+    }
     let mut chosen = if kept_second { second } else { first };
     chosen.report.seat_second_contact = contact_growth::SecondContactOutcome {
         kept_second,
@@ -4044,7 +4076,7 @@ pub(crate) fn finish(
     let model_surface = &env.model_surface;
     let LaneState {
         mut struts,
-        outcome,
+        mut outcome,
         mut landings,
         moves,
         removal_coverage,
@@ -4298,21 +4330,41 @@ pub(crate) fn finish(
     // THE RIGID-BODY READING, on the finished and sized field, along the same
     // routing the last down-sweep recorded. A WARNING only: it moves and sizes
     // nothing (`rigid_share`).
-    let rigid_share = if policy.rigid_share_diagnostic {
-        rigid_share::diagnose(
-            &grid,
-            slices,
-            &struts,
-            &outcome.route_log,
-            height,
-            policy.x_allowed
-                * core::f64::consts::PI
-                * policy.tip_radius_max_mm
-                * policy.tip_radius_max_mm,
-            policy.tip_radius_max_mm,
+    let rigid_share_l_max = policy.x_allowed
+        * core::f64::consts::PI
+        * policy.tip_radius_max_mm
+        * policy.tip_radius_max_mm;
+    let (rigid_share, deferred_rigid_share) = if !policy.rigid_share_diagnostic {
+        (rigid_share::RigidShareReport::default(), None)
+    } else if policy.rigid_share_capture {
+        // DEFERRED (perf lane `ov`): the snapshot is taken on this very line
+        // from the very arguments, so `complete_rigid_share` computes the same
+        // numbers. The route log is moved, not copied: nothing below reads it.
+        (
+            rigid_share::RigidShareReport::default(),
+            Some(deferred_rigid::DeferredRigidShare::capture(
+                &grid,
+                Arc::clone(slices),
+                &struts,
+                std::mem::take(&mut outcome.route_log),
+                height,
+                rigid_share_l_max,
+                policy.tip_radius_max_mm,
+            )),
         )
     } else {
-        rigid_share::RigidShareReport::default()
+        (
+            rigid_share::diagnose(
+                &grid,
+                slices,
+                &struts,
+                &outcome.route_log,
+                height,
+                rigid_share_l_max,
+                policy.tip_radius_max_mm,
+            ),
+            None,
+        )
     };
     cancel::checkpoint()?;
 
@@ -4499,6 +4551,7 @@ pub(crate) fn finish(
         report,
         load_step_taper,
         deferred_stage_shake,
+        deferred_rigid_share,
     };
     // THE NORMAL AT A SLID BALL (`footprint_normal`, Craig ruling 2026-10-05):
     // a proposed slide is validated with the footprint normal measured on the

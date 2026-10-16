@@ -2753,6 +2753,97 @@ struct HollowCarryOut {
     filled_back_chambers_ml: Vec<Finite>,
 }
 
+/// What the first plan's emission is built from, owned, so it can be built on
+/// a worker beside the second contact (perf lane `ov`): the plan (the lowering
+/// reads its struts, never its report), the mesh and the hollow history the
+/// supported model is made of.
+struct SpeculationInputs {
+    first: plinth_sweep::SweepPlan,
+    mesh: plinth_mesh::Mesh,
+    hollow_history: plinth_hollow::HollowHistory,
+}
+
+/// The first plan's emission, built before it is known to be the plan that
+/// stands: the lowering, and what follows it.
+struct SpeculativeEmission {
+    emission: plinth_sweep::SweepEmission,
+    built: Result<SpeculativeBuilt, plinth_support::SupportError>,
+}
+
+/// The supported model, and its file written and audited BESIDE the target.
+struct SpeculativeBuilt {
+    supported: plinth_support::SupportedModel,
+    staged: Result<plinth_emit::StagedArtifact, plinth_emit::EmitError>,
+}
+
+/// What the worker beside the second contact brings back. Each part is a
+/// caught panic or a value: a part matters only when the first plan stands, and
+/// then a panic in it is raised, as the serial order would have raised it.
+struct OverlappedWork {
+    rigid: Option<std::thread::Result<plinth_sweep::rigid_share::RigidShareReport>>,
+    speculative:
+        Option<std::thread::Result<Result<SpeculativeEmission, plinth_support::SweepLoweringError>>>,
+}
+
+/// The first plan's lowering, supported model and written file, in the order
+/// and on the inputs [`sweep_and_emit`] uses for them. It prints nothing and
+/// puts nothing at the target (`plinth_emit::write_speculative`), and its perf
+/// charges go to the phases the serial order charges them to.
+fn speculative_emission(
+    speculation: SpeculationInputs,
+    frame: plinth_support::BuildFrame,
+    layers: &plinth_core::LayerPlan,
+    inputs: &SweepStageInputs<'_>,
+    target: &Path,
+) -> Result<SpeculativeEmission, plinth_support::SweepLoweringError> {
+    let SpeculationInputs {
+        first,
+        mesh,
+        hollow_history,
+    } = speculation;
+    let emission = {
+        let _phase = plinth_sweep::perf::scoped_phase(PerfPhase::FinalSweep);
+        plinth_sweep::to_primitives(
+            &first,
+            frame,
+            layers,
+            inputs.max_primitives,
+            inputs.max_primitive_bytes,
+        )?
+    };
+    drop(first);
+    let raft_primitive_count = emission.raft_pads + emission.raft_bridges;
+    let primitive_count = emission.primitives.len();
+    let history = plinth_support::SupportHistory::from_reports(
+        hollow_history,
+        plinth_support::SupportReport {
+            support_primitive_count: primitive_count.saturating_sub(raft_primitive_count),
+            raft_primitive_count,
+        },
+        frame,
+    );
+    // The disclosure reads the emission's primitives after the model has taken
+    // its own copy.
+    let supported = {
+        let _phase = plinth_sweep::perf::scoped_phase(PerfPhase::FinalSweep);
+        plinth_support::SupportedModel::from_parts(mesh, emission.primitives.clone(), history)
+    };
+    let built = supported.map(|supported| {
+        let _phase = plinth_sweep::perf::scoped_phase(PerfPhase::Emit);
+        let emit_mark = plinth_sweep::perf::stage("emit.write");
+        let staged = plinth_emit::write_speculative(
+            &supported,
+            &EmitRequest {
+                target_path: target.to_path_buf(),
+                printer: inputs.printer.clone(),
+            },
+        );
+        drop(emit_mark);
+        SpeculativeBuilt { supported, staged }
+    });
+    Ok(SpeculativeEmission { emission, built })
+}
+
 /// Place a support field with the slice-sweep core and emit one `.chitubox`.
 ///
 /// # What this path does NOT do, and why that is stated here rather than
@@ -2891,7 +2982,7 @@ fn sweep_and_emit(
     // retained plan IS the value this sweep would compute, so it is emitted as
     // it is. Any difference, and the field is planned here as it always was.
     let reused = match winner {
-        Ok(retained) => plinth_sweep::orient_demand::reuse_for(
+        Ok(retained) => plinth_sweep::orient_demand::reuse_for_deferring_rigid_share(
             retained,
             hollowed.mesh(),
             &sweep_layers,
@@ -2964,23 +3055,119 @@ fn sweep_and_emit(
     // its load needs (round 5 review, 2026-10-14): the placement runs again
     // with those tips' real contacts as their limit; kept where it leaves the
     // field nearer its loads' needs.
+    let frame = plinth_support::BuildFrame::new(
+        Finite::new(plate_z).unwrap_or_else(|_| {
+            // `plate_z` came out of a finite mesh extent minus a positive
+            // finite lift; the sweep already refused a non-finite bbox.
+            Finite::new(0.0).expect("zero is finite")
+        }),
+        inputs.lift_mm,
+    );
+    // THE FIRST PLAN'S WORK BESIDE THE SECOND CONTACT (perf lane `ov`). The
+    // re-plan is the longest stage of the run and uses about one core, and on
+    // most corpus models it is discarded (the 2026-10-15 corpus run kept it on
+    // 6 of 23). Two things the first plan needs whenever it is the plan that
+    // stands are therefore done beside the re-plan
+    // on an idle worker, and used only if the first plan does stand:
+    //
+    // 1. its rigid-body share reading, a warning that nothing the re-plan or
+    //    its chooser reads depends on (`deferred_rigid`); and
+    // 2. its whole emission (lowering, the supported model, the file written
+    //    and audited BESIDE the target), which reads the first plan's struts and
+    //    never its report. When the re-plan is kept instead, all of it is
+    //    dropped and the emission runs below as it always did.
+    //
+    // Nothing is printed beside the re-plan and nothing exists at the target
+    // until the commit below, so the log, the files and a crash's leftovers are
+    // those of the serial order. The edit modes (experiments) read the first
+    // plan's report while they edit it, so they take the reading first.
+    let mut plan = plan;
+    let replan_mode =
+        policy.second_contact_mode == plinth_sweep::contact_growth::SecondContactMode::Replan;
+    let first_rigid = if replan_mode {
+        plinth_sweep::take_deferred_rigid_share(&mut plan)
+    } else {
+        plinth_sweep::complete_rigid_share(&mut plan);
+        None
+    };
+    let first_digest = plan.report.sweep_digest.clone();
+    let speculation = stop_after.is_none().then(|| SpeculationInputs {
+        first: plan.clone(),
+        mesh: hollowed.mesh().clone(),
+        hollow_history: hollowed.history().clone(),
+    });
+    let stage_inputs = &inputs;
     let second_started = std::time::Instant::now();
-    let plan = plinth_sweep::run_sweep_with_second_contact_seeded(
-        plan,
-        seed.as_deref(),
-        hollowed.mesh(),
-        &sweep_layers,
-        &policy,
-        &drains,
-        &vents,
-    )
-    .map_err(|source| {
+    let (second_run, side) = plinth_sweep::overlap(
+        || {
+            plinth_sweep::run_sweep_with_second_contact_seeded(
+                plan,
+                seed.as_deref(),
+                hollowed.mesh(),
+                &sweep_layers,
+                &policy,
+                &drains,
+                &vents,
+            )
+        },
+        || {
+            use std::panic::{catch_unwind, AssertUnwindSafe};
+            let rigid = first_rigid.map(|deferred| {
+                catch_unwind(AssertUnwindSafe(|| {
+                    let _phase = plinth_sweep::perf::scoped_phase(PerfPhase::FinalSweep);
+                    deferred.run()
+                }))
+            });
+            let speculative = speculation.map(|speculation| {
+                catch_unwind(AssertUnwindSafe(|| {
+                    speculative_emission(speculation, frame, &sweep_layers, stage_inputs, target)
+                }))
+            });
+            OverlappedWork { rigid, speculative }
+        },
+    );
+    // The side job catches its own panics; none can arrive here.
+    let side = side.unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+    let plan = second_run.map_err(|source| {
         ChainStop::new(PipelineError::Sweep {
             model: model.clone(),
             source,
         })
     })?;
     let second_seconds = second_started.elapsed().as_secs_f64();
+    // THE FIRST PLAN STANDS when the chooser did not keep the re-plan; only
+    // then is anything the side job made of use (and a panic in it is real:
+    // the serial order would have run the same code on the same plan and
+    // raised the same panic). A kept re-plan drops all of it, panics too.
+    let mut plan = plan;
+    let first_stands = !plan.report.seat_second_contact.kept_second;
+    assert!(
+        !first_stands || plan.report.sweep_digest == first_digest,
+        "the chooser kept the first plan, yet the plan it returned is not the first plan"
+    );
+    let mut speculative = None;
+    let OverlappedWork {
+        rigid: first_rigid_done,
+        speculative: first_emission_done,
+    } = side;
+    if first_stands {
+        if let Some(rigid) = first_rigid_done {
+            match rigid {
+                Ok(report) => plinth_sweep::store_rigid_share(&mut plan, report),
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        }
+        if let Some(done) = first_emission_done {
+            match done {
+                Ok(done) => speculative = Some(done),
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        }
+    } else {
+        // The staged file (if any) is removed here, before the real emission.
+        drop(first_rigid_done);
+        drop(first_emission_done);
+    }
     // The seed is consumed by the edit modes and released here, so it never
     // outlives the second contact into the emission.
     drop(seed);
@@ -3006,27 +3193,35 @@ fn sweep_and_emit(
     }
     let sweep_seconds = started.elapsed().as_secs_f64();
 
-    let frame = plinth_support::BuildFrame::new(
-        Finite::new(plate_z).unwrap_or_else(|_| {
-            // `plate_z` came out of a finite mesh extent minus a positive
-            // finite lift; the sweep already refused a non-finite bbox.
-            Finite::new(0.0).expect("zero is finite")
-        }),
-        inputs.lift_mm,
-    );
-    let emission = plinth_sweep::to_primitives(
-        &plan,
-        frame,
-        &sweep_layers,
-        inputs.max_primitives,
-        inputs.max_primitive_bytes,
-    )
-    .map_err(|source| {
-        ChainStop::new(PipelineError::SweepLowering {
-            model: model.clone(),
-            source,
-        })
-    })?;
+    // The lowering, from the speculation when the first plan stands (its
+    // error, if any, surfaces here, before the disclosure, as it always did).
+    let (emission, speculated_build) = match speculative {
+        Some(done) => match done {
+            Ok(SpeculativeEmission { emission, built }) => (emission, Some(built)),
+            Err(source) => {
+                return Err(ChainStop::new(PipelineError::SweepLowering {
+                    model: model.clone(),
+                    source,
+                }))
+            }
+        },
+        None => (
+            plinth_sweep::to_primitives(
+                &plan,
+                frame,
+                &sweep_layers,
+                inputs.max_primitives,
+                inputs.max_primitive_bytes,
+            )
+            .map_err(|source| {
+                ChainStop::new(PipelineError::SweepLowering {
+                    model: model.clone(),
+                    source,
+                })
+            })?,
+            None,
+        ),
+    };
 
     print_sweep_disclosure(
         model,
@@ -3045,46 +3240,82 @@ fn sweep_and_emit(
     // The raft the lowering appended after every support record
     // (fix/sweep-raft, 2026-09-29): its pads and bridges are counted as raft,
     // everything before them as support.
-    let raft_primitive_count = emission.raft_pads + emission.raft_bridges;
     let primitive_count = emission.primitives.len();
-    let (mesh, hollow_history) = hollowed.into_parts();
-    let history = plinth_support::SupportHistory::from_reports(
-        hollow_history,
-        plinth_support::SupportReport {
-            support_primitive_count: primitive_count.saturating_sub(raft_primitive_count),
-            raft_primitive_count,
-        },
-        frame,
-    );
-    let supported =
-        plinth_support::SupportedModel::from_parts(mesh, emission.primitives, history).map_err(
-            |source| {
-                ChainStop::new(PipelineError::Support {
-                    model: model.clone(),
-                    source,
-                })
-            },
-        )?;
-
-    set_phase(PerfPhase::Emit);
-    clock.entering("EmitWithoutGates");
-    // A failed write leaves no file AT THE TARGET: `plinth_emit::write` clears
-    // it on every failure path. An artifact an EARLIER run left at the same
-    // target is cleared the way the gated path clears it, so a failed model
-    // never leaves yesterday's answer sitting beside today's failure. The disk
-    // audit no longer fails a file that reads back (its findings ride on the
-    // report as WARNINGS), and a file that cannot be read back keeps its bytes
-    // BESIDE the target (`plinth_emit::failed_audit_path`), which this removal
-    // does not touch (fix/round100-emit, 2026-09-29).
-    let emit_mark = plinth_sweep::perf::stage("emit.write");
-    let written = plinth_emit::write(
-        &supported,
-        &EmitRequest {
+    // The supported model and the file: made beside the re-plan when the first
+    // plan stands (`speculative_emission`), else made here.
+    let (supported, written) = if let Some(built) = speculated_build {
+        drop(hollowed);
+        let SpeculativeBuilt { supported, staged } = built.map_err(|source| {
+            ChainStop::new(PipelineError::Support {
+                model: model.clone(),
+                source,
+            })
+        })?;
+        set_phase(PerfPhase::Emit);
+        clock.entering("EmitWithoutGates");
+        let request = EmitRequest {
             target_path: target.to_path_buf(),
             printer: inputs.printer.clone(),
-        },
-    );
-    drop(emit_mark);
+        };
+        let written = match staged {
+            // The file is already written and audited; this is `write`'s last
+            // step. The write's `emit.write` mark was made beside the re-plan.
+            Ok(staged) => staged.commit(),
+            // A speculative write that failed is reported by the one path that
+            // owns every write failure: the real write, run again.
+            Err(_) => {
+                let emit_mark = plinth_sweep::perf::stage("emit.write");
+                let written = plinth_emit::write(&supported, &request);
+                drop(emit_mark);
+                written
+            }
+        };
+        (supported, written)
+    } else {
+        // The raft the lowering appended after every support record
+        // (fix/sweep-raft, 2026-09-29): its pads and bridges are counted as
+        // raft, everything before them as support.
+        let raft_primitive_count = emission.raft_pads + emission.raft_bridges;
+        let (mesh, hollow_history) = hollowed.into_parts();
+        let history = plinth_support::SupportHistory::from_reports(
+            hollow_history,
+            plinth_support::SupportReport {
+                support_primitive_count: primitive_count.saturating_sub(raft_primitive_count),
+                raft_primitive_count,
+            },
+            frame,
+        );
+        let supported =
+            plinth_support::SupportedModel::from_parts(mesh, emission.primitives, history)
+                .map_err(|source| {
+                    ChainStop::new(PipelineError::Support {
+                        model: model.clone(),
+                        source,
+                    })
+                })?;
+
+        set_phase(PerfPhase::Emit);
+        clock.entering("EmitWithoutGates");
+        // A failed write leaves no file AT THE TARGET: `plinth_emit::write`
+        // clears it on every failure path. An artifact an EARLIER run left at
+        // the same target is cleared the way the gated path clears it, so a
+        // failed model never leaves yesterday's answer sitting beside today's
+        // failure. The disk audit no longer fails a file that reads back (its
+        // findings ride on the report as WARNINGS), and a file that cannot be
+        // read back keeps its bytes BESIDE the target
+        // (`plinth_emit::failed_audit_path`), which this removal does not touch
+        // (fix/round100-emit, 2026-09-29).
+        let emit_mark = plinth_sweep::perf::stage("emit.write");
+        let written = plinth_emit::write(
+            &supported,
+            &EmitRequest {
+                target_path: target.to_path_buf(),
+                printer: inputs.printer.clone(),
+            },
+        );
+        drop(emit_mark);
+        (supported, written)
+    };
     let emit = match written {
         Ok(report) => report,
         Err(source) => {

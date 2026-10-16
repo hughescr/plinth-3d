@@ -366,6 +366,7 @@ impl DemandSettings {
 pub const fn production_measurement_policy(emitted: SweepPolicy) -> SweepPolicy {
     SweepPolicy {
         stage_shake_capture: true,
+        rigid_share_capture: true,
         ..emitted
     }
 }
@@ -466,6 +467,35 @@ pub fn reuse_for(
     perf::add(perf::Work::CacheWinnerPlanHit, 1);
     let mut plan = retained.plan.clone();
     complete_for_emission(&mut plan);
+    Ok(plan)
+}
+
+/// [`reuse_for`], except that the rigid-body share reading stays DEFERRED on
+/// the returned plan (`plan.deferred_rigid_share`): the caller runs it beside
+/// other work (`deferred_rigid`) and stores the result. The shake check is
+/// completed as in [`reuse_for`]. On a plan with no deferred reading this is
+/// [`reuse_for`] exactly.
+///
+/// # Errors
+///
+/// A [`ReuseMiss`], as [`reuse_for`].
+pub fn reuse_for_deferring_rigid_share(
+    retained: &RetainedPlan,
+    mesh: &Mesh,
+    layers: &LayerPlan,
+    emitted: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+) -> Result<SweepPlan, ReuseMiss> {
+    if let Some(miss) = reuse_miss(retained, mesh, layers, emitted, drains, vents) {
+        perf::add(perf::Work::CacheWinnerPlanMiss, 1);
+        return Err(miss);
+    }
+    perf::add(perf::Work::CacheWinnerPlanHit, 1);
+    let mut plan = retained.plan.clone();
+    let rigid = plan.deferred_rigid_share.take();
+    complete_for_emission(&mut plan);
+    plan.deferred_rigid_share = rigid;
     Ok(plan)
 }
 
