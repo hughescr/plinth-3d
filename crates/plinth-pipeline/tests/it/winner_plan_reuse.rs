@@ -18,12 +18,34 @@
 
 use std::path::{Path, PathBuf};
 
-use plinth_pipeline::prepare::{prepare_with_reuse, SweepPlanSource, WinnerPlanReuse};
+use plinth_pipeline::prepare::{prepare_with_overrides, StageOverrides, SweepPlanSource, WinnerPlanReuse};
 use plinth_pipeline::{
-    prepare, registered_decimation_budget, registered_support_request, ModelPreparationOutcome,
-    OrientationPolicy, OutputProfile, PrepareReport, PrepareRequest,
+    registered_decimation_budget, registered_support_request, ModelPreparationOutcome,
+    OrientationPolicy, OutputProfile, PipelineError, PrepareReport, PrepareRequest,
 };
 use plinth_sweep::orient_demand::ReuseMiss;
+
+/// **This file tests the solid-first search** (`--no-hollow-first`): hollow first
+/// has been the default since 2026-10-16, and these tests assert what the
+/// solid-first route does, so they set it off explicitly. Hollow first has its
+/// own tests in `hollow_first.rs`.
+fn prepare_solid_first(request: PrepareRequest) -> Result<PrepareReport, PipelineError> {
+    prepare_solid_first_with(request, None)
+}
+
+/// [`prepare_solid_first`] with the winner-plan reuse set (the sabotage).
+fn prepare_solid_first_with(
+    request: PrepareRequest,
+    reuse: Option<WinnerPlanReuse>,
+) -> Result<PrepareReport, PipelineError> {
+    prepare_with_overrides(
+        request,
+        StageOverrides {
+            reuse,
+            hollow_first: Some(false),
+        },
+    )
+}
 
 struct Scratch(PathBuf);
 
@@ -128,8 +150,8 @@ fn a_reused_plan_and_a_planned_one_emit_the_same_file() {
     let scratch = Scratch::new("round25");
     place(&scratch, &round_25(), "Round_25");
 
-    let reused = prepare(request(&scratch, "reuse", false)).expect("the sweep route emits and warns");
-    let planned = prepare(request(&scratch, "bypass", true)).expect("the sweep route emits and warns");
+    let reused = prepare_solid_first(request(&scratch, "reuse", false)).expect("the sweep route emits and warns");
+    let planned = prepare_solid_first(request(&scratch, "bypass", true)).expect("the sweep route emits and warns");
     let (reused_bytes, reused_source) = emitted(&reused, "Round_25");
     let (planned_bytes, planned_source) = emitted(&planned, "Round_25");
 
@@ -169,8 +191,8 @@ fn a_drilled_shell_plans_for_itself_and_keeps_its_bytes() {
     let block = plinth_mesh::make_box([60.0, 60.0, 60.0], [0.0, 0.0, 0.0]).expect("a block");
     place(&scratch, &block, "block");
 
-    let reused = prepare(request(&scratch, "reuse", false)).expect("the sweep route emits and warns");
-    let planned = prepare(request(&scratch, "bypass", true)).expect("the sweep route emits and warns");
+    let reused = prepare_solid_first(request(&scratch, "reuse", false)).expect("the sweep route emits and warns");
+    let planned = prepare_solid_first(request(&scratch, "bypass", true)).expect("the sweep route emits and warns");
     let entry = reused
         .models
         .iter()
@@ -211,8 +233,8 @@ fn sabotage_emitting_another_poses_plan_changes_the_file() {
     let scratch = Scratch::new("sabotage");
     place(&scratch, &round_25(), "Round_25");
 
-    let honest = prepare(request(&scratch, "reuse", false)).expect("the sweep route emits and warns");
-    let wrong = prepare_with_reuse(
+    let honest = prepare_solid_first(request(&scratch, "reuse", false)).expect("the sweep route emits and warns");
+    let wrong = prepare_solid_first_with(
         request(&scratch, "wrong", false),
         Some(WinnerPlanReuse::SabotageOtherPose),
     )

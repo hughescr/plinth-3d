@@ -834,8 +834,10 @@ the stage that made it. It decides nothing.
   commit tiers all score on the exact table and the cuts keep their widths. With `exact-grid`
   too, the L1 and L2 proxy meshes are not built at all; alone, the proxy rung is still built
   because the grid reads it. It CHANGES the search: use `--no-cache`.
-- **Hollow first (`--hollow-first` or `PLINTH_HOLLOW_FIRST=1`; off by default; EXPERIMENTAL,
-  output-changing for hollowed models).** Each production finalist runs the hollow stage on
+- **Hollow first (ON by default since 2026-10-16, output-changing for hollowed models;
+  `--no-hollow-first` or `PLINTH_HOLLOW_FIRST=0` opts out; `--hollow-first` is still accepted
+  and, like `--no-hollow-first`, wins over the environment; the two together are refused).**
+  It acts only under `--orient dense --placement sweep`. Each production finalist runs the hollow stage on
   its own oriented solid (`plinth_hollow::drilled_shell_for_pose`, the body of
   `plinth_hollow::run`) and is swept as that drilled shell with its drains and vents; a pose
   the hollow stage does not hollow is swept as the solid, so a model that is never hollowed
