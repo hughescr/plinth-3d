@@ -990,11 +990,14 @@ pub enum Rows {
     /// sized print (no ids), to diff the second-contact re-plan against the
     /// winner offline. Traced runs only.
     MemberPrint,
+    /// One `lip_seat::apply` call (lane S2, 2026-10-15): what the open jobs'
+    /// deep scan did, and the exact-key memo probe where it is on.
+    LipScan,
 }
 
 /// The widest row payload.
 pub const ROW_WIDTH: usize = 16;
-const ROWS_N: usize = 16;
+const ROWS_N: usize = 17;
 
 impl Rows {
     /// Every kind.
@@ -1015,6 +1018,7 @@ impl Rows {
         Self::RemovalAttempt,
         Self::TiePass,
         Self::MemberPrint,
+        Self::LipScan,
     ];
 
     /// Whether this kind is stored in light mode (`PLINTH_PERF_LIGHT=1`): the
@@ -1024,7 +1028,7 @@ impl Rows {
     pub const fn light(self) -> bool {
         matches!(
             self,
-            Self::LipApply | Self::LipApplyB | Self::LipApplyOpen | Self::RemovalAttempt
+            Self::LipApply | Self::LipApplyB | Self::LipApplyOpen | Self::RemovalAttempt | Self::LipScan
         )
     }
 
@@ -1041,7 +1045,12 @@ impl Rows {
             Self::DownPass | Self::DownRun | Self::LipRound => 200_000,
             Self::DownLayer | Self::DownVisit => 2_000_000,
             Self::DownInsert => 500_000,
-            Self::LipApply | Self::LipApplyB | Self::LipApplyOpen | Self::RemovalAttempt | Self::TiePass => {
+            Self::LipApply
+            | Self::LipApplyB
+            | Self::LipApplyOpen
+            | Self::RemovalAttempt
+            | Self::TiePass
+            | Self::LipScan => {
                 50_000
             }
             Self::MemberPrint => 1_000_000,
@@ -1072,6 +1081,7 @@ impl Rows {
             Self::RemovalAttempt => "s0.removal.attempt",
             Self::TiePass => "s0.tie.pass",
             Self::MemberPrint => "s0.member.print",
+            Self::LipScan => "s2.lip.scan",
         }
     }
 
@@ -1296,6 +1306,35 @@ impl Rows {
             // landing named by its host's cell and top) and path; `sized`
             // adds the drawn radii.
             Self::MemberPrint => &["stage", "place", "sized"],
+            // `scans`: deep scans of the open jobs (one per round start);
+            // `rounds`: the rounds they settled ahead (none committing);
+            // `chunks`: the chunks they evaluated; `cands`: the candidates
+            // they moved the cursors over; `passes` /
+            // `child_rows`: the movers and the children they read;
+            // `ref_path` / `ref_clear`: candidates they settled as refused;
+            // `stops`: scans that found a candidate past the clearance test;
+            // `scan_ns` the scans' driver time, `read_ns` of it in the
+            // kernel batch. `probe_*` (`PLINTH_S2_MEMO_PROBE=1` only): mover
+            // reads sent to the kernel from this call (scan and read-ahead
+            // rows), and of them, those whose exact kernel inputs and bound
+            // were read earlier in the same call / earlier in the sweep.
+            Self::LipScan => &[
+                "clearance",
+                "scans",
+                "rounds",
+                "chunks",
+                "cands",
+                "passes",
+                "child_rows",
+                "ref_path",
+                "ref_clear",
+                "stops",
+                "scan_ns",
+                "read_ns",
+                "probe_rows",
+                "probe_call",
+                "probe_sweep",
+            ],
             Self::TipBatch => &["rows", "faces", "wall_ns"],
             Self::PartnerSearch => &[
                 "kind",
@@ -1919,11 +1958,13 @@ pub enum ClearSite {
     HeadJoin = 6,
     /// Graze heads.
     Graze = 7,
+    /// Lip-seat: the open jobs' deep scan (lane S2).
+    LipScan = 8,
 }
 
 impl ClearSite {
     /// The names, in code order (for the report).
-    pub const NAMES: [&'static str; 8] = [
+    pub const NAMES: [&'static str; 9] = [
         "other",
         "lip.before",
         "lip.drawn",
@@ -1932,6 +1973,7 @@ impl ClearSite {
         "descent",
         "head_join",
         "graze",
+        "lip.scan",
     ];
 }
 
@@ -2918,7 +2960,7 @@ mod tests {
         assert_eq!(before, labels.len());
         // The clearance rows carry the site column.
         assert_eq!(Rows::ClearBatch.cols().last(), Some(&"site"));
-        assert_eq!(ClearSite::NAMES.len(), ClearSite::Graze as usize + 1);
+        assert_eq!(ClearSite::NAMES.len(), ClearSite::LipScan as usize + 1);
     }
 
     #[test]
