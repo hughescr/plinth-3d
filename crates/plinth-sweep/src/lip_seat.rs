@@ -2625,55 +2625,53 @@ fn lip_seat_scan() -> bool {
 
 /// The candidates of a job's first scan chunk (and its first after a commit):
 /// a walk that stops early evaluates at most this many past its stop, and a
-/// long walk doubles from here ([`ScanSizing`]).
+/// long walk doubles from here ([`ScanStore::next_len`]).
 pub(crate) const SCAN_FIRST: usize = 16;
 
-/// The driver time one scan chunk aims at, in nanoseconds: long enough that
-/// the pool hand-off and the kernel call's fixed cost (about 0.1 ms, S0
-/// item 2) are a few per cent of it, short enough that a stop wastes little.
-const SCAN_CHUNK_NS: f64 = 4.0e6;
+/// The kernel reads (movers and children) one scan chunk aims at. S0 item 2
+/// measured 17.7-20.5 us of thread time per lip-seat read row in a traced
+/// run (an upper bound; ~140 us of fixed cost per batch, latency-bound), so
+/// a chunk of this many rows is a few milliseconds over 12 threads: the
+/// fixed cost is a few per cent of it, and a commit throws little away. Rows,
+/// not time, so the work a run does (its `Work` perf counters, and the reads
+/// the scan makes) is the same at every thread count and on every run.
+const SCAN_CHUNK_ROWS: f64 = 4096.0;
 
-/// **How many candidates the next scan chunk takes**, from what the chunks
-/// of this `apply` call measured: the wall time and the bytes (trial solids
-/// and paths) per candidate. A job's chunk at most doubles its one before (so
-/// the work a commit throws away is at most the work before it, plus
-/// [`SCAN_FIRST`]), aims at [`SCAN_CHUNK_NS`] at the measured cost, and holds
-/// its rows to `bytes` (a share of a quarter of the read-ahead's limit, as
-/// one read-ahead call is held to a quarter). A schedule only: the scan's
-/// answers do not depend on it.
-#[derive(Default)]
-struct ScanSizing {
-    ns_per_candidate: Option<f64>,
-    bytes_per_candidate: Option<f64>,
-}
-
-impl ScanSizing {
+impl ScanStore {
+    /// **How many candidates the job's next scan chunk takes**, from what its
+    /// earlier chunks measured: the kernel rows and the bytes (trial solids
+    /// and paths) per candidate. A chunk at most doubles the one before (so
+    /// the work a commit throws away is at most the work before it, plus
+    /// [`SCAN_FIRST`]), aims at [`SCAN_CHUNK_ROWS`] rows at the measured
+    /// rate, and holds its rows to `bytes` (a share of a quarter of the
+    /// read-ahead's limit, as one read-ahead call is held to a quarter). A
+    /// schedule only: the scan's answers do not depend on it.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         clippy::cast_precision_loss,
         reason = "a chunk length from measured rates: positive, finite, far below 2^52"
     )]
-    fn next_len(&self, previous: Option<usize>, bytes: usize) -> usize {
-        let Some(previous) = previous else {
+    fn next_len(&self, bytes: usize) -> usize {
+        let Some(previous) = self.chunk else {
             return SCAN_FIRST;
         };
         let doubled = previous.saturating_mul(2);
-        let by_time = self
-            .ns_per_candidate
-            .map_or(doubled, |ns| (SCAN_CHUNK_NS / ns.max(1.0)) as usize)
+        let by_rows = self
+            .rows_per_candidate
+            .map_or(doubled, |rate| (SCAN_CHUNK_ROWS / rate.max(1.0e-3)) as usize)
             .max(SCAN_FIRST);
         let by_bytes = self
             .bytes_per_candidate
             .map_or(usize::MAX, |per| (bytes as f64 / per.max(1.0)) as usize)
             .max(1);
-        doubled.min(by_time).min(by_bytes).max(1)
+        doubled.min(by_rows).min(by_bytes).max(1)
     }
 
     #[expect(clippy::cast_precision_loss, reason = "rates from counts far below 2^52")]
-    fn measured(&mut self, candidates: usize, ns: u64, bytes: usize) {
+    fn measured(&mut self, candidates: usize, rows: usize, bytes: usize) {
         if candidates > 0 {
-            self.ns_per_candidate = Some(ns as f64 / candidates as f64);
+            self.rows_per_candidate = Some(rows as f64 / candidates as f64);
             self.bytes_per_candidate = Some(bytes as f64 / candidates as f64);
         }
     }
@@ -2729,7 +2727,8 @@ impl Verdict {
 /// candidates `from..`, settled against the field at `generation` and valid
 /// at that generation only (a commit bumps it, [`StampedIndex::stamp_strut`];
 /// nothing else a round does changes what a verdict reads). `chunk` is the
-/// length of the job's last chunk ([`ScanSizing`]). The counts a round start
+/// length of the job's last chunk, and the rates the next chunk is sized
+/// from ([`ScanStore::next_len`]). The counts a round start
 /// asks of it ([`Pending::stored_walk`]) are kept as verdicts come and go, so
 /// asking costs nothing however long the store is.
 #[derive(Default)]
@@ -2738,6 +2737,8 @@ struct ScanStore {
     from: usize,
     verdicts: std::collections::VecDeque<Verdict>,
     chunk: Option<usize>,
+    rows_per_candidate: Option<f64>,
+    bytes_per_candidate: Option<f64>,
     /// Clearance verdicts pushed and popped since the store was last cleared.
     pushed_refused: usize,
     popped_refused: usize,
@@ -2964,7 +2965,7 @@ fn scan_chunk(
     clearance: bool,
     standing_reads: &mut StandingReads,
     s0: &mut S0Apply,
-) -> (Vec<Verdict>, usize) {
+) -> (Vec<Verdict>, usize, usize) {
     use rayon::prelude::*;
     let plate_z_mm = frame.plate_z_mm;
     let judged: Vec<Option<(ScanPass, SweepArm)>> = candidates
@@ -2988,7 +2989,7 @@ fn scan_chunk(
         }));
     }
     if rows.is_empty() {
-        return (passes.iter().map(|_| Verdict::Path).collect(), bytes);
+        return (passes.iter().map(|_| Verdict::Path).collect(), 0, bytes);
     }
     standing_reads.read(frame, arms, struts, &[mover], true);
     let bounds: Vec<f64> = rows
@@ -3054,6 +3055,7 @@ fn scan_chunk(
         }
         (child_reads, child_bounds)
     };
+    let read_rows = rows.len() + followers.len();
     if s0.on {
         s0.scan.passes += rows.len() as u64;
         s0.scan.child_rows += followers.len() as u64;
@@ -3088,7 +3090,7 @@ fn scan_chunk(
             children_read.unwrap_or((&[], &[], &[])),
         ));
     }
-    (verdicts, bytes)
+    (verdicts, read_rows, bytes)
 }
 
 /// **One candidate's verdict, asked alone** (the shadow check of
@@ -3214,7 +3216,6 @@ fn scan_open_jobs(
     clearance: bool,
     standing_reads: &mut StandingReads,
     ledger: &mut Ledger,
-    sizing: &mut ScanSizing,
     outcome: &mut LipSeatOutcome,
     s0: &mut S0Apply,
 ) -> bool {
@@ -3249,10 +3250,9 @@ fn scan_open_jobs(
         for slot in short {
             let job = &mut pending[slot];
             let from = job.scan.end();
-            let take = sizing.next_len(job.scan.chunk, bytes);
+            let take = job.scan.next_len(bytes);
             let end = from.saturating_add(take).min(job.candidates.len());
-            let chunk_started = std::time::Instant::now();
-            let (verdicts, chunk_bytes) = scan_chunk(
+            let (verdicts, chunk_rows, chunk_bytes) = scan_chunk(
                 frame,
                 context,
                 index,
@@ -3265,7 +3265,7 @@ fn scan_open_jobs(
                 standing_reads,
                 s0,
             );
-            sizing.measured(end - from, s0_ns(chunk_started), chunk_bytes);
+            job.scan.measured(end - from, chunk_rows, chunk_bytes);
             if s0.on {
                 s0.scan.chunks += 1;
             }
@@ -3645,7 +3645,6 @@ pub(crate) fn apply(
     let mut ledger = Ledger::new();
     let mut open: Vec<usize> = (0..pending.len()).collect();
     let mut done = vec![false; pending.len()];
-    let mut sizing = ScanSizing::default();
     let scan = lip_seat_scan();
     while !open.is_empty() {
         // A cancelled pose stops between rounds. The answer is read by nothing:
@@ -3682,7 +3681,6 @@ pub(crate) fn apply(
                     trigger.is_clearance(),
                     &mut standing_reads,
                     &mut ledger,
-                    &mut sizing,
                     outcome,
                     &mut s0,
                 ) {
