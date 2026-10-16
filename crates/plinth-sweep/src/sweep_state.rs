@@ -186,6 +186,12 @@ pub(crate) struct Prefix {
     /// key (mesh content, layers, policy incl. the surface pitch and cap,
     /// holes) is not the request's before any re-plan starts from it.
     pub(crate) contacts: Arc<crate::contact_growth::MeasureMemo>,
+    /// The bounded solid-clearance rows the lip-seat rule has asked of
+    /// `model_surface` ([`crate::clearance_memo`]). Shared by every clone of
+    /// the prefix, as `model_surface` is, and sound for the same reason as
+    /// `contacts`: a prefix is only consumed with its own mesh, so its
+    /// surface cell is always that mesh's.
+    pub(crate) clearances: Arc<crate::clearance_memo::ClearanceMemo>,
     pub(crate) seat_face_rule: SeatFaceRule,
     pub(crate) head_registry: Option<(&'static TipContactProfiles, HeadRule)>,
     pub(crate) struts: Vec<SweepStrut>,
@@ -288,6 +294,7 @@ impl Prefix {
         // The contact memo is shared by the clones of this prefix: each clone
         // counts it, which only over-estimates.
         bytes += self.contacts.approx_bytes();
+        bytes += self.clearances.approx_bytes();
         bytes
     }
 }

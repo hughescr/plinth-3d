@@ -809,6 +809,7 @@ fn a_head_join_keeps_a_headed_lander_where_it_is() {
         surface_max_bytes: 1 << 28,
         surface: &surface,
         contacts: &crate::contact_growth::MeasureMemo::default(),
+        clearances: None,
     };
     let build = |headed_lander: bool| {
         let mut host = straight(&grid, 0, 150, 150, 200, 0.4);
@@ -910,6 +911,7 @@ fn the_lip_seat_pass_never_re_lands_a_headed_arm_on_either_trigger() {
         surface_max_bytes: 1 << 20,
         surface: &surface,
         contacts: &crate::contact_growth::MeasureMemo::default(),
+        clearances: None,
     };
     let bite = plinth_support::ShaftSeatBite {
         bite_mm: 0.2,
@@ -991,6 +993,7 @@ fn the_standing_seat_read_is_a_memo_of_the_uncached_read() {
         surface_max_bytes: 1 << 28,
         surface: &surface,
         contacts: &contacts,
+        clearances: None,
     };
     // The code before the lane: one whole-pair read, no memo.
     let uncached = |pairs: &[(usize, &plinth_support::SweepArm, &plinth_support::SweepArm)]| {
@@ -1175,6 +1178,7 @@ fn an_inadmissible_cheapest_descent_does_not_end_the_slenderness_search() {
             surface_max_bytes: 1 << 28,
             surface: &surface,
             contacts: &crate::contact_growth::MeasureMemo::default(),
+            clearances: None,
         };
         let mut struts = vec![straight(&grid, 0, 150, 150, 200, 0.1)];
         if let Some(col) = root_col {
@@ -1294,6 +1298,7 @@ fn the_deep_scan_gives_the_rounds_answer() {
             surface_max_bytes: 1 << 28,
             surface: &surface,
             contacts: &crate::contact_growth::MeasureMemo::default(),
+            clearances: None,
         };
         let mut struts = vec![
             straight(&grid, 0, 150, 150, 200, 0.1),
@@ -1356,6 +1361,144 @@ fn the_deep_scan_gives_the_rounds_answer() {
         assert_eq!(scan_moves, rounds_moves, "{what}: the moves are the rounds' moves");
         assert_eq!(scan_field, rounds_field, "{what}: the field is the rounds' field");
         assert_eq!(child_refused > 0, child, "{what}: anti-vacuity: a child's read refused candidates: {child_refused}");
+    }
+}
+
+/// **THE CLEARANCE MEMO GIVES THE KERNEL'S ANSWER** (perf lane memo,
+/// 2026-10-15; `clearance_memo`). The deep scan's fields (the low block, the
+/// tall block, a child that follows its mover), each re-landed by `apply`
+/// with no memo, then twice on one memo (as lip seats A and B, and the P2
+/// re-plan, ask the same rows of one surface), then on a memo whose byte
+/// limit holds almost nothing.
+///
+/// TEST: every memo run's field, outcome and moves are the memo-less run's;
+/// on the low block and the child (whose reads clear, so a hit decides a
+/// move) the shadow check (`PLINTH_SWEEP_VERIFY_LIPSEAT`) re-reads every hit
+/// from the kernel and compares the bits. The small memo's table never
+/// holds more than its limit. ANTI-VACUITY: the second call on a memo
+/// answers rows from it (hits), and the small memo leaves rows unkept.
+/// SABOTAGE: a memo whose hits read `None` changes the low block's and the
+/// child's outcome.
+#[test]
+fn the_clearance_memo_gives_the_kernels_answer() {
+    use crate::clearance_memo::ClearanceMemo;
+    let grid = grid();
+    let history = ColumnHistory::new(&grid);
+    let keep_out = crate::drain::DrainKeepOut::none();
+    let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+    let off = crate::slenderness::SlendernessLaw::disabled();
+    let low = boxes_mesh(&[
+        ([0.0, 0.0, 10.0], [15.0, 15.0, 12.0]),
+        ([6.0, 6.0, 0.5], [9.0, 9.0, 2.0]),
+    ]);
+    let tall = boxes_mesh(&[
+        ([0.0, 0.0, 10.0], [15.0, 15.0, 12.0]),
+        ([5.5, 5.0, 0.5], [9.5, 10.5, 7.0]),
+    ]);
+    let child_block = boxes_mesh(&[
+        ([0.0, 0.0, 10.0], [15.0, 15.0, 12.0]),
+        ([6.0, 6.0, 0.5], [9.0, 9.0, 2.0]),
+        ([6.5, 8.2, 6.0], [8.0, 8.8, 7.0]),
+    ]);
+    let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
+    let bite = plinth_support::ShaftSeatBite {
+        bite_mm: 0.2,
+        approach_deg: 60.0,
+        limit_deg: 20.0,
+    };
+    // One `apply` on `mesh` through `memo` (none: the kernel alone), on a
+    // surface built once per mesh and shared by every run on it, as a plan's
+    // prefix shares its surface cell with its memo.
+    let run = |mesh: &plinth_mesh::Mesh,
+               surface: &std::sync::OnceLock<Option<geom_kernel::NativeSurface>>,
+               child: bool,
+               memo: Option<&ClearanceMemo>,
+               verify: bool| {
+        let context = slender_context(&grid, &history, &keep_out, &lean, &off);
+        let joins = crate::head_join::HeadJoinContext {
+            slender: &context,
+            mesh,
+            layer_plan: &plan,
+            plate_z_mm: 0.0,
+            clearance_mm: 0.3,
+            standoff_mm: 0.6,
+            surface_pitch_mm: 0.1,
+            surface_max_bytes: 1 << 28,
+            surface,
+            contacts: &crate::contact_growth::MeasureMemo::default(),
+            clearances: memo,
+        };
+        let mut struts = vec![
+            straight(&grid, 0, 150, 150, 200, 0.1),
+            straight(&grid, 1, 160, 145, 200, 0.1),
+        ];
+        if child {
+            let (landing, k_top) = (60_usize, 200_usize);
+            let mut rests = straight(&grid, 2, 165, 175, k_top, 0.1);
+            rests.landing = Landing::Strut { id: 0, layer: landing };
+            rests.k_bottom = landing;
+            rests.radius_mm = vec![0.1; k_top - landing + 1];
+            rests.carried_mm2 = vec![0.0; k_top - landing + 1];
+            rests.path = (landing..k_top)
+                .map(|layer| {
+                    let at = |from: usize, to: usize| from + (to - from) * (layer - landing) / (k_top - landing);
+                    cell_u32(grid.index(at(150, 165), at(150, 175)))
+                })
+                .collect();
+            struts.push(rests);
+        }
+        let arms = tilted_arms(&grid, &mut struts);
+        let mut bites = vec![Some(bite); 2];
+        bites.resize(struts.len(), None);
+        let ((outcome, moves), _, _) = crate::lip_seat::with_scan(true, verify, || {
+            let mut outcome = crate::lip_seat::LipSeatOutcome::default();
+            let moves = crate::lip_seat::apply(
+                &joins,
+                &plan,
+                0.0,
+                &mut struts,
+                &arms,
+                &bites,
+                crate::lip_seat::Trigger::SeatBite,
+                &[],
+                &mut outcome,
+            );
+            (outcome, moves.len())
+        });
+        (format!("{struts:?}"), format!("{outcome:?}"), moves)
+    };
+    for (what, mesh, child, decides) in [
+        ("low block", &low, false, true),
+        ("tall block", &tall, false, false),
+        ("a child that follows", &child_block, true, true),
+    ] {
+        let surface = std::sync::OnceLock::new();
+        let kernel = run(mesh, &surface, child, None, false);
+        let memo = ClearanceMemo::with_limit(64 << 20);
+        for call in 0..2 {
+            assert_eq!(run(mesh, &surface, child, Some(&memo), decides), kernel, "{what}: call {call} on the memo");
+        }
+        let stats = memo.stats();
+        assert!(stats.hits > 0 && stats.misses > 0, "{what}: anti-vacuity: the second call hit: {stats:?}");
+        assert_eq!(stats.unkept, 0, "{what}: {stats:?}");
+        let limit = 4 << 10;
+        let small = ClearanceMemo::with_limit(limit);
+        for _ in 0..2 {
+            assert_eq!(run(mesh, &surface, child, Some(&small), false), kernel, "{what}: the small memo");
+        }
+        let stats = small.stats();
+        assert!(stats.unkept > 0, "{what}: anti-vacuity: the small memo left rows unkept: {stats:?}");
+        assert!(stats.held <= limit, "{what}: the table holds no more than its limit: {stats:?}");
+        if decides {
+            let lying = ClearanceMemo::with_limit(64 << 20);
+            run(mesh, &surface, child, Some(&lying), false);
+            lying.sabotage();
+            assert_ne!(
+                run(mesh, &surface, child, Some(&lying), false),
+                kernel,
+                "{what}: SABOTAGE: a memo whose hits read None must change the answer"
+            );
+        }
     }
 }
 
@@ -1428,6 +1571,7 @@ fn the_deep_scan_holds_its_byte_budget_and_gives_the_rounds_answer() {
             surface_max_bytes: 1 << 28,
             surface: &surface,
             contacts: &crate::contact_growth::MeasureMemo::default(),
+            clearances: None,
         };
         let arms = tilted_arms(grid, &mut struts);
         let trigger = violators.map_or(crate::lip_seat::Trigger::SeatBite, |violators| {
@@ -1656,6 +1800,7 @@ fn a_stub_is_kept_in_place_of_a_lean_unless_the_lean_seats_where_it_does_not() {
             surface_max_bytes: 1 << 28,
             surface: &surface,
             contacts: &crate::contact_growth::MeasureMemo::default(),
+            clearances: None,
         };
         let mut arm = straight(&grid, 0, 150, 150, 200, 0.1);
         if stub {
@@ -1776,6 +1921,7 @@ fn a_lean_only_the_taper_would_hold_is_refused_while_the_arm_stands() {
             surface_max_bytes: 1 << 28,
             surface: &surface,
             contacts: &crate::contact_growth::MeasureMemo::default(),
+            clearances: None,
         };
         let mut arm = straight(&grid, 0, 150, 150, 200, 0.1);
         if stub {
@@ -1860,6 +2006,7 @@ fn lip_seat_field_passes(
         surface_max_bytes: 1 << 28,
         surface: &surface,
         contacts: &crate::contact_growth::MeasureMemo::default(),
+        clearances: None,
     };
     let mut outcome = crate::lip_seat::LipSeatOutcome::default();
     let mut last = Vec::new();
@@ -2601,6 +2748,7 @@ mod graze_conversion {
             surface_max_bytes: 1 << 28,
             surface: &surface,
             contacts: &crate::contact_growth::MeasureMemo::default(),
+            clearances: None,
         };
         let constants = plinth_core::m0_constants().expect("the registry");
         let profiles = constants.evidence().chitubox_tip_contact_profiles().value();

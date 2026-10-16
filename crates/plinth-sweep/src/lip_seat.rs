@@ -2133,6 +2133,69 @@ struct ReadFrame<'a> {
     layer_plan: &'a LayerPlan,
     plate_z_mm: f64,
     tier: f64,
+    /// The plan's memo of bounded rows asked of `surface`
+    /// ([`HeadJoinContext::clearances`], whose surface cell `surface` is).
+    memo: Option<&'a crate::clearance_memo::ClearanceMemo>,
+}
+
+/// The kernel's bounded reading of `frame`'s rows against `at_least`, one
+/// batch: a row proven below its bound, or undecided, reads `None`. `Err`
+/// only where the frame's arrays are not all one length.
+fn kernel_at_least(
+    surface: &NativeSurface,
+    frame: &SolidFrame,
+    at_least: &[f64],
+) -> Result<Vec<Option<f64>>, geom_kernel::BatchInputError> {
+    surface
+        .segment_clearance_classified_at_least(
+            &frame.seats,
+            &frame.bases,
+            &frame.radii,
+            &frame.radii,
+            0.0,
+            &frame.insets,
+            &frame.landing_zones,
+            at_least,
+        )
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| row.and_then(SegmentClearanceClassified::clearance_mm))
+                .collect()
+        })
+}
+
+impl SolidFrame {
+    /// Whether every per-row array holds `n` rows (the kernel's only
+    /// refusal of a batch is a length mismatch).
+    fn rows_are(&self, n: usize) -> bool {
+        [self.seats.len(), self.bases.len(), self.radii.len(), self.insets.len(), self.landing_zones.len()]
+            .iter()
+            .all(|&len| len == n)
+    }
+
+    /// The exact memo key of row `at` under `bound`
+    /// ([`crate::clearance_memo::RowKey`]: every kernel input of the row).
+    fn key(&self, at: usize, bound: f64) -> crate::clearance_memo::RowKey {
+        crate::clearance_memo::RowKey::of(
+            self.seats[at],
+            self.bases[at],
+            self.radii[at],
+            self.insets[at],
+            self.landing_zones[at],
+            bound,
+        )
+    }
+
+    /// The rows `rows` of this frame, in that order.
+    fn select(&self, rows: &[usize]) -> Self {
+        Self {
+            seats: rows.iter().map(|&at| self.seats[at]).collect(),
+            bases: rows.iter().map(|&at| self.bases[at]).collect(),
+            radii: rows.iter().map(|&at| self.radii[at]).collect(),
+            insets: rows.iter().map(|&at| self.insets[at]).collect(),
+            landing_zones: rows.iter().map(|&at| self.landing_zones[at]).collect(),
+        }
+    }
 }
 
 impl ReadFrame<'_> {
@@ -2152,6 +2215,15 @@ impl ReadFrame<'_> {
     /// or above `at_least[i]` is wanted: a row the kernel proves below its
     /// bound reads `None`, as an undecided row does, and every other row is
     /// the full reading ([`NativeSurface::segment_clearance_classified_at_least`]).
+    ///
+    /// **Through the plan's memo** ([`crate::clearance_memo`]): the rows it
+    /// holds by their exact kernel inputs and bound are answered from it, the
+    /// rest go to the kernel in ONE batch (each row's answer is independent of
+    /// the batch that carries it) and are kept. The answer is the kernel's,
+    /// bit for bit, row for row. A call the kernel would refuse as a batch
+    /// (arrays of unequal length) skips the memo and is answered as before.
+    /// `PLINTH_SWEEP_VERIFY_LIPSEAT=1` re-reads every hit from the kernel and
+    /// panics on a difference.
     fn solid_at_least(&self, arms: &[SweepArm], on_model: &[bool], at_least: &[f64]) -> Vec<Option<f64>> {
         let n = arms.len();
         let frame = solid_frame(
@@ -2162,25 +2234,52 @@ impl ReadFrame<'_> {
             self.plate_z_mm,
             self.tier,
         );
-        self.surface
-            .segment_clearance_classified_at_least(
-                &frame.seats,
-                &frame.bases,
-                &frame.radii,
-                &frame.radii,
-                0.0,
-                &frame.insets,
-                &frame.landing_zones,
-                at_least,
-            )
-            .map_or_else(
-                |_| vec![None; n],
-                |rows| {
-                    rows.into_iter()
-                        .map(|row| row.and_then(SegmentClearanceClassified::clearance_mm))
-                        .collect()
-                },
-            )
+        let memo = self
+            .memo
+            .filter(|memo| n > 0 && at_least.len() == n && frame.rows_are(n) && memo.on());
+        let Some(memo) = memo else {
+            return kernel_at_least(self.surface, &frame, at_least).unwrap_or_else(|_| vec![None; n]);
+        };
+        let keys: Vec<crate::clearance_memo::RowKey> =
+            at_least.iter().enumerate().map(|(at, &bound)| frame.key(at, bound)).collect();
+        let kept = memo.look_up(&keys);
+        let misses: Vec<usize> = (0..n).filter(|&at| kept[at].is_none()).collect();
+        let hits = (n - misses.len()) as u64;
+        crate::perf::add(crate::PerfWork::LipSeatMemoHits, hits);
+        crate::perf::add(crate::PerfWork::LipSeatMemoMisses, crate::perf::count(misses.len()));
+        let read = if misses.is_empty() {
+            Vec::new()
+        } else {
+            let bounds: Vec<f64> = misses.iter().map(|&at| at_least[at]).collect();
+            // Every array is `misses.len()` long by construction, so the
+            // kernel cannot refuse it; were it to, nothing is kept and the call
+            // answers as a refused batch did.
+            let Ok(read) = kernel_at_least(self.surface, &frame.select(&misses), &bounds) else {
+                return vec![None; n];
+            };
+            let unkept = memo.keep(&keys, &misses, &read);
+            crate::perf::add(crate::PerfWork::LipSeatMemoUnkept, unkept);
+            read
+        };
+        let mut answers: Vec<Option<f64>> = Vec::with_capacity(n);
+        let mut fresh = read.into_iter();
+        for row in kept {
+            answers.push(match row {
+                Some(answer) => answer,
+                None => fresh.next().flatten(),
+            });
+        }
+        if hits > 0 && verify_lip_seat() {
+            let alone = kernel_at_least(self.surface, &frame, at_least).unwrap_or_else(|_| vec![None; n]);
+            for (at, (memo_answer, kernel_answer)) in answers.iter().zip(&alone).enumerate() {
+                assert_eq!(
+                    memo_answer.map(f64::to_bits),
+                    kernel_answer.map(f64::to_bits),
+                    "PLINTH_SWEEP_VERIFY_LIPSEAT: the clearance memo's row {at} differs from the kernel's"
+                );
+            }
+        }
+        answers
     }
 }
 
@@ -3998,6 +4097,7 @@ pub(crate) fn apply(
                     layer_plan,
                     plate_z_mm,
                     tier,
+                    memo: joins.clearances,
                 };
                 let lap = s0.mark;
                 if !scan_open_jobs(
@@ -4198,6 +4298,7 @@ pub(crate) fn apply(
                     layer_plan,
                     plate_z_mm,
                     tier,
+                    memo: joins.clearances,
                 };
                 // The movers as they stand first: what each must not come
                 // nearer than bounds its trial read.

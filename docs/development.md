@@ -742,6 +742,15 @@ digest sees it.
   `PLINTH_S2_MEMO_PROBE=1` (with `--perf`) counts the movers' clearance reads by their exact
   kernel inputs and bound, and how many repeat within the call and within the sweep (the
   `probe_*` columns): the prize an exact read memo could take.
+- **Lip-seat clearance memo (lane memo, 2026-10-15).** Every bounded solid-clearance row the
+  lip-seat rule sends to the kernel (scan, read-ahead, followers) is kept by its exact kernel
+  inputs and bound in a memo the plan's prefix carries beside its model surface cell
+  (`clearance_memo.rs`), so the later `apply` calls of the plan and the second-contact re-plan
+  started from that prefix answer repeats without the kernel. Work counters
+  `lip_seat.memo.hits`, `lip_seat.memo.misses`, `lip_seat.memo.unkept`. The table's allocated
+  bytes are held to `PLINTH_SWEEP_LIPSEAT_MEMO_BYTES` (default 128 MiB; `0` turns the memo off;
+  a smaller limit changes speed, never the output). `PLINTH_SWEEP_VERIFY_LIPSEAT=1` also
+  re-reads every memo hit from the kernel and panics on a difference.
 
 ## Pose-search diagnostics: `DIR/<model>.orient.json`
 
