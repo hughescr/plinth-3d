@@ -1877,6 +1877,9 @@ pub(crate) fn apply(
     let mut cover_retired = vec![false; searches.len()];
     let mut is_helper = vec![false; arms.len()];
     let mut cover_spawns = 0_usize;
+    // The last walk: the slid seats it was asked about and its answer.
+    type Walked = (Vec<crate::demand_replay::MovedSeat>, Vec<crate::demand_replay::StrandedCell>);
+    let mut cover_last_walk: Option<Walked> = None;
     // THE TIP COVER's state ([`TipCover`]): per slot, the cells (in the plane,
     // on the tip's seat layer) a slide of it once stranded, which every later
     // candidate's root must reach; whether a slide of it was ever blamed; and
@@ -2333,12 +2336,24 @@ pub(crate) fn apply(
         break;
     }
     outcome.cover.enabled = true;
-    outcome.cover.checks += 1;
-    let stranded = (tip_cover.stranded)(&*struts, &moved);
+    // The walk is a pure function of the field (which this rule does not
+    // change) and the slid seats: a turn that leaves the slid seats as the
+    // last walk saw them (a re-search that admitted nothing, a kept slide
+    // with no helper) reads that walk's answer again.
+    let first_walk = cover_last_walk.is_none();
+    let stranded = match &cover_last_walk {
+        Some((seats, cells)) if *seats == moved => cells.clone(),
+        _ => {
+            outcome.cover.checks += 1;
+            let cells = (tip_cover.stranded)(&*struts, &moved);
+            cover_last_walk = Some((moved.clone(), cells.clone()));
+            cells
+        }
+    };
     if crate::cancel::cancelled() {
         return outcome;
     }
-    if outcome.cover.checks == 1 {
+    if first_walk {
         let found = &mut outcome.cover;
         found.found_cells = stranded.len();
         found.found_surface_cells = stranded.iter().filter(|cell| cell.surface).count();

@@ -277,9 +277,9 @@ fn an_onto_face_slide_no_reseat_can_save_is_kept_and_warned() {
     assert_eq!(cover.left[0].arm, 0);
     assert!(cover.left[0].surface_mm2 > 0.0 && cover.left[0].slide_mm > 0.0, "{cover:?}");
     assert!(cover.candidates_refused > 0, "the re-search ran: {cover:?}");
-    // The first walk, and one after the passes to name what the kept slide
-    // strands; bounded by the passes.
-    assert!((2..=2 + 2).contains(&cover.checks), "bounded by the passes: {cover:?}");
+    // The re-search admitted nothing, so the slid seats never changed: one
+    // walk, its answer read again each turn.
+    assert_eq!(cover.checks, 1, "one walk of one field: {cover:?}");
     assert_eq!(asked.borrow().len(), cover.checks);
 }
 
