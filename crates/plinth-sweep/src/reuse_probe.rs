@@ -2,8 +2,9 @@
 //! `down_sweep::run` a resumed sweep could have skipped.
 //!
 //! A WRITE-ONLY MEASUREMENT. Nothing here changes a member, a field or a
-//! decision; every function returns at once when `perf` counting is off, and
-//! the product never reads what it stores. It exists to answer one question
+//! decision; every function returns at once unless the full `perf` trace is
+//! on (`perf::traced`: off in light mode, whose cost this probe's hashing is),
+//! and the product never reads what it stores. It exists to answer one question
 //! before any lane builds an incremental down sweep: of the cell-layers a run
 //! walks, what fraction lies ABOVE the highest layer the previous run's edit
 //! touched (the prefix a resume skips), and, separately, how many of the
@@ -223,7 +224,7 @@ pub(crate) fn collecting() -> bool {
 /// them with the previous run in this pose frame. `site` is the sizing site
 /// (`perf::size_site_peek`).
 pub(crate) fn begin(cells: usize, layers: usize, struts: &[SweepStrut], site: u64) {
-    if !perf::enabled() {
+    if !perf::traced() {
         return;
     }
     let mut now = Snapshot {
@@ -477,7 +478,7 @@ pub(crate) struct PassTrace {
 impl PassTrace {
     /// `None` when counting is off.
     pub(crate) fn begin(layers: usize, cells: usize) -> Option<Self> {
-        if !perf::enabled() {
+        if !perf::traced() {
             return None;
         }
         let now = std::time::Instant::now();
@@ -641,7 +642,7 @@ pub(crate) fn layer_fingerprint(load_out: &[f64], carriers: &[bool]) -> u64 {
 /// whose ledger differs from the previous pass's (or the previous run's last
 /// pass, for pass 1) and write the pass row.
 pub(crate) fn pass_done(struts: &[SweepStrut]) {
-    if !perf::enabled() {
+    if !perf::traced() {
         return;
     }
     let _count_span = perf::span(perf::Span::CountOverhead);
@@ -692,7 +693,7 @@ pub(crate) fn route_hash(log: &crate::per_event::RouteLog) -> (u64, u64) {
 /// The run is over: write its row (passes, wall time, whether its routing
 /// and its member geometry equal the previous run's in this pose).
 pub(crate) fn run_end(passes: usize, inserted: u64, log: &crate::per_event::RouteLog) {
-    if !perf::enabled() {
+    if !perf::traced() {
         return;
     }
     let _count_span = perf::span(perf::Span::CountOverhead);

@@ -1243,8 +1243,6 @@ struct S0Tally {
     stale_fine: u64,
     stored_valid: u64,
     ahead_rows: u64,
-    memo_reads: u64,
-    memo_repeats: u64,
 }
 
 impl S0Tally {
@@ -1256,17 +1254,11 @@ impl S0Tally {
         stale_fine: 0,
         stored_valid: 0,
         ahead_rows: 0,
-        memo_reads: 0,
-        memo_repeats: 0,
     };
 }
 
 thread_local! {
     static S0_TALLY: std::cell::Cell<S0Tally> = const { std::cell::Cell::new(S0Tally::ZERO) };
-    /// The within-sweep memo probe (traced runs): the sweep it belongs to (its
-    /// column history's address) and the trial-read keys seen in it.
-    static S0_MEMO: std::cell::RefCell<(usize, std::collections::HashSet<u64>)> =
-        std::cell::RefCell::new((0, std::collections::HashSet::new()));
 }
 
 /// Add to this thread's [`S0Tally`]. Call only with `perf` on.
@@ -1281,40 +1273,6 @@ fn s0_tally(add: impl FnOnce(&mut S0Tally)) {
 /// Nanoseconds since `since`.
 fn s0_ns(since: std::time::Instant) -> u64 {
     u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX)
-}
-
-/// S0, traced runs only: one mover trial read the read-ahead sends to the
-/// kernel, keyed by what the read is a function of (the mover's seat, its
-/// radius profile, the candidate and the path); counts it and whether the
-/// same key was read earlier in this sweep.
-fn s0_memo(context: &SlendernessContext<'_>, strut: &SweepStrut, arm: Option<&SweepArm>, candidate: Candidate, path: &[u32]) {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    (strut.cell, strut.k_top, candidate.cell, candidate.k_bottom, path).hash(&mut hasher);
-    match candidate.landing {
-        Landing::Plate => 0_u8.hash(&mut hasher),
-        Landing::Model { layer } => (1_u8, layer).hash(&mut hasher),
-        Landing::Strut { id, layer } => (2_u8, id, layer).hash(&mut hasher),
-    }
-    if let Some(arm) = arm {
-        for radius in &arm.radius_profile_mm {
-            radius.to_bits().hash(&mut hasher);
-        }
-    }
-    let key = hasher.finish();
-    let sweep = std::ptr::from_ref(context.history) as usize;
-    let repeat = S0_MEMO.with(|memo| {
-        let mut memo = memo.borrow_mut();
-        if memo.0 != sweep {
-            memo.0 = sweep;
-            memo.1.clear();
-        }
-        !memo.1.insert(key)
-    });
-    s0_tally(|tally| {
-        tally.memo_reads += 1;
-        tally.memo_repeats += u64::from(repeat);
-    });
 }
 
 /// S0: the driver-thread parts of one [`apply`] call (`s0.lip.apply` rows).
@@ -1362,7 +1320,7 @@ struct S0Apply {
 
 impl S0Apply {
     fn start(outcome: &LipSeatOutcome) -> Self {
-        let on = crate::perf::on();
+        let on = crate::perf::enabled();
         let now = on.then(std::time::Instant::now);
         let saved = if on {
             S0_TALLY.with(|cell| cell.replace(S0Tally::ZERO))
@@ -1520,8 +1478,6 @@ impl S0Apply {
                 delta(3),
                 delta(4),
                 self.nubs,
-                tally.memo_reads,
-                tally.memo_repeats,
             ],
         );
     }
@@ -1586,7 +1542,7 @@ fn take_path_test(
     };
     match job.take_tested(ledger, at) {
         Some(tested) if tested.generation == index.generation() => {
-            if crate::perf::on() {
+            if crate::perf::enabled() {
                 s0_tally(|tally| tally.stored_valid += 1);
             }
             if verify_lip_seat() {
@@ -1598,7 +1554,7 @@ fn take_path_test(
                 .map(|found| std::rc::Rc::try_unwrap(found).unwrap_or_else(|shared| (*shared).clone()))
         }
         Some(stale) => {
-            if crate::perf::on() {
+            if crate::perf::enabled() {
                 let fine = index.s0_stale_fine(stale.generation, job, candidate, stale.found.as_deref());
                 s0_tally(|tally| {
                     tally.stale_today += 1;
@@ -2100,10 +2056,9 @@ fn read_movers(
     };
     let mut rows: Vec<Row> = Vec::new();
     let mut ahead_hits = 0_usize;
-    // S0 measurement gates (write-only; nothing below branches on them but
-    // the measurement itself).
-    let s0_on = crate::perf::on();
-    let traced = crate::perf::enabled();
+    // S0 measurement gate (write-only; nothing below branches on it but the
+    // measurement itself).
+    let s0_on = crate::perf::enabled();
     for (proposal, &first) in proposals.iter().zip(first_of) {
         let job = &mut pending[proposal.slot];
         if job
@@ -2117,9 +2072,6 @@ fn read_movers(
             continue;
         }
         call_bytes += trial_bytes(&trial[first]);
-        if traced {
-            s0_memo(context, &struts[job.index], arms.get(job.index), proposal.candidate, &proposal.path);
-        }
         rows.push(Row {
             slot: proposal.slot,
             at: proposal.at,
@@ -2167,9 +2119,6 @@ fn read_movers(
                 break;
             }
             call_bytes += row_bytes;
-            if traced {
-                s0_memo(context, &struts[job.index], arms.get(job.index), candidate, &found.0);
-            }
             rows.push(Row {
                 slot: proposal.slot,
                 at,
@@ -3827,7 +3776,7 @@ fn propose(
     transitive: bool,
 ) -> Option<(Vec<u32>, Vec<Follow>)> {
     // S0: every path test is counted and timed on the thread that asks it.
-    let started = crate::perf::on().then(std::time::Instant::now);
+    let started = crate::perf::enabled().then(std::time::Instant::now);
     let answer = propose_now(context, index, struts, mover, candidate, children, transitive);
     if let Some(started) = started {
         let ns = s0_ns(started);

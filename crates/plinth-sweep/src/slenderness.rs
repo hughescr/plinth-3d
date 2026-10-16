@@ -2487,7 +2487,7 @@ pub(crate) fn apply_ties_with_model(
 }
 
 /// **S0 (p2design, 2026-10-15): the dry conflict probe of a tie judge/commit
-/// split**, traced runs only (`perf::enabled`), write-only: one
+/// split**, traced runs only (`perf::traced`), write-only: one
 /// `s0.tie.pass` row per pass. At each round's start every member's print is
 /// taken; each member whose first attempt of the round reaches a tie layer
 /// is "judged", and is a "conflict" when its read set (itself, its landing
@@ -2507,7 +2507,7 @@ struct S0Ties {
 
 impl S0Ties {
     fn start() -> Self {
-        let on = crate::perf::enabled();
+        let on = crate::perf::traced();
         Self {
             on,
             started: on.then(std::time::Instant::now),

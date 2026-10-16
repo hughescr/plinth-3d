@@ -2878,7 +2878,7 @@ fn plan_after_prefix(
     for s0_pass in 0..policy.strut_removal_passes {
         // S0 (measurement only): the pass's clock, read by the rows below.
         let s0_pass = usize::try_from(s0_pass).unwrap_or(usize::MAX);
-        let s0_pass_started = perf::on().then(std::time::Instant::now);
+        let s0_pass_started = perf::enabled().then(std::time::Instant::now);
         // THE PASS IS UNDONE AS A WHOLE IF IT MAKES THE FIELD WORSE. The
         // span test and the replay below are coverage arguments over arms
         // alone; the down-sweep is the only thing that actually knows what
@@ -5830,7 +5830,7 @@ fn s0_elapsed_ns(since: std::time::Instant) -> u64 {
 /// and the re-sizing's time, and the whole pass's where `pass_started` is
 /// given (the attempt that ends the pass).
 fn s0_removal_row(head: [usize; 4], replay_ns: u64, size_ns: u64, pass_started: Option<std::time::Instant>) {
-    if !perf::on() {
+    if !perf::enabled() {
         return;
     }
     let [pass, attempt, removed, result] = head.map(perf::count);
@@ -5853,7 +5853,7 @@ fn s0_removal_row(head: [usize; 4], replay_ns: u64, size_ns: u64, pass_started: 
 /// second-contact re-plan changes against the winner can be counted offline.
 fn s0_member_prints(stage: u64, struts: &[SweepStrut]) {
     use std::hash::{Hash, Hasher};
-    if !perf::enabled() {
+    if !perf::traced() {
         return;
     }
     for strut in struts {
