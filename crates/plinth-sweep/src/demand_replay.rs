@@ -1571,14 +1571,15 @@ pub(crate) fn stranded_locally(
     let distance = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
     // THE SAME PIECE OF THE LAYER: a contact covers a cell only where it
     // touches the cover component the cell lies in (a contact on another
-    // piece of the layer reaches it across air, which no lamina does). The
-    // contact's component is the one of the cover cell nearest its centre
-    // within its disc and one pixel; `None` (no labels for the layer, or no
-    // cover there) leaves the distance alone to decide.
+    // piece of the layer reaches it across air, which no lamina does). A
+    // contact touches every piece with a cover cell within its disc and one
+    // pixel (a ball on the edge of a birth holds the birth and the material
+    // beside it); `None` (no labels for the layer, or no cover there) leaves
+    // the distance alone to decide.
     let label = |layer: usize, cell: usize| -> Option<u32> {
         components.get(&layer)?.get(cell).copied().filter(|&label| label != u32::MAX)
     };
-    let contact_component = |layer: usize, (xy, radius): ([f64; 2], f64)| -> Option<u32> {
+    let touches = |layer: usize, (xy, radius): ([f64; 2], f64), wanted: u32| -> Option<bool> {
         let labels = components.get(&layer)?;
         let pitch = grid.pitch_mm();
         let tolerance = radius.max(0.0) + pitch;
@@ -1592,26 +1593,26 @@ pub(crate) fn stranded_locally(
             (grid.col_coord(xy[0]).floor().max(0.0) as usize).min(grid.cols().saturating_sub(1)),
             (tolerance / pitch).ceil() as usize,
         );
-        let mut best: Option<(f64, usize, u32)> = None;
+        let mut any = false;
         for r in row.saturating_sub(span)..=(row + span).min(grid.rows().saturating_sub(1)) {
             for c in col.saturating_sub(span)..=(col + span).min(grid.cols().saturating_sub(1)) {
                 let cell = grid.index(r, c);
                 let Some(&found) = labels.get(cell).filter(|&&found| found != u32::MAX) else {
                     continue;
                 };
-                let d = distance(centre(cell), xy);
-                if d <= tolerance && best.is_none_or(|(bd, bc, _)| d.total_cmp(&bd).then(cell.cmp(&bc)).is_lt()) {
-                    best = Some((d, cell, found));
+                if distance(centre(cell), xy) <= tolerance {
+                    if found == wanted {
+                        return Some(true);
+                    }
+                    any = true;
                 }
             }
         }
-        best.map(|(_, _, found)| found)
+        // No cover under the contact at all: the distance alone decides.
+        (any).then_some(false)
     };
     let same_piece = |layer: usize, cell: usize, contact: ([f64; 2], f64)| -> bool {
-        match (label(layer, cell), contact_component(layer, contact)) {
-            (Some(a), Some(b)) => a == b,
-            _ => true,
-        }
+        label(layer, cell).is_none_or(|wanted| touches(layer, contact, wanted).unwrap_or(true))
     };
     // Each moved tip's demand, in its order.
     let demands: Vec<(&MovedSeat, Vec<(usize, usize)>)> = moved
@@ -3102,11 +3103,13 @@ mod tests {
         };
         // One piece: every cell labelled 0.
         assert!(run(Some(vec![0; grid.cells()])).is_empty());
-        // The far cell and its own column of x 3.9 on a piece of their own,
-        // and the placed contact (x 3.1) on it too, so it was covered before.
+        // Everything past x 3.2 a piece of its own: the far cell is on it,
+        // the placed contact (x 3.125, its disc and a pixel reaching 3.275)
+        // touches it, so it covered the cell before; the slid contact (x 3.0,
+        // reaching 3.15) does not.
         let mut split = vec![0_u32; grid.cells()];
         for (cell, label) in split.iter_mut().enumerate() {
-            if grid.center_x_mm(grid.col_of(cell)) > 3.05 {
+            if grid.center_x_mm(grid.col_of(cell)) > 3.2 {
                 *label = 1;
             }
         }
