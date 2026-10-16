@@ -1235,6 +1235,358 @@ fn an_inadmissible_cheapest_descent_does_not_end_the_slenderness_search() {
     assert!(moved_to[0].is_leaned(), "the arm leans to its new root");
 }
 
+/// **THE DEEP SCAN GIVES THE ROUNDS' ANSWER** (lane S2, 2026-10-15;
+/// `lip_seat::scan_open_jobs`). Two arms seat under a slab over a block that
+/// stands under both seats, so the cheapest descents of each run through or
+/// beside the block and their clearance reads refuse them, one candidate per
+/// round. The scan settles the rounds in which both jobs, and then the one
+/// left, are refused, ahead in chunks. Two blocks: a LOW one, which a lean wide of
+/// it clears (the walk stops and the arm moves), and a TALL one, which no
+/// descent clears (every candidate of both lists is refused, as the
+/// Deinonychus walker's 90,000 are).
+///
+/// TEST: with the scan on (and the shadow check, which re-asks every
+/// candidate it settled one at a time) the field, the outcome and the moves
+/// are those of the rounds with the scan off. ANTI-VACUITY: the rounds refuse
+/// more candidates for clearance than two first chunks hold, the scan settles
+/// candidates, and under the low block an arm moves. SABOTAGE: stopping the
+/// scan one candidate late (the stop counted as a refusal) changes the
+/// outcome's refusal count and the move under the low block.
+#[test]
+fn the_deep_scan_gives_the_rounds_answer() {
+    let grid = grid();
+    let history = ColumnHistory::new(&grid);
+    let keep_out = crate::drain::DrainKeepOut::none();
+    let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+    let off = crate::slenderness::SlendernessLaw::disabled();
+    let low = boxes_mesh(&[
+        ([0.0, 0.0, 10.0], [15.0, 15.0, 12.0]),
+        ([6.0, 6.0, 0.5], [9.0, 9.0, 2.0]),
+    ]);
+    let tall = boxes_mesh(&[
+        ([0.0, 0.0, 10.0], [15.0, 15.0, 12.0]),
+        ([5.5, 5.0, 0.5], [9.5, 10.5, 7.0]),
+    ]);
+    let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
+    let bite = plinth_support::ShaftSeatBite {
+        bite_mm: 0.2,
+        approach_deg: 60.0,
+        limit_deg: 20.0,
+    };
+    // The low block, and a small block beside the seats that a child
+    // following arm 0 meets on some of its new paths.
+    let child_block = boxes_mesh(&[
+        ([0.0, 0.0, 10.0], [15.0, 15.0, 12.0]),
+        ([6.0, 6.0, 0.5], [9.0, 9.0, 2.0]),
+        ([6.5, 8.2, 6.0], [8.0, 8.8, 7.0]),
+    ]);
+    let run = |mesh: &plinth_mesh::Mesh, child: bool, scan: bool, verify: bool| {
+        let context = slender_context(&grid, &history, &keep_out, &lean, &off);
+        let surface = std::sync::OnceLock::new();
+        let joins = crate::head_join::HeadJoinContext {
+            slender: &context,
+            mesh,
+            layer_plan: &plan,
+            plate_z_mm: 0.0,
+            clearance_mm: 0.3,
+            standoff_mm: 0.6,
+            surface_pitch_mm: 0.1,
+            surface_max_bytes: 1 << 28,
+            surface: &surface,
+            contacts: &crate::contact_growth::MeasureMemo::default(),
+        };
+        let mut struts = vec![
+            straight(&grid, 0, 150, 150, 200, 0.1),
+            straight(&grid, 1, 160, 145, 200, 0.1),
+        ];
+        if child {
+            // A support arm resting on arm 0 at layer 60, its path leaning
+            // from arm 0's column up to its own seat: it moves with arm 0.
+            let (landing, k_top) = (60_usize, 200_usize);
+            let mut rests = straight(&grid, 2, 165, 175, k_top, 0.1);
+            rests.landing = Landing::Strut { id: 0, layer: landing };
+            rests.k_bottom = landing;
+            rests.radius_mm = vec![0.1; k_top - landing + 1];
+            rests.carried_mm2 = vec![0.0; k_top - landing + 1];
+            rests.path = (landing..k_top)
+                .map(|layer| {
+                    let at = |from: usize, to: usize| from + (to - from) * (layer - landing) / (k_top - landing);
+                    cell_u32(grid.index(at(150, 165), at(150, 175)))
+                })
+                .collect();
+            struts.push(rests);
+        }
+        let arms = tilted_arms(&grid, &mut struts);
+        let mut bites = vec![Some(bite); 2];
+        bites.resize(struts.len(), None);
+        let ((outcome, moves), scanned, child_refused) = crate::lip_seat::with_scan(scan, verify, || {
+            let mut outcome = crate::lip_seat::LipSeatOutcome::default();
+            let moves = crate::lip_seat::apply(
+                &joins,
+                &plan,
+                0.0,
+                &mut struts,
+                &arms,
+                &bites,
+                crate::lip_seat::Trigger::SeatBite,
+                &[],
+                &mut outcome,
+            );
+            (outcome, moves.len())
+        });
+        (format!("{struts:?}"), format!("{outcome:?}"), outcome, moves, scanned, child_refused)
+    };
+    // The shadow check re-reads every verdict one row at a time; the tall
+    // block's 60,000 refusals are left to the comparison alone.
+    for (what, mesh, child, moves, verify) in [
+        ("low block", &low, false, true, true),
+        ("tall block", &tall, false, false, false),
+        ("a child that follows", &child_block, true, true, true),
+    ] {
+        let (rounds_field, rounds_outcome, rounds, rounds_moves, rounds_scanned, _) = run(mesh, child, false, false);
+        assert_eq!(rounds_scanned, 0, "{what}: the scan is off");
+        assert!(
+            rounds.candidates_refused_clearance > 2 * crate::lip_seat::SCAN_FIRST,
+            "{what}: anti-vacuity: the rounds refuse more candidates for clearance than two first chunks hold: {rounds:?}"
+        );
+        assert_eq!(rounds_moves >= 1, moves, "{what}: anti-vacuity: {rounds:?}");
+        let (scan_field, scan_outcome, _, scan_moves, scanned, child_refused) = run(mesh, child, true, verify);
+        assert!(scanned > 0, "{what}: the scan settled candidates");
+        assert_eq!(scan_outcome, rounds_outcome, "{what}: the outcome is the rounds' outcome");
+        assert_eq!(scan_moves, rounds_moves, "{what}: the moves are the rounds' moves");
+        assert_eq!(scan_field, rounds_field, "{what}: the field is the rounds' field");
+        assert_eq!(child_refused > 0, child, "{what}: anti-vacuity: a child's read refused candidates: {child_refused}");
+    }
+}
+
+/// **THE DEEP SCAN HOLDS ITS BYTE BUDGET AND STILL GIVES THE ROUNDS' ANSWER**
+/// (lane S2 review, 2026-10-15; `lip_seat::scan_open_jobs`). With a tiny
+/// read-ahead byte limit, two jobs whose every candidate is refused fill the
+/// scan's stores past what the ledger holds, so the scan must take only the
+/// rounds its stores prove and settle on (its fallback), never holding more
+/// than the limit.
+///
+/// Three fields: the TALL block under two seat-bite arms (every descent runs
+/// into it); a MID block whose refused prefixes outgrow the stores before a
+/// walk stops and an arm moves (the fallback takes proven rounds ahead of a
+/// commit); and a sealed CAVITY under the clearance re-route: two hosts
+/// seated under its ceiling, each carrying a child seated outside the
+/// cavity's wall, so a host whose proposed axis stands in the enclosed air is
+/// counted hidden and its child (whose new path crosses the wall) refuses the
+/// candidate: a refusal after a hidden member, with a transitive follower.
+///
+/// TEST: scan on (MID and the cavity also under the shadow check) equals scan
+/// off at the same limit in field, outcome and moves; the ledger never held
+/// more than the limit, the scan's stores charged at their queues' ALLOCATED
+/// capacity (`ScanStore::held`), so the peak is a bound on what they really
+/// hold; no chunk's working set passed its share.
+/// ANTI-VACUITY: the scan settled candidates and fell back for want of room
+/// at least once in each field, an arm moves in MID, and the cavity's
+/// refusals counted hidden members. SABOTAGE: with the stores' room check
+/// and the chunk's room bound removed, TALL's ledger reaches 999,392 bytes
+/// against its 262,144 limit.
+#[test]
+fn the_deep_scan_holds_its_byte_budget_and_gives_the_rounds_answer() {
+    use crate::cavity::fixtures::{cavity_box_sized, cell, map_of};
+    let keep_out = crate::drain::DrainKeepOut::none();
+    let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+    let off = crate::slenderness::SlendernessLaw::disabled();
+    let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
+    let bite = plinth_support::ShaftSeatBite {
+        bite_mm: 0.2,
+        approach_deg: 60.0,
+        limit_deg: 20.0,
+    };
+    // One `apply` on `mesh` over `grid` (with `history`), scan on or off, at
+    // the byte limit `limit`.
+    #[expect(clippy::too_many_arguments, reason = "the field, its trigger and the switches")]
+    fn run(
+        grid: &Grid,
+        history: &ColumnHistory,
+        keep_out: &crate::drain::DrainKeepOut,
+        lean: &crate::lean::LeanLaw,
+        law: &crate::slenderness::SlendernessLaw,
+        plan: &plinth_core::LayerPlan,
+        mesh: &plinth_mesh::Mesh,
+        mut struts: Vec<SweepStrut>,
+        bites: &[Option<plinth_support::ShaftSeatBite>],
+        violators: Option<&[bool]>,
+        scan: bool,
+        verify: bool,
+        limit: usize,
+    ) -> (String, crate::lip_seat::LipSeatOutcome, usize, usize, crate::lip_seat::ScanMemory) {
+        let context = slender_context(grid, history, keep_out, lean, law);
+        let surface = std::sync::OnceLock::new();
+        let joins = crate::head_join::HeadJoinContext {
+            slender: &context,
+            mesh,
+            layer_plan: plan,
+            plate_z_mm: 0.0,
+            clearance_mm: 0.3,
+            standoff_mm: 0.6,
+            surface_pitch_mm: 0.1,
+            surface_max_bytes: 1 << 28,
+            surface: &surface,
+            contacts: &crate::contact_growth::MeasureMemo::default(),
+        };
+        let arms = tilted_arms(grid, &mut struts);
+        let trigger = violators.map_or(crate::lip_seat::Trigger::SeatBite, |violators| {
+            crate::lip_seat::Trigger::Clearance {
+                violators,
+                foot_sizing: None,
+            }
+        });
+        let (((outcome, moves), scanned, _), memory) = crate::lip_seat::with_budget(Some(limit), || {
+            crate::lip_seat::with_scan(scan, verify, || {
+                let mut outcome = crate::lip_seat::LipSeatOutcome::default();
+                let moves = crate::lip_seat::apply(
+                    &joins,
+                    plan,
+                    0.0,
+                    &mut struts,
+                    &arms,
+                    bites,
+                    trigger,
+                    &[],
+                    &mut outcome,
+                );
+                (outcome, moves.len())
+            })
+        });
+        (format!("{struts:?}"), outcome, moves, scanned, memory)
+    }
+
+    // A member resting on `host` at `landing`, seated at `(row, col)`, its
+    // path leaning from the host's column up to its own.
+    let resting = |grid: &Grid, id: u32, host: &SweepStrut, row: usize, col: usize, k_top: usize, landing: usize| {
+        let mut member = straight(grid, id, row, col, k_top, 0.1);
+        member.landing = Landing::Strut { id: host.id, layer: landing };
+        member.k_bottom = landing;
+        member.radius_mm = vec![0.1; k_top - landing + 1];
+        member.carried_mm2 = vec![0.0; k_top - landing + 1];
+        let (host_row, host_col) = (grid.row_of(host.cell), grid.col_of(host.cell));
+        member.path = (landing..k_top)
+            .map(|layer| {
+                let at = |from: usize, to: usize| from + (to - from) * (layer - landing) / (k_top - landing);
+                cell_u32(grid.index(at(host_row, row), at(host_col, col)))
+            })
+            .collect();
+        member
+    };
+
+    // TALL: two seat-bite arms over a block no descent clears.
+    {
+        let grid = grid();
+        let history = ColumnHistory::new(&grid);
+        let tall = boxes_mesh(&[
+            ([0.0, 0.0, 10.0], [15.0, 15.0, 12.0]),
+            ([5.5, 5.0, 0.5], [9.5, 10.5, 7.0]),
+        ]);
+        let struts = vec![
+            straight(&grid, 0, 150, 150, 200, 0.1),
+            straight(&grid, 1, 160, 145, 200, 0.1),
+        ];
+        let bites = vec![Some(bite); 2];
+        let limit = 256 << 10;
+        let go = |scan: bool| {
+            run(&grid, &history, &keep_out, &lean, &off, &plan, &tall, struts.clone(), &bites, None, scan, false, limit)
+        };
+        let (rounds_field, rounds, rounds_moves, _, _) = go(false);
+        let (scan_field, scanned_outcome, scan_moves, scanned, memory) = go(true);
+        assert_eq!(rounds_moves, 0, "tall: anti-vacuity: no descent clears");
+        assert!(rounds.candidates_refused_clearance > 10_000, "tall: anti-vacuity: {rounds:?}");
+        assert!(memory.peak <= limit, "tall: the ledger held {} > {limit}", memory.peak);
+        assert!(scanned > 0 && memory.fallbacks > 0, "tall: the scan ran and fell back: {memory:?}");
+        assert!(!memory.chunk_over, "tall: a chunk's working set passed its share");
+        assert_eq!(format!("{scanned_outcome:?}"), format!("{rounds:?}"), "tall: the outcome is the rounds'");
+        assert_eq!((scan_field, scan_moves), (rounds_field, rounds_moves), "tall: the field is the rounds'");
+    }
+
+    // MID: two seat-bite arms over a block 3.5 mm tall; each walk refuses
+    // more candidates than the limit's stores hold before one passes and an
+    // arm moves, so the fallback takes proven rounds ahead of a commit.
+    {
+        let grid = grid();
+        let history = ColumnHistory::new(&grid);
+        let low = boxes_mesh(&[
+            ([0.0, 0.0, 10.0], [15.0, 15.0, 12.0]),
+            ([6.0, 6.0, 0.5], [9.0, 9.0, 3.5]),
+        ]);
+        let struts = vec![
+            straight(&grid, 0, 150, 150, 200, 0.1),
+            straight(&grid, 1, 160, 145, 200, 0.1),
+        ];
+        let bites = vec![Some(bite); 2];
+        let limit = 128 << 10;
+        let go = |scan: bool| {
+            run(&grid, &history, &keep_out, &lean, &off, &plan, &low, struts.clone(), &bites, None, scan, scan, limit)
+        };
+        let (rounds_field, rounds, rounds_moves, _, _) = go(false);
+        let (scan_field, scanned_outcome, scan_moves, scanned, memory) = go(true);
+        assert!(rounds_moves >= 1, "mid: anti-vacuity: an arm moves: {rounds:?}");
+        assert!(memory.peak <= limit, "mid: the ledger held {} > {limit}", memory.peak);
+        assert!(scanned > 0 && memory.fallbacks > 0, "mid: the scan ran and fell back: {memory:?}");
+        assert!(!memory.chunk_over, "mid: a chunk's working set passed its share");
+        assert_eq!(format!("{scanned_outcome:?}"), format!("{rounds:?}"), "mid: the outcome is the rounds'");
+        assert_eq!((scan_field, scan_moves), (rounds_field, rounds_moves), "mid: the field is the rounds'");
+    }
+
+    // CAVITY: two hosts in enclosed air under the clearance re-route, each
+    // carrying a child seated outside the wall.
+    {
+        let cavity = cavity_box_sized(false, false, 0.0, 4.0, 0.5);
+        let (map, grid) = map_of(&cavity, &[]);
+        let mut history = ColumnHistory::new(&grid);
+        history.hidden = map;
+        let at = |x: f64, y: f64| {
+            let cell = cell(&grid, x, y);
+            (grid.row_of(cell), grid.col_of(cell))
+        };
+        // The ceiling's underside at 3.5 mm: layer 70.
+        let k_top = 70;
+        let (r0, c0) = at(5.55, 4.25);
+        let (r1, c1) = at(5.55, 5.75);
+        let host0 = straight(&grid, 0, r0, c0, k_top, 0.1);
+        let host1 = straight(&grid, 1, r1, c1, k_top, 0.1);
+        let (cr0, cc0) = at(7.55, 4.25);
+        let (cr1, cc1) = at(7.55, 5.75);
+        let child0 = resting(&grid, 2, &host0, cr0, cc0, k_top, 5);
+        let child1 = resting(&grid, 3, &host1, cr1, cc1, k_top, 5);
+        let struts = vec![host0, host1, child0, child1];
+        let bites = vec![None; 4];
+        let violators = [true, true, false, false];
+        let limit = 128 << 10;
+        let go = |scan: bool, verify: bool| {
+            run(
+                &grid,
+                &history,
+                &keep_out,
+                &lean,
+                &off,
+                &plan,
+                &cavity,
+                struts.clone(),
+                &bites,
+                Some(&violators),
+                scan,
+                verify,
+                limit,
+            )
+        };
+        let (rounds_field, rounds, rounds_moves, _, _) = go(false, false);
+        let (scan_field, scanned_outcome, scan_moves, scanned, memory) = go(true, true);
+        assert!(
+            rounds.candidates_refused_clearance > 0 && rounds.candidates_hidden > 0,
+            "cavity: anti-vacuity: refusals after a hidden member: {rounds:?}"
+        );
+        assert!(memory.peak <= limit, "cavity: the ledger held {} > {limit}", memory.peak);
+        assert!(scanned > 0 && memory.fallbacks > 0, "cavity: the scan ran and fell back: {memory:?}");
+        assert!(!memory.chunk_over, "cavity: a chunk's working set passed its share");
+        assert_eq!(format!("{scanned_outcome:?}"), format!("{rounds:?}"), "cavity: the outcome is the rounds'");
+        assert_eq!((scan_field, scan_moves), (rounds_field, rounds_moves), "cavity: the field is the rounds'");
+    }
+}
+
 /// The slab over the arm of the kept-arm tests (its underside at 10 mm, the
 /// arm's seat at (7.525, 7.525)) cut short at `x_max_mm`: the tip ball of a
 /// stub seated there overhangs the edge by a part of its disc, and a lean that
