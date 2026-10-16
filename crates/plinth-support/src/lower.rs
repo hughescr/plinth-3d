@@ -1615,6 +1615,44 @@ pub fn lower_sweep_arms_with_pinned_seat_minimum(
     )
 }
 
+/// [`lower_sweep_arms_with_hull_reference`] that says nothing: the lines the
+/// junction pass would print go to `diagnostics` instead (on an error too, for
+/// the lines said before it), for the caller to print with
+/// [`print_lowering_diagnostics`] if and only if this lowering is the one it
+/// uses (perf lane `ov`).
+///
+/// # Errors
+///
+/// The same request-shaped errors [`lower_sweep_arms`] returns.
+pub fn lower_sweep_arms_deferring_diagnostics(
+    arms: &[SweepArm],
+    hull_reference: Option<&[SweepArm]>,
+    frame: BuildFrame,
+    layers: &LayerPlan,
+    max_primitives: usize,
+    max_primitive_bytes: usize,
+    diagnostics: &mut Vec<String>,
+) -> Result<SweepLowering, SweepLoweringError> {
+    lower_sweep_arms_collecting(
+        arms,
+        hull_reference,
+        frame,
+        layers,
+        max_primitives,
+        max_primitive_bytes,
+        None,
+        diagnostics,
+    )
+}
+
+/// Print held-back lowering lines to stderr, one per line, as the pass would
+/// have printed them itself.
+pub fn print_lowering_diagnostics(lines: &[String]) {
+    for line in lines {
+        eprintln!("{line}");
+    }
+}
+
 fn lower_sweep_arms_of(
     arms: &[SweepArm],
     hull_reference: Option<&[SweepArm]>,
@@ -1623,6 +1661,33 @@ fn lower_sweep_arms_of(
     max_primitives: usize,
     max_primitive_bytes: usize,
     pinned_seat_minimum_mm: Option<f64>,
+) -> Result<SweepLowering, SweepLoweringError> {
+    let mut diagnostics = Vec::new();
+    let lowered = lower_sweep_arms_collecting(
+        arms,
+        hull_reference,
+        frame,
+        layers,
+        max_primitives,
+        max_primitive_bytes,
+        pinned_seat_minimum_mm,
+        &mut diagnostics,
+    );
+    // Said on an error too: the pass's lines come before any later error.
+    print_lowering_diagnostics(&diagnostics);
+    lowered
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_sweep_arms_collecting(
+    arms: &[SweepArm],
+    hull_reference: Option<&[SweepArm]>,
+    frame: BuildFrame,
+    layers: &LayerPlan,
+    max_primitives: usize,
+    max_primitive_bytes: usize,
+    pinned_seat_minimum_mm: Option<f64>,
+    diagnostics: &mut Vec<String>,
 ) -> Result<SweepLowering, SweepLoweringError> {
     let mut config = LoweringConfig::current(frame, layers, max_primitives, max_primitive_bytes)?;
     if let Some(minimum_mm) = pinned_seat_minimum_mm {
@@ -1758,17 +1823,17 @@ fn lower_sweep_arms_of(
                 )
             });
         if hull_reference.is_some() && kept.is_none() {
-            eprintln!(
+            diagnostics.push(String::from(
                 "WARNING junction hulls: the reference field's shafts do not line up with the \
-                 arms'; the hulls were planned on the arms as they are (emit and warn)"
-            );
+                 arms'; the hulls were planned on the arms as they are (emit and warn)",
+            ));
         }
         let edits = kept.unwrap_or_else(|| {
             junction::hull_junctions(&out.primitives, &junction_arms, rules)
         });
         let rings = edits.rings;
         if rings.exact + rings.thicker + rings.thinner + rings.unmet > 0 {
-            eprintln!(
+            diagnostics.push(format!(
                 "junction rings: {} kept hull rings met by the shaft on the ring's own radius \
                  ({} already equal, {} thicker than the chord and tapered down to it, {} \
                  thinner and tapered up to it; largest difference closed {:.6} mm, largest dip \
@@ -1780,10 +1845,10 @@ fn lower_sweep_arms_of(
                 rings.max_gap_mm,
                 rings.max_under_chord_mm,
                 rings.unmet,
-            );
+            ));
         }
         if rings.unmet > 0 {
-            eprintln!(
+            diagnostics.push(format!(
                 "WARNING junction rings: {} kept hull rings could not be met on their own \
                  radius ({} with no piece of the arm at the cut, {} at a piece a taper may not \
                  change, {} where the pieces ran out before the difference closed); the shaft \
@@ -1792,12 +1857,12 @@ fn lower_sweep_arms_of(
                 rings.unmet_no_piece,
                 rings.unmet_not_adjustable,
                 rings.unmet_ran_out,
-            );
+            ));
         }
         // Emit and warn: a landed junction that could be neither cut into its
         // host nor filled keeps the old flat cap, and says so.
         if edits.crowded + edits.undrawable > 0 {
-            eprintln!(
+            diagnostics.push(format!(
                 "WARNING junction hulls: {} landed junctions kept the old flat cap ({} crowded, \
                  {} undrawable); {} hulled, {} filled with an added hull, {} buried in the host, \
                  {} with no host",
@@ -1808,7 +1873,7 @@ fn lower_sweep_arms_of(
                 edits.filled,
                 edits.buried,
                 edits.no_host,
-            );
+            ));
         }
         if edits.hulled + edits.filled > 0 {
             let mut rebuilt: Vec<SupportPrimitive> =

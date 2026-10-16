@@ -2781,20 +2781,48 @@ struct SpeculativeBuilt {
 /// then a panic in it is raised, as the serial order would have raised it.
 struct OverlappedWork {
     rigid: Option<std::thread::Result<plinth_sweep::rigid_share::RigidShareReport>>,
-    speculative:
-        Option<std::thread::Result<Result<SpeculativeEmission, plinth_support::SweepLoweringError>>>,
+    speculative: Option<std::thread::Result<SpeculativeOutcome>>,
 }
 
+/// What [`speculative_emission`] brings back: the lowering's held-back stderr
+/// lines (also when the lowering failed after saying some), and the emission or
+/// the lowering's error. The lines are printed only if this emission is used.
+type SpeculativeOutcome = (
+    Vec<String>,
+    Result<SpeculativeEmission, plinth_support::SweepLoweringError>,
+);
+
 /// The first plan's lowering, supported model and written file, in the order
-/// and on the inputs [`sweep_and_emit`] uses for them. It prints nothing and
-/// puts nothing at the target (`plinth_emit::write_speculative`), and its perf
-/// charges go to the phases the serial order charges them to.
+/// and on the inputs [`sweep_and_emit`] uses for them. It prints nothing (the
+/// lowering's lines come back for the caller to print if it uses this
+/// emission) and puts nothing at the target (`plinth_emit::write_speculative`),
+/// and its perf charges go to the phases the serial order charges them to.
 fn speculative_emission(
     speculation: SpeculationInputs,
     frame: plinth_support::BuildFrame,
     layers: &plinth_core::LayerPlan,
     inputs: &SweepStageInputs<'_>,
     target: &Path,
+) -> SpeculativeOutcome {
+    let mut diagnostics = Vec::new();
+    let built = speculative_emission_inner(
+        speculation,
+        frame,
+        layers,
+        inputs,
+        target,
+        &mut diagnostics,
+    );
+    (diagnostics, built)
+}
+
+fn speculative_emission_inner(
+    speculation: SpeculationInputs,
+    frame: plinth_support::BuildFrame,
+    layers: &plinth_core::LayerPlan,
+    inputs: &SweepStageInputs<'_>,
+    target: &Path,
+    diagnostics: &mut Vec<String>,
 ) -> Result<SpeculativeEmission, plinth_support::SweepLoweringError> {
     let SpeculationInputs {
         first,
@@ -2803,12 +2831,13 @@ fn speculative_emission(
     } = speculation;
     let emission = {
         let _phase = plinth_sweep::perf::scoped_phase(PerfPhase::FinalSweep);
-        plinth_sweep::to_primitives(
+        plinth_sweep::to_primitives_deferring_diagnostics(
             &first,
             frame,
             layers,
             inputs.max_primitives,
             inputs.max_primitive_bytes,
+            diagnostics,
         )?
     };
     drop(first);
@@ -3078,8 +3107,11 @@ fn sweep_and_emit(
     //    dropped and the emission runs below as it always did.
     //
     // Nothing is printed beside the re-plan and nothing exists at the target
-    // until the commit below, so the log, the files and a crash's leftovers are
-    // those of the serial order. The edit modes (experiments) read the first
+    // until the commit below, so the log and the target are those of the serial
+    // order. The staged file beside the target is removed when it is dropped; a
+    // process that dies first (a kill, a power cut: no `Drop` runs) leaves it
+    // there, under a name `plinth_emit::write` never uses and the next
+    // speculative write clears. The edit modes (experiments) read the first
     // plan's report while they edit it, so they take the reading first.
     let mut plan = plan;
     let replan_mode =
@@ -3128,6 +3160,17 @@ fn sweep_and_emit(
     );
     // The side job catches its own panics; none can arrive here.
     let side = side.unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+    // The first plan's rigid-body reading ran in the serial order whichever
+    // plan was chosen, so a panic in it is real whichever plan wins (and
+    // whether or not the re-plan returned): raised here. The speculative
+    // emission matters only if the first plan stands, so its panic and errors
+    // are settled below.
+    let OverlappedWork {
+        rigid: first_rigid_done,
+        speculative: first_emission_done,
+    } = side;
+    let first_rigid_done = first_rigid_done
+        .map(|rigid| rigid.unwrap_or_else(|payload| std::panic::resume_unwind(payload)));
     let plan = second_run.map_err(|source| {
         ChainStop::new(PipelineError::Sweep {
             model: model.clone(),
@@ -3136,9 +3179,10 @@ fn sweep_and_emit(
     })?;
     let second_seconds = second_started.elapsed().as_secs_f64();
     // THE FIRST PLAN STANDS when the chooser did not keep the re-plan; only
-    // then is anything the side job made of use (and a panic in it is real:
-    // the serial order would have run the same code on the same plan and
-    // raised the same panic). A kept re-plan drops all of it, panics too.
+    // then is the rigid report or the speculative emission of use (and a panic
+    // in the emission is real: the serial order would have run the same code on
+    // the same plan and raised the same panic). A kept re-plan drops the
+    // emission, panics and errors too.
     let mut plan = plan;
     let first_stands = !plan.report.seat_second_contact.kept_second;
     assert!(
@@ -3146,16 +3190,9 @@ fn sweep_and_emit(
         "the chooser kept the first plan, yet the plan it returned is not the first plan"
     );
     let mut speculative = None;
-    let OverlappedWork {
-        rigid: first_rigid_done,
-        speculative: first_emission_done,
-    } = side;
     if first_stands {
-        if let Some(rigid) = first_rigid_done {
-            match rigid {
-                Ok(report) => plinth_sweep::store_rigid_share(&mut plan, report),
-                Err(payload) => std::panic::resume_unwind(payload),
-            }
+        if let Some(report) = first_rigid_done {
+            plinth_sweep::store_rigid_share(&mut plan, report);
         }
         if let Some(done) = first_emission_done {
             match done {
@@ -3196,15 +3233,19 @@ fn sweep_and_emit(
     // The lowering, from the speculation when the first plan stands (its
     // error, if any, surfaces here, before the disclosure, as it always did).
     let (emission, speculated_build) = match speculative {
-        Some(done) => match done {
-            Ok(SpeculativeEmission { emission, built }) => (emission, Some(built)),
-            Err(source) => {
-                return Err(ChainStop::new(PipelineError::SweepLowering {
-                    model: model.clone(),
-                    source,
-                }))
+        Some((diagnostics, done)) => {
+            // The lowering's lines, once, where the serial lowering says them.
+            plinth_support::print_lowering_diagnostics(&diagnostics);
+            match done {
+                Ok(SpeculativeEmission { emission, built }) => (emission, Some(built)),
+                Err(source) => {
+                    return Err(ChainStop::new(PipelineError::SweepLowering {
+                        model: model.clone(),
+                        source,
+                    }))
+                }
             }
-        },
+        }
         None => (
             plinth_sweep::to_primitives(
                 &plan,

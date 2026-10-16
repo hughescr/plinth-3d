@@ -38,7 +38,7 @@
 //! (`docs/physics.md`:284-324), realised by the layer index rather than by a
 //! second ray cast.
 
-use plinth_support::{lower_sweep_arms_with_hull_reference, SweepArm, SweepArmLanding, SweepLowering, SweepLoweringError};
+use plinth_support::{lower_sweep_arms_deferring_diagnostics, SweepArm, SweepArmLanding, SweepLowering, SweepLoweringError};
 use plinth_support::{BuildFrame, SupportPrimitive};
 use plinth_core::LayerPlan;
 
@@ -231,6 +231,37 @@ pub fn to_primitives(
     max_primitives: usize,
     max_primitive_bytes: usize,
 ) -> Result<SweepEmission, SweepLoweringError> {
+    let mut diagnostics = Vec::new();
+    let emission = to_primitives_deferring_diagnostics(
+        plan,
+        frame,
+        layers,
+        max_primitives,
+        max_primitive_bytes,
+        &mut diagnostics,
+    );
+    // Said on an error too: the junction pass's lines precede any later error.
+    plinth_support::print_lowering_diagnostics(&diagnostics);
+    emission
+}
+
+/// [`to_primitives`] that prints nothing: the lowering's stderr lines go to
+/// `diagnostics` (on an error too), for the caller to print with
+/// [`plinth_support::print_lowering_diagnostics`] if and only if this emission
+/// is the one it uses (perf lane `ov`: the first plan's emission is built
+/// beside the second contact and may be thrown away).
+///
+/// # Errors
+///
+/// As [`to_primitives`].
+pub fn to_primitives_deferring_diagnostics(
+    plan: &SweepPlan,
+    frame: BuildFrame,
+    layers: &LayerPlan,
+    max_primitives: usize,
+    max_primitive_bytes: usize,
+    diagnostics: &mut Vec<String>,
+) -> Result<SweepEmission, SweepLoweringError> {
     let (arms, raised) = arms_and_junction_raises(plan);
     // R8: the junction hulls are planned on the field the old law drew and kept
     // on the certified one.
@@ -281,13 +312,14 @@ pub fn to_primitives(
         model_foot_contact_disc_radius_mm,
         model_foot_ball_radius_mm,
         knee_spheres,
-    } = lower_sweep_arms_with_hull_reference(
+    } = lower_sweep_arms_deferring_diagnostics(
         &arms,
         hull_reference.as_deref(),
         frame,
         layers,
         max_primitives,
         max_primitive_bytes,
+        diagnostics,
     )?;
     Ok(SweepEmission {
         primitives,

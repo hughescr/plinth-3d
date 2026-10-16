@@ -337,7 +337,9 @@ pub fn write(model: &SupportedModel, request: &EmitRequest) -> Result<EmitReport
 /// the model it was built from is the one that will be emitted; [`commit`] then
 /// does exactly what [`write`] does last (rename onto the target, make the name
 /// durable), and dropping or [`discard`]ing it removes the file. Until a commit
-/// nothing exists at the target path, whatever happens to the process.
+/// nothing exists at the target path, whatever happens to the process. A
+/// process that dies before the drop (a kill, a power cut) leaves the staged
+/// file beside the target: `Drop` cannot run then.
 ///
 /// [`commit`]: StagedArtifact::commit
 /// [`discard`]: StagedArtifact::discard

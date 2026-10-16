@@ -109,7 +109,9 @@ use thiserror::Error;
 pub use geom_kernel::perf;
 use geom_kernel::perf::Work as PerfWork;
 
-pub use adapter::{arms_of, to_primitives, LoadStepTaper, SweepEmission};
+pub use adapter::{
+    arms_of, to_primitives, to_primitives_deferring_diagnostics, LoadStepTaper, SweepEmission,
+};
 pub use congestion::{CongestionCensus, CongestionOutcome, CongestionReport};
 pub use deferred_rigid::{
     complete_rigid_share, store_rigid_share, take_deferred_rigid_share, DeferredRigidShare,
@@ -2097,7 +2099,10 @@ fn replan_and_choose(
     let kept_second = outcome.second_shortfall_mm2 < outcome.first_shortfall_mm2
         && outcome.second_unbraced <= outcome.first_unbraced;
     if kept_second {
-        complete_rigid_share(&mut second);
+        // Outside the scope above, on whatever worker is running this: the
+        // reading polls the cancel token, and a worker nested inside another
+        // pose's race would read that pose's flag and return an empty report.
+        cancel::without_token(|| complete_rigid_share(&mut second));
     }
     let mut chosen = if kept_second { second } else { first };
     chosen.report.seat_second_contact = contact_growth::SecondContactOutcome {
