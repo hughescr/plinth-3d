@@ -1113,9 +1113,9 @@ impl Pending {
     fn release(&mut self, ledger: &mut Ledger) {
         self.tested = std::collections::HashMap::new();
         self.ahead = std::collections::HashMap::new();
-        // The scan's verdicts are charged into `retained` too.
+        // The scan's store is charged into `retained` too: both queues freed.
         self.scan.clear();
-        self.scan.verdicts = std::collections::VecDeque::new();
+        self.scan.charged = 0;
         ledger.retained = ledger.retained.saturating_sub(self.retained);
         self.retained = 0;
     }
@@ -2043,6 +2043,90 @@ fn trial_arm(
     )
 }
 
+/// **The strut a scan's trial solids are drawn from** ([`trial_arm_from`]):
+/// `strut` with only what [`crate::adapter::drawn_ends`] and
+/// [`crate::adapter::sweep_arm`] read (its cells, layers, landing, kind, seat
+/// face and normal, its tip radius, its head), none of its load ledger,
+/// demand, births or paths. So a candidate's trial clones a few fixed fields,
+/// not a whole member (lane S2 review, 2026-10-15). A headed member (never a
+/// scan's mover or child: a headed arm is kept and an arm carrying one is
+/// locked) keeps its whole radius ledger, which its head is drawn from.
+fn trial_template(strut: &SweepStrut) -> SweepStrut {
+    SweepStrut {
+        id: strut.id,
+        cell: strut.cell,
+        center_mm: strut.center_mm,
+        kind: strut.kind,
+        min_radius_mm: strut.min_radius_mm,
+        thickened_mm: Vec::new(),
+        foot_radius_mm: strut.foot_radius_mm,
+        seat_on_strut: strut.seat_on_strut,
+        k_top: strut.k_top,
+        k_bottom: strut.k_bottom,
+        landing: strut.landing,
+        interior: strut.interior,
+        // `tip_radius_mm` reads the last slot; a head reads its joint's.
+        radius_mm: if strut.head.is_some() {
+            strut.radius_mm.clone()
+        } else {
+            strut.radius_mm.last().copied().into_iter().collect()
+        },
+        carried_mm2: Vec::new(),
+        covered_demand: Vec::new(),
+        held_births: Vec::new(),
+        twin_host: strut.twin_host,
+        inserted_by_load: strut.inserted_by_load,
+        path: Vec::new(),
+        straight_fallback: strut.straight_fallback,
+        fallback_path: Vec::new(),
+        seat_face: strut.seat_face,
+        seat_normal: strut.seat_normal,
+        head: strut.head.clone(),
+    }
+}
+
+/// One job's [`trial_template`]s: its mover's, and each child's in the job's
+/// child order.
+struct Templates {
+    mover: SweepStrut,
+    children: Vec<SweepStrut>,
+}
+
+impl Templates {
+    fn of(struts: &[SweepStrut], mover: usize, children: &[usize]) -> Self {
+        Self {
+            mover: trial_template(&struts[mover]),
+            children: children.iter().map(|&child| trial_template(&struts[child])).collect(),
+        }
+    }
+}
+
+/// [`trial_arm`] from a [`trial_template`] of the member: the same solid.
+fn trial_arm_from(
+    context: &SlendernessContext<'_>,
+    plate_z_mm: f64,
+    template: &SweepStrut,
+    arm: &SweepArm,
+    landing: Landing,
+    k_bottom: usize,
+    path: &[u32],
+) -> SweepArm {
+    let mut strut = template.clone();
+    strut.landing = landing;
+    strut.k_bottom = k_bottom;
+    strut.path = path.to_vec();
+    strut.seat_normal = arm.seat_normal_mm;
+    let (seat, base) =
+        crate::adapter::drawn_ends(context.grid, plate_z_mm, context.layer_height_mm, &strut);
+    crate::adapter::sweep_arm(
+        &strut,
+        seat,
+        base,
+        arm.seat_face_point_mm,
+        top_aligned(&arm.radius_profile_mm, strut.k_top - strut.k_bottom),
+    )
+}
+
 /// What every solid read of one [`apply`] pass is taken against.
 struct ReadFrame<'a> {
     surface: &'a NativeSurface,
@@ -2678,16 +2762,33 @@ impl ScanStore {
 /// base, radius, zones; `solid_frame`).
 const FRAME_ROW_BYTES: usize = 128;
 
+/// The heap a [`trial_template`] clone holds besides its struct: a one-slot
+/// radius ledger (a headed member, never a scan's, would hold its own).
+const TRIAL_SCRATCH_BYTES: usize = 64;
+
+/// The bytes one trial draws besides the solid it returns: the template
+/// clone, its path copy.
+fn trial_scratch_bytes(path_len: usize) -> usize {
+    std::mem::size_of::<SweepStrut>() + TRIAL_SCRATCH_BYTES + 4 * path_len
+}
+
 /// **An upper bound on the bytes one candidate's scan evaluation holds**
 /// ([`scan_chunk`]): the mover's trial solid (a radius per layer up to its
 /// top), its path and every descendant's (a cell per layer), each
-/// descendant's trial solid, a frame row per kernel read, and the verdict.
-/// Each length is bounded by the member's own top layer, so the bound holds
-/// for every candidate of the job.
+/// descendant's trial solid, a frame row per kernel read, and the verdict;
+/// and the scratch of drawing each (a [`trial_template`] clone, a few fixed
+/// fields, and a copy of its path) and of the path test (a moved path per
+/// descendant). Each length is bounded by the member's own top layer, so the
+/// bound holds for every candidate of the job.
 fn scan_candidate_bytes(job: &Pending, struts: &[SweepStrut]) -> usize {
     let layers = |member: usize| struts[member].k_top.saturating_add(1);
     let member = |member: usize| {
-        (8 + 4) * layers(member) + TRIAL_ARM_BYTES + FRAME_ROW_BYTES + std::mem::size_of::<Follow>()
+        (8 + 4 + 4 + 4) * layers(member)
+            + TRIAL_ARM_BYTES
+            + FRAME_ROW_BYTES
+            + std::mem::size_of::<Follow>()
+            + std::mem::size_of::<SweepStrut>()
+            + TRIAL_SCRATCH_BYTES
     };
     64 + std::mem::size_of::<Verdict>()
         + member(job.index)
@@ -2727,13 +2828,12 @@ impl Verdict {
         }
     }
 
-    /// The bytes the verdict holds in a [`ScanStore`].
-    fn bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + match self {
-                Self::Clears { found, .. } => found_bytes(Some(found)),
-                Self::Path | Self::Clearance { .. } => 0,
-            }
+    /// The bytes of the paths the verdict keeps (a pass's only).
+    fn path_bytes(&self) -> usize {
+        match self {
+            Self::Clears { found, .. } => found_bytes(Some(found)),
+            Self::Path | Self::Clearance { .. } => 0,
+        }
     }
 }
 
@@ -2744,10 +2844,13 @@ impl Verdict {
 /// length of the job's last chunk, and the rates the next chunk is sized
 /// from ([`ScanStore::next_len`]). The counts a round start
 /// asks of it ([`Pending::stored_walk`]) are kept as verdicts come and go, so
-/// asking costs nothing however long the store is. `bytes` is what the held
-/// verdicts hold ([`Verdict::bytes`]); the job charges it to the pass's
-/// [`Ledger`] ([`Pending::scan_push`]), so the store never takes the ledger
-/// past its limit.
+/// asking costs nothing however long the store is. What the store holds in
+/// memory ([`ScanStore::held`]: both queues' ALLOCATED capacity, and the
+/// paths of the passes it holds) is charged to the pass's [`Ledger`]
+/// ([`Pending::scan_sync`]); `charged` is the amount charged now. Pushes are
+/// reserved exactly and only where the ledger has room for them, and the
+/// queues are freed when the store empties and shrunk when mostly empty, so
+/// the memory the stores hold never takes the ledger past its limit.
 #[derive(Default)]
 struct ScanStore {
     generation: u64,
@@ -2760,30 +2863,57 @@ struct ScanStore {
     popped_refused: usize,
     /// For each `Clears` verdict held, the clearance verdicts pushed before it.
     clears: std::collections::VecDeque<usize>,
-    bytes: usize,
+    /// The bytes of the paths the held `Clears` verdicts keep.
+    paths: usize,
+    charged: usize,
 }
 
 impl ScanStore {
-    /// Drop every verdict; returns the bytes they held.
-    fn clear(&mut self) -> usize {
-        self.verdicts.clear();
-        self.clears.clear();
+    /// The bytes the store holds: its queues' allocated capacity and the
+    /// paths its passes keep.
+    fn held(&self) -> usize {
+        self.verdicts.capacity() * std::mem::size_of::<Verdict>()
+            + self.clears.capacity() * std::mem::size_of::<usize>()
+            + self.paths
+    }
+
+    /// Drop every verdict and free both queues.
+    fn clear(&mut self) {
+        self.verdicts = std::collections::VecDeque::new();
+        self.clears = std::collections::VecDeque::new();
         self.pushed_refused = 0;
         self.popped_refused = 0;
-        std::mem::take(&mut self.bytes)
+        self.paths = 0;
     }
 
-    fn push(&mut self, verdict: Verdict) {
-        match verdict {
-            Verdict::Path => {}
-            Verdict::Clearance { .. } => self.pushed_refused += 1,
-            Verdict::Clears { .. } => self.clears.push_back(self.pushed_refused),
+    /// The bytes holding `verdicts[..n]` more would add: the queues'
+    /// growth (reserved exactly) and the passes' paths.
+    fn growth(&self, verdicts: &[Verdict], n: usize) -> usize {
+        let more = |len: usize, cap: usize, add: usize| (len + add).saturating_sub(cap);
+        let passes = verdicts[..n].iter().filter(|verdict| matches!(verdict, Verdict::Clears { .. })).count();
+        more(self.verdicts.len(), self.verdicts.capacity(), n) * std::mem::size_of::<Verdict>()
+            + more(self.clears.len(), self.clears.capacity(), passes) * std::mem::size_of::<usize>()
+            + verdicts[..n].iter().map(Verdict::path_bytes).sum::<usize>()
+    }
+
+    /// Store `verdicts` at the end, the queues grown exactly to fit.
+    fn extend(&mut self, verdicts: Vec<Verdict>) {
+        let passes = verdicts.iter().filter(|verdict| matches!(verdict, Verdict::Clears { .. })).count();
+        self.verdicts.reserve_exact(verdicts.len());
+        self.clears.reserve_exact(passes);
+        for verdict in verdicts {
+            match verdict {
+                Verdict::Path => {}
+                Verdict::Clearance { .. } => self.pushed_refused += 1,
+                Verdict::Clears { .. } => self.clears.push_back(self.pushed_refused),
+            }
+            self.paths += verdict.path_bytes();
+            self.verdicts.push_back(verdict);
         }
-        self.bytes += verdict.bytes();
-        self.verdicts.push_back(verdict);
     }
 
-    /// The verdict of candidate `from`, taken; `from` moves on.
+    /// The verdict of candidate `from`, taken; `from` moves on. The queues are
+    /// freed when they empty and shrunk when a quarter full.
     fn pop(&mut self) -> Option<Verdict> {
         let verdict = self.verdicts.pop_front()?;
         match verdict {
@@ -2793,8 +2923,15 @@ impl ScanStore {
                 self.clears.pop_front();
             }
         }
-        self.bytes = self.bytes.saturating_sub(verdict.bytes());
+        self.paths = self.paths.saturating_sub(verdict.path_bytes());
         self.from += 1;
+        if self.verdicts.is_empty() {
+            self.verdicts = std::collections::VecDeque::new();
+            self.clears = std::collections::VecDeque::new();
+        } else if self.verdicts.len() * 4 < self.verdicts.capacity() {
+            self.verdicts.shrink_to_fit();
+            self.clears.shrink_to_fit();
+        }
         Some(verdict)
     }
 
@@ -2856,22 +2993,29 @@ struct ScanPass {
 /// clearance test passes: the children's trial solids on the moved axis, and
 /// each child's hidden flag ([`proposal_hidden`]: a child only where the
 /// mover is hidden too).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the field, the job's trial templates, the mover and the candidate's pass"
+)]
 fn children_trial(
     context: &SlendernessContext<'_>,
     plate_z_mm: f64,
     struts: &[SweepStrut],
     arms: &[SweepArm],
+    templates: &Templates,
     mover: usize,
     candidate: Candidate,
     pass: &ScanPass,
 ) -> (Vec<SweepArm>, Vec<bool>) {
+    // `propose` answers one follow per child, in the job's child order.
     let solids: Vec<SweepArm> = pass
         .found
         .1
         .iter()
-        .map(|(child, _, path)| {
-            let strut = &struts[*child];
-            trial_arm(context, plate_z_mm, struts, arms, *child, strut.landing, strut.k_bottom, path)
+        .zip(&templates.children)
+        .map(|((child, _, path), template)| {
+            debug_assert_eq!(template.id, struts[*child].id, "follows in the job's child order");
+            trial_arm_from(context, plate_z_mm, template, &arms[*child], template.landing, template.k_bottom, path)
         })
         .collect();
     let hidden = if pass.hidden {
@@ -2912,18 +3056,18 @@ fn scan_pass(
     index: &StampedIndex,
     struts: &[SweepStrut],
     arms: &[SweepArm],
+    templates: &Templates,
     mover: usize,
     children: &[usize],
     candidate: Candidate,
     clearance: bool,
 ) -> Option<(ScanPass, SweepArm)> {
     let found = propose_now(context, index, struts, mover, candidate, children, clearance)?;
-    let solid = trial_arm(
+    let solid = trial_arm_from(
         context,
         plate_z_mm,
-        struts,
-        arms,
-        mover,
+        &templates.mover,
+        &arms[mover],
         candidate.landing,
         candidate.k_bottom,
         &found.0,
@@ -2987,9 +3131,12 @@ fn scan_chunk(
 ) -> (Vec<Verdict>, usize, usize) {
     use rayon::prelude::*;
     let plate_z_mm = frame.plate_z_mm;
+    let templates = Templates::of(struts, mover, children);
     let judged: Vec<Option<(ScanPass, SweepArm)>> = candidates
         .par_iter()
-        .map(|&candidate| scan_pass(context, plate_z_mm, index, struts, arms, mover, children, candidate, clearance))
+        .map(|&candidate| {
+            scan_pass(context, plate_z_mm, index, struts, arms, &templates, mover, children, candidate, clearance)
+        })
         .collect();
     // The movers' reads, one batch; the mover as it stands bounds each, read
     // once per pass as the round reads it ([`StandingReads`]).
@@ -3001,7 +3148,10 @@ fn scan_chunk(
     for (at, entry) in judged.into_iter().enumerate() {
         bytes += std::mem::size_of::<Verdict>();
         passes.push(entry.map(|(pass, solid)| {
-            bytes += trial_bytes(&solid) + found_bytes(Some(&pass.found)) + FRAME_ROW_BYTES;
+            bytes += trial_bytes(&solid)
+                + found_bytes(Some(&pass.found))
+                + FRAME_ROW_BYTES
+                + trial_scratch_bytes(pass.found.0.len());
             rows.push(at);
             on_model.push(matches!(candidates[at].landing, Landing::Model { .. }));
             solids.push(solid);
@@ -3044,13 +3194,13 @@ fn scan_chunk(
         .map(|&row| {
             let at = rows[row];
             let pass = passes[at].as_ref().expect("a row is a pass");
-            children_trial(context, plate_z_mm, struts, arms, mover, candidates[at], pass)
+            children_trial(context, plate_z_mm, struts, arms, &templates, mover, candidates[at], pass)
         })
         .collect();
     bytes += trials
         .iter()
         .flat_map(|(solids, _)| solids.iter())
-        .map(|solid| trial_bytes(solid) + FRAME_ROW_BYTES)
+        .map(|solid| trial_bytes(solid) + FRAME_ROW_BYTES + trial_scratch_bytes(solid.radius_profile_mm.len()))
         .sum::<usize>();
     let followers: Vec<usize> = asked
         .iter()
@@ -3138,8 +3288,9 @@ fn verdict_alone(
     clearance: bool,
     standing_reads: &mut StandingReads,
 ) -> Verdict {
+    let templates = Templates::of(struts, mover, children);
     let Some((pass, solid)) =
-        scan_pass(context, frame.plate_z_mm, index, struts, arms, mover, children, candidate, clearance)
+        scan_pass(context, frame.plate_z_mm, index, struts, arms, &templates, mover, children, candidate, clearance)
     else {
         return Verdict::Path;
     };
@@ -3150,7 +3301,8 @@ fn verdict_alone(
     if !pass.hidden && !read.is_some_and(|now| now >= bound) {
         return clearance_verdict(pass.found, false, read, bound, (&[], &[], &[]));
     }
-    let (solids, hidden) = children_trial(context, frame.plate_z_mm, struts, arms, mover, candidate, &pass);
+    let (solids, hidden) =
+        children_trial(context, frame.plate_z_mm, struts, arms, &templates, mover, candidate, &pass);
     let followers: Vec<usize> = pass.found.1.iter().map(|(child, _, _)| *child).collect();
     standing_reads.read(frame, arms, struts, &followers, false);
     let bounds: Vec<f64> = followers
@@ -3180,7 +3332,6 @@ impl Pending {
     /// generation are dropped (and the chunk length starts again), and so are
     /// those of candidates the rounds have walked since the store was filled.
     fn align_scan(&mut self, ledger: &mut Ledger, generation: u64) {
-        let held = self.scan.bytes;
         let store = &mut self.scan;
         if store.generation != generation {
             store.clear();
@@ -3195,28 +3346,48 @@ impl Pending {
                 store.pop();
             }
         }
-        let freed = held.saturating_sub(self.scan.bytes);
-        self.credit(ledger, freed);
+        self.scan_sync(ledger);
     }
 
-    /// Store `verdict` at the end of the job's scan, charged to the ledger;
-    /// `false` (the verdict dropped) where the ledger has no room for it. A
-    /// dropped verdict is only work to do again: the store simply ends
-    /// before it.
-    fn scan_push(&mut self, ledger: &mut Ledger, verdict: Verdict) -> bool {
-        let bytes = verdict.bytes();
-        if !ledger.has_room(bytes) {
-            return false;
+    /// Charge (or credit) the ledger for what the job's scan store holds now
+    /// ([`ScanStore::held`]).
+    fn scan_sync(&mut self, ledger: &mut Ledger) {
+        let held = self.scan.held();
+        let charged = std::mem::replace(&mut self.scan.charged, held);
+        if held > charged {
+            self.charge(ledger, held - charged);
+        } else {
+            self.credit(ledger, charged - held);
         }
-        self.scan.push(verdict);
-        self.charge(ledger, bytes);
-        true
     }
 
-    /// Take the verdict at the scan's cursor, crediting the ledger.
+    /// Store the longest prefix of `verdicts` the ledger has room for (the
+    /// queues grown exactly, and the passes' paths) at the end of the job's
+    /// scan, charged; `false` where none fits. A dropped verdict is only work
+    /// to do again: the store simply ends before it.
+    fn scan_store(&mut self, ledger: &mut Ledger, mut verdicts: Vec<Verdict>) -> bool {
+        let room = ledger.limit.saturating_sub(ledger.retained);
+        // The growth only rises with the prefix: the longest one that fits.
+        let (mut fits, mut over) = (0, verdicts.len() + 1);
+        while fits + 1 < over {
+            let mid = (fits + over) / 2;
+            if self.scan.growth(&verdicts, mid) <= room {
+                fits = mid;
+            } else {
+                over = mid;
+            }
+        }
+        verdicts.truncate(fits);
+        self.scan.extend(verdicts);
+        self.scan_sync(ledger);
+        fits > 0
+    }
+
+    /// Take the verdict at the scan's cursor, the ledger kept to what the
+    /// store still holds.
     fn scan_pop(&mut self, ledger: &mut Ledger) -> Option<Verdict> {
         let verdict = self.scan.pop()?;
-        self.credit(ledger, verdict.bytes());
+        self.scan_sync(ledger);
         Some(verdict)
     }
 
@@ -3342,12 +3513,7 @@ fn scan_open_jobs(
             if s0.on {
                 s0.scan.chunks += 1;
             }
-            for verdict in verdicts {
-                if !job.scan_push(ledger, verdict) {
-                    break;
-                }
-                stored = true;
-            }
+            stored |= job.scan_store(ledger, verdicts);
         }
         if !stored {
             // **The ledger is full.** Take the rounds the stores already prove

@@ -1377,14 +1377,14 @@ fn the_deep_scan_gives_the_rounds_answer() {
 ///
 /// TEST: scan on (MID and the cavity also under the shadow check) equals scan
 /// off at the same limit in field, outcome and moves; the ledger never held
-/// more than the limit; no chunk's working set passed its share.
+/// more than the limit, the scan's stores charged at their queues' ALLOCATED
+/// capacity (`ScanStore::held`), so the peak is a bound on what they really
+/// hold; no chunk's working set passed its share.
 /// ANTI-VACUITY: the scan settled candidates and fell back for want of room
 /// at least once in each field, an arm moves in MID, and the cavity's
 /// refusals counted hidden members. SABOTAGE: with the stores' room check
 /// and the chunk's room bound removed, TALL's ledger reaches 999,392 bytes
-/// against its 262,144 limit. (Taking one round past the proven ones in the
-/// fallback is NOT a defect this can see, and is in fact exact: round R + 1's
-/// refusals are decided on reads made at its start, before any commit.)
+/// against its 262,144 limit.
 #[test]
 fn the_deep_scan_holds_its_byte_budget_and_gives_the_rounds_answer() {
     use crate::cavity::fixtures::{cavity_box_sized, cell, map_of};
