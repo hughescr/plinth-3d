@@ -56,10 +56,11 @@
 //! the production rasterizer at all -- it calls
 //! `plinth_hollow::diagnostics::triangle_cube_overlaps`.
 //!
-//! **Allowlist line numbers re-pointed 2026-10-13**, and only the numbers:
-//! `src/drilling.rs` 2195 and `src/drains.rs` 2320. The ranked drill
-//! fallback (drilling) and the re-plan entry (drains) added code above both,
-//! so the two entries drifted off their targets and
+//! **Allowlist line numbers re-pointed 2026-10-13 and 2026-10-16**, and only
+//! the numbers: `src/drilling.rs` 2205 and `src/drains.rs` 2320. The ranked
+//! drill fallback (drilling), the re-plan entry (drains) and the hollow-first
+//! `drain_bores` accessor (drilling) added code above them, so the entries
+//! drifted off their targets and
 //! `every_allowlist_entry_still_points_at_a_matching_line` said so — which is
 //! that test doing its job. Both targets were re-read before the move and are
 //! the same typed-refusal `normalize` wrappers with the same bodies, so the
@@ -84,7 +85,7 @@ use std::path::{Path, PathBuf};
 const ALLOWLIST: &[(&str, u32, &str)] = &[
     (
         "src/drilling.rs",
-        2195,
+        2205,
         "canon §1 OP-6 / plan item C4: not a private normalize but the typed \
          refusal wrapper the canon REQUIRES at each call site. The body is \
          `geom_kernel::vec3::normalize(a).ok_or(InvalidHoleGeometry)`; no \
