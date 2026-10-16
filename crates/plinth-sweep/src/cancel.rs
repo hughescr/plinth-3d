@@ -32,7 +32,10 @@
 //! difference.
 //!
 //! Inner `par_iter` regions never check the token: the check runs only on the
-//! driving thread, between regions. A pose that steals another pose's job
+//! driving thread, between regions. The one exception is the removal replay's
+//! proposed walk, which polls once per layer inside a `rayon::join` closure
+//! that any worker may run: it carries the owner's token across
+//! ([`current_token`], [`with_carried`]). A pose that steals another pose's job
 //! while it waits on a region nests a second [`with_token`] scope; the guard
 //! restores the outer token on exit, so each pose reads its own.
 //!
@@ -98,6 +101,23 @@ fn scoped<R>(token: Option<Arc<AtomicBool>>, work: impl FnOnce() -> R) -> R {
     let previous = TOKEN.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), token));
     let _scope = Scope { previous };
     work()
+}
+
+/// This thread's token (none when no pose installed one). A pose that hands
+/// work to the rayon pool (`rayon::join` can run the second closure on any
+/// worker) reads the token here, on the driving thread, and the closure
+/// re-installs it with [`with_carried`]: a job that crosses threads would
+/// otherwise poll the token of whichever pose its worker is driving.
+#[must_use]
+pub fn current_token() -> Option<Arc<AtomicBool>> {
+    TOKEN.with(|token| token.borrow().clone())
+}
+
+/// Runs `work` under `token` as read by [`current_token`] on the thread that
+/// handed the work over: `Some` installs the owner's flag, `None` clears
+/// whatever the worker's own pose carried (see [`without_token`]).
+pub fn with_carried<R>(token: &Option<Arc<AtomicBool>>, work: impl FnOnce() -> R) -> R {
+    scoped(token.clone(), work)
 }
 
 /// `true` when this thread's token is installed and set.
@@ -176,6 +196,39 @@ mod tests {
             assert!(cancelled(), "the outer token is back after a panic in without_token");
         });
         assert!(!cancelled(), "and nothing leaks past the outermost scope");
+    }
+
+    #[test]
+    fn a_carried_token_reaches_the_worker_that_steals_the_job() {
+        use std::sync::atomic::AtomicBool as Flag;
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().expect("pool");
+        let owner = Arc::new(AtomicBool::new(true));
+        let other = Arc::new(AtomicBool::new(false));
+        // The driving thread blocks in the first closure until the second has
+        // run, so the second can only have run on another worker.
+        let second_ran = Flag::new(false);
+        let (seen_plain, seen_carried) = pool.install(|| {
+            with_token(&owner, || {
+                let carried = current_token();
+                let (_, seen) = rayon::join(
+                    || while !second_ran.load(Ordering::Acquire) { std::hint::spin_loop() },
+                    || {
+                        // The other worker's own pose carries a different token.
+                        let plain = with_token(&other, || {
+                            // What an uncarried poll would read on a stolen job.
+                            let plain = cancelled();
+                            let carried_here = with_carried(&carried, cancelled);
+                            (plain, carried_here)
+                        });
+                        second_ran.store(true, Ordering::Release);
+                        plain
+                    },
+                );
+                seen
+            })
+        });
+        assert!(!seen_plain, "an uncarried poll reads the worker's own pose");
+        assert!(seen_carried, "a carried token is the owner's, on any worker");
     }
 
     #[test]

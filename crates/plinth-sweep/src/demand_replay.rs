@@ -486,6 +486,16 @@ fn reference_replay_once(
 // The logical counts (`layers_visited`, `trial_layers`) are what a fresh replay
 // reports. What the reuse saved is told apart in [`ReplayWork`].
 //
+// The baseline walk and the proposed walk are two chains, and only the proposed
+// one reads the other (it is held against the baseline's rooted cells each
+// layer). A call that is big enough ([`overlap_worthwhile`]) therefore walks
+// the baseline a chunk ahead of the proposed walk, the two side by side in the
+// one rayon pool (`run_walks`; no thread outside the pool), and the proposed
+// walk takes each layer's baseline in layer order and commits it to the cache
+// itself, so the cache, the budget decisions, every counter and the answer are
+// what the serial walk gives. A smaller call walks the same chunks one after
+// the other on its own thread: the same code.
+//
 // Every kept byte is drawn from the process-wide layer-cache pool
 // ([`BytePool::process`]). When the pool refuses a baseline layer the call's
 // cache is switched off and every later replay of the call is a fresh one.
@@ -796,13 +806,6 @@ fn replay_once(
     let first = cache.first;
     let layer_cache = LayerCache::resolve(context.layer_cache, grid, context.slices);
     let mut layer_reader = layer_cache.reader();
-    let new_state = || {
-        let mut state = ReachState::new(grid);
-        if !context.straight_reach {
-            state.straight_limit = f32::NEG_INFINITY;
-        }
-        state
-    };
     let metric = crate::ReachMetric {
         reach_mm: context.kappa * context.layer_height_mm,
         straight: context.straight_reach,
@@ -821,17 +824,17 @@ fn replay_once(
         // baseline is cached (when the cache reaches that far).
         start = lowest.min(base.len());
         if start == lowest && start > 0 {
-            let mut state = new_state();
+            let mut state = new_reach_state(context);
             layer_reader.prepare(start - 1, false);
             scatter_carry(&mut state, layer_reader.carry_cells(start - 1), &base[start - 1].carry);
             proposed = Some(state);
         } else if start == lowest {
-            proposed = Some(new_state());
+            proposed = Some(new_reach_state(context));
         }
         work.baseline_reused += start as u64;
         outcome.layers_visited += start as u64;
     }
-    let mut creep = if context.creep_weight {
+    let creep = if context.creep_weight {
         SurfaceCreep::new(
             context.mesh,
             grid,
@@ -842,162 +845,549 @@ fn replay_once(
     } else {
         SurfaceCreep::disabled(grid)
     };
-    // The current set's carried potential up to the layer being walked: set at
-    // layer 0, and rebuilt from the cache where a walk joins the baseline
-    // partway.
-    let mut current = new_state();
-    let mut current_ready = start == 0;
-    let mut trial_done = false;
-    let mut queue = Vec::new();
-    let mut touched = Vec::new();
-    let mut fresh = Vec::new();
-    let relax = |state: &mut ReachState,
-                 cover: &[bool],
-                 cell: usize,
-                 queue: &mut Vec<usize>,
-                 touched: &mut Vec<usize>| {
-        touched.clear();
-        reach::relax_from_root(grid, cover, context.kappa, cell, state, queue, touched);
+    // The CURRENT set's potential does not depend on which arms are doomed, so
+    // its walk (the baseline) runs on a thread of its own, a few layers ahead of
+    // the proposed set's walk, which reads each layer's result in layer order
+    // and commits it to the call's cache exactly as a serial walk would. The
+    // baseline walk starts at the first layer the cache does not hold, from the
+    // carry the cache holds just below it.
+    let produce_from = if *enabled { base.len() } else { start };
+    let mut current = new_reach_state(context);
+    if start > 0 && produce_from < context.layers {
+        assert!(
+            *enabled && produce_from == base.len() && produce_from > 0,
+            "the replay joined the baseline at layer {produce_from} with {} layers cached",
+            base.len()
+        );
+        layer_reader.prepare(produce_from - 1, false);
+        scatter_carry(
+            &mut current,
+            layer_reader.carry_cells(produce_from - 1),
+            &base[produce_from - 1].carry,
+        );
+    }
+    let baseline = BaselineWalker::new(BaselineWalk {
+        context,
+        struts,
+        roots_by_layer,
+        layer_cache: &layer_cache,
+        from: produce_from,
+        current,
+        first,
+        lowest,
+        want_snapshot: proposed.is_none(),
+    });
+    let walk = TrialWalk {
+        context,
+        struts,
+        roots_by_layer,
+        doomed,
+        blame_u,
+        outcome,
+        budget,
+        enabled,
+        base,
+        work,
+        first,
+        lowest,
+        highest,
+        start,
+        proposed,
+        creep,
+        layer_reader,
+        metric,
+        ratio,
+        trial_done: false,
+        queue: Vec::new(),
+        touched: Vec::new(),
+        fresh: Vec::new(),
     };
+    let overlap =overlap_worthwhile(context, context.layers.saturating_sub(produce_from));
+    run_walks(baseline, walk, produce_from, overlap)
+}
 
-    for layer in start..context.layers {
-        // One thread-local read per layer (a layer is the unit of work here).
+/// Whether the two walks overlap: a layer's walk costs about its cell count and
+/// a hand-over costs a rayon task, so a small grid or a short walk is taken
+/// serially (the same chunks, in the same order, on the one thread).
+fn overlap_worthwhile(context: &ReplayContext<'_>, layers_to_walk: usize) -> bool {
+    #[cfg(test)]
+    if let Some(forced) = FORCE_OVERLAP.with(std::cell::Cell::get) {
+        return forced;
+    }
+    layers_to_walk >= OVERLAP_MIN_LAYERS
+        && context.grid.cells() >= OVERLAP_MIN_CELLS
+        && rayon::current_num_threads() > 1
+}
+
+/// Fewest grid cells for which the walks overlap.
+const OVERLAP_MIN_CELLS: usize = 16_384;
+/// Fewest layers of baseline to walk for which the walks overlap.
+const OVERLAP_MIN_LAYERS: usize = 16;
+/// Layers per hand-over: the baseline walk finishes this many layers ahead
+/// while the proposed walk takes the chunk before.
+const CHUNK_LAYERS: usize = 8;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: `Some(true)` or `Some(false)` forces the walks to overlap or
+    /// to run serially; `None` is production.
+    static FORCE_OVERLAP: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// The baseline layers of `from..to` that the cache does not hold (those at or
+/// above `produce_from`), in layer order.
+fn produce_chunk(
+    baseline: &mut BaselineWalker<'_, '_>,
+    produce_from: usize,
+    from: usize,
+    to: usize,
+) -> Vec<ProducedLayer> {
+    (from.max(produce_from)..to)
+        .map(|_| baseline.step().expect("the baseline walk ended before the last layer"))
+        .collect()
+}
+
+/// Walk both chains over the layers, chunk by chunk. The proposed walk is the
+/// only one that reads the other (a layer's baseline), so while it takes chunk
+/// `c` the baseline walk finishes chunk `c + 1`, the two side by side in the
+/// one rayon pool (`rayon::join` never blocks on work that was not started: a
+/// chunk nobody steals runs on the calling thread, after the other, giving
+/// the serial walk). The proposed walk commits each layer's baseline to the
+/// call's cache in layer order, so the cache, every counter and the answer are
+/// what the serial walk gives.
+fn run_walks(
+    mut baseline: BaselineWalker<'_, '_>,
+    mut walk: TrialWalk<'_, '_>,
+    produce_from: usize,
+    overlap: bool,
+) -> Pass {
+    let layers = walk.context.layers;
+    // The cancel token is a thread-local of the pose's driving thread, and
+    // `rayon::join` may run the proposed walk's chunk on any worker (one that
+    // is driving another pose, or none). The chunk polls the token of the pose
+    // that owns this call, read here and re-installed around it.
+    let token = crate::cancel::current_token();
+    let mut from = walk.start;
+    let mut ready = produce_chunk(
+        &mut baseline,
+        produce_from,
+        from,
+        (from + CHUNK_LAYERS).min(layers),
+    );
+    while from < layers {
+        let to = (from + CHUNK_LAYERS).min(layers);
+        let after = (to + CHUNK_LAYERS).min(layers);
+        let chunk = std::mem::take(&mut ready);
+        let (next, flow) = if overlap && to < layers {
+            rayon::join(
+                || produce_chunk(&mut baseline, produce_from, to, after),
+                || {
+                    crate::cancel::with_carried(&token, || {
+                        walk.chunk(from, to, chunk, produce_from)
+                    })
+                },
+            )
+        } else {
+            let flow = walk.chunk(from, to, chunk, produce_from);
+            let next = if flow.is_none() && to < layers {
+                produce_chunk(&mut baseline, produce_from, to, after)
+            } else {
+                Vec::new()
+            };
+            (next, flow)
+        };
+        if let Some(pass) = flow {
+            return pass;
+        }
+        ready = next;
+        from = to;
+    }
+    Pass::Verified
+}
+
+/// A fresh reach state, in the up-sweep's metric.
+fn new_reach_state(context: &ReplayContext<'_>) -> ReachState {
+    let mut state = ReachState::new(context.grid);
+    if !context.straight_reach {
+        state.straight_limit = f32::NEG_INFINITY;
+    }
+    state
+}
+
+/// One layer of the baseline walk, as it goes to the proposed walk.
+struct ProducedLayer {
+    layer: usize,
+    /// The layer has no cover: nothing was computed, the carry is all infinity.
+    empty: bool,
+    record: BaselineLayer,
+    /// The cover cells the current set leaves unrooted here, counted on the
+    /// first replay only.
+    unrooted: u64,
+    /// The current set's carried potential on entry to this layer: sent with
+    /// the layer the proposed set starts at, when it starts from the walk
+    /// rather than from the cache.
+    snapshot: Option<Vec<f32>>,
+}
+
+/// What the baseline walk reads and starts from.
+struct BaselineWalk<'a, 'c> {
+    context: &'a ReplayContext<'c>,
+    struts: &'a [SweepStrut],
+    roots_by_layer: &'a [Vec<usize>],
+    layer_cache: &'a LayerCache<'c>,
+    /// The first layer to walk.
+    from: usize,
+    /// The carried potential on entry to `from`.
+    current: ReachState,
+    first: bool,
+    lowest: usize,
+    /// Whether the proposed set starts from this walk's carry (at the first
+    /// layer with cover at or above `lowest`).
+    want_snapshot: bool,
+}
+
+/// The CURRENT arm set's potential, one layer per [`Self::step`], from
+/// `BaselineWalk::from` up. Run on a thread of its own or by the proposed walk
+/// itself; either way it produces the same layers in the same order.
+struct BaselineWalker<'a, 'c> {
+    context: &'a ReplayContext<'c>,
+    struts: &'a [SweepStrut],
+    roots_by_layer: &'a [Vec<usize>],
+    layer_reader: crate::layer_cache::LayerReader<'a, 'c>,
+    creep: SurfaceCreep<'c>,
+    queue: Vec<usize>,
+    touched: Vec<usize>,
+    current: ReachState,
+    first: bool,
+    lowest: usize,
+    want_snapshot: bool,
+    /// The next layer to produce.
+    next: usize,
+}
+
+impl<'a, 'c> BaselineWalker<'a, 'c> {
+    fn new(walk: BaselineWalk<'a, 'c>) -> Self {
+        let context = walk.context;
+        let creep = if context.creep_weight {
+            SurfaceCreep::new(
+                context.mesh,
+                context.grid,
+                context.overhang_centre_deg,
+                context.overhang_transition_deg,
+                context.creep_overhang_cut,
+            )
+        } else {
+            SurfaceCreep::disabled(context.grid)
+        };
+        Self {
+            context,
+            struts: walk.struts,
+            roots_by_layer: walk.roots_by_layer,
+            layer_reader: walk.layer_cache.reader(),
+            creep,
+            queue: Vec::new(),
+            touched: Vec::new(),
+            current: walk.current,
+            first: walk.first,
+            lowest: walk.lowest,
+            want_snapshot: walk.want_snapshot,
+            next: walk.from,
+        }
+    }
+
+    /// The next layer's baseline; `None` above the top layer.
+    fn step(&mut self) -> Option<ProducedLayer> {
+        let context = self.context;
+        let grid = context.grid;
+        let layer = self.next;
+        if layer >= context.layers {
+            return None;
+        }
+        self.next += 1;
+        // The layer below is prepared with this one above it: the recompute
+        // reads this layer's cell list and clearance as that layer's "above".
+        self.layer_reader.prepare(layer.saturating_sub(1), layer > 0);
+        let masks = self.layer_reader.masks(layer);
+        let carry_cells = self.layer_reader.carry_cells(layer);
+        if !self.layer_reader.cover_any(layer) {
+            // The up-sweep's own empty-layer reset.
+            self.current.u.fill(f32::INFINITY);
+            reach::commit_layer(&mut self.current, &masks.carry);
+            return Some(ProducedLayer {
+                layer,
+                empty: true,
+                record: BaselineLayer {
+                    rooted: Vec::new(),
+                    carry: vec![f32::INFINITY; carry_cells.len()],
+                },
+                unrooted: 0,
+                snapshot: None,
+            });
+        }
+        self.creep.load_layer(
+            grid,
+            context.planes[layer] - context.layer_height_mm,
+            context.planes[layer],
+        );
+        let snapshot = if self.want_snapshot && layer >= self.lowest {
+            self.want_snapshot = false;
+            Some(self.current.u_prev.clone())
+        } else {
+            None
+        };
+        let _baseline_span = crate::perf::span(if self.first {
+            crate::perf::Span::ReplayBaseline
+        } else {
+            crate::perf::Span::ReplayBaselineRestart
+        });
+        reach::recompute_potential_layer(
+            grid,
+            &self.layer_reader,
+            layer,
+            context.kappa,
+            context.layer_height_mm,
+            &[],
+            &self.creep,
+            &mut self.current,
+        );
+        // The up-sweep's bridged births, read where it read them: before any
+        // root of this layer relaxes.
+        let bridged_current = context.births.bridged(layer, &masks.cover, &self.current);
+        for &index in &self.roots_by_layer[layer] {
+            self.touched.clear();
+            reach::relax_from_root(
+                grid,
+                &masks.cover,
+                context.kappa,
+                self.struts[index].cell,
+                &mut self.current,
+                &mut self.queue,
+                &mut self.touched,
+            );
+        }
+        if !bridged_current.is_empty() {
+            let roots = crate::births::BirthRoots::of(
+                layer,
+                self.roots_by_layer[layer].iter().map(|&index| &self.struts[index]),
+            );
+            context.births.unroot_unseated(
+                layer,
+                &bridged_current,
+                &roots,
+                &masks.cover,
+                &mut self.current,
+            );
+        }
+        let mut unrooted = 0_u64;
+        let rooted = rooted_words(
+            &masks.cover,
+            &self.current.u,
+            self.first.then_some(&mut unrooted),
+        );
+        reach::commit_layer(&mut self.current, &masks.carry);
+        Some(ProducedLayer {
+            layer,
+            empty: false,
+            record: BaselineLayer {
+                rooted,
+                carry: carry_values(&self.current, carry_cells),
+            },
+            unrooted,
+            snapshot,
+        })
+    }
+}
+
+/// What the proposed walk reads, edits and reports.
+struct TrialWalk<'a, 'c> {
+    context: &'a ReplayContext<'c>,
+    struts: &'a [SweepStrut],
+    roots_by_layer: &'a [Vec<usize>],
+    doomed: &'a mut [bool],
+    blame_u: &'a mut [f32],
+    outcome: &'a mut ReplayOutcome,
+    budget: &'a mut Budget,
+    enabled: &'a mut bool,
+    base: &'a mut Vec<BaselineLayer>,
+    work: &'a mut ReplayWork,
+    first: bool,
+    lowest: usize,
+    highest: usize,
+    start: usize,
+    /// The proposed set's potential where it already runs at `start`.
+    proposed: Option<ReachState>,
+    creep: SurfaceCreep<'c>,
+    layer_reader: crate::layer_cache::LayerReader<'a, 'c>,
+    metric: crate::ReachMetric,
+    ratio: f32,
+    /// Set on the first replay once the two carries agree above the highest
+    /// doomed seat: the proposed set is done and only the baseline walk goes on.
+    trial_done: bool,
+    queue: Vec<usize>,
+    touched: Vec<usize>,
+    fresh: Vec<usize>,
+}
+
+impl TrialWalk<'_, '_> {
+    /// The layers `from..to`. `produced` holds the baseline of those at or
+    /// above `produce_from` (the ones the call's cache did not hold), in order.
+    /// `Some(pass)` ends the replay.
+    fn chunk(
+        &mut self,
+        from: usize,
+        to: usize,
+        produced: Vec<ProducedLayer>,
+        produce_from: usize,
+    ) -> Option<Pass> {
+        let mut produced = produced.into_iter();
+        for layer in from..to {
+            let item = (layer >= produce_from)
+                .then(|| produced.next().expect("the baseline walk fell short of the chunk"));
+            if let Some(pass) = self.layer(layer, item) {
+                return Some(pass);
+            }
+        }
+        None
+    }
+
+    /// One layer of the proposed set's walk, held against the baseline: the
+    /// layer's baseline comes from the call's cache, or from `produced` (the
+    /// baseline walk) and is committed to the cache here, in order. `Some(pass)`
+    /// ends the replay.
+    fn layer(&mut self, layer: usize, produced: Option<ProducedLayer>) -> Option<Pass> {
+        let context = self.context;
+        let struts = self.struts;
+        let roots_by_layer = self.roots_by_layer;
+        let doomed = &mut *self.doomed;
+        let blame_u = &mut *self.blame_u;
+        let outcome = &mut *self.outcome;
+        let budget = &mut *self.budget;
+        let enabled = &mut *self.enabled;
+        let base = &mut *self.base;
+        let work = &mut *self.work;
+        let (first, lowest, highest, ratio) = (self.first, self.lowest, self.highest, self.ratio);
+        let metric = &self.metric;
+        let proposed = &mut self.proposed;
+        let creep = &mut self.creep;
+        let layer_reader = &mut self.layer_reader;
+        let trial_done = &mut self.trial_done;
+        let queue = &mut self.queue;
+        let touched = &mut self.touched;
+        let fresh = &mut self.fresh;
+        let grid = context.grid;
+        let relax = |state: &mut ReachState,
+                     cover: &[bool],
+                     cell: usize,
+                     queue: &mut Vec<usize>,
+                     touched: &mut Vec<usize>| {
+            touched.clear();
+            reach::relax_from_root(grid, cover, context.kappa, cell, state, queue, touched);
+        };
+
+        // S0 A/B resolution of the CX cancel point (7373216) onto rr's
+        // restructured walk: one thread-local read per layer.
         if crate::cancel::cancelled() {
-            return Pass::Cancelled;
+            return Some(Pass::Cancelled);
         }
         outcome.layers_visited += 1;
         let cached = *enabled && layer < base.len();
-        if !cached && !current_ready {
+        let mut produced_empty = false;
+        let mut local: Option<BaselineLayer> = None;
+        if cached {
+            work.baseline_reused += 1;
             assert!(
-                *enabled && layer == base.len() && layer > 0,
-                "the replay joined the baseline at layer {layer} with {} layers cached",
-                base.len()
+                produced.is_none() && proposed.is_some(),
+                "a cached baseline layer was walked before the proposed set started"
             );
-            layer_reader.prepare(layer - 1, false);
-            scatter_carry(
-                &mut current,
-                layer_reader.carry_cells(layer - 1),
-                &base[layer - 1].carry,
-            );
-            current_ready = true;
+        } else {
+            let produced = produced.expect("an uncached layer came without its baseline");
+            assert_eq!(produced.layer, layer, "the baseline walk is out of step with the proposed walk");
+            let ProducedLayer {
+                empty,
+                record,
+                unrooted,
+                snapshot,
+                ..
+            } = produced;
+            work.baseline_computed += 1;
+            work.baseline_computed_restart += u64::from(!first);
+            outcome.baseline_unrooted_cells += unrooted;
+            produced_empty = empty;
+            if empty {
+                if *enabled && layer == base.len() {
+                    if budget.take(record.bytes()) {
+                        base.push(record);
+                    } else {
+                        *enabled = false;
+                    }
+                }
+            } else if *enabled && layer == base.len() && budget.take(record.bytes()) {
+                base.push(record);
+            } else {
+                *enabled = false;
+                local = Some(record);
+            }
+            // Below the lowest doomed seat the two sets are the same set, so the
+            // proposed one is only started there, from the current one's carry.
+            if let Some(snapshot) = snapshot {
+                assert!(
+                    proposed.is_none() && !*trial_done && layer >= lowest,
+                    "the proposed set starts from a baseline that was not walked"
+                );
+                let mut state = new_reach_state(context);
+                state.u_prev = snapshot;
+                *proposed = Some(state);
+            }
+            if proposed.is_none() {
+                return None;
+            }
         }
         // The layer below is prepared with this one above it: the recompute
         // reads this layer's cell list and clearance as that layer's "above".
         layer_reader.prepare(layer.saturating_sub(1), layer > 0);
         let masks = layer_reader.masks(layer);
         let carry_cells = layer_reader.carry_cells(layer);
-        if !layer_reader.cover_any(layer) {
-            // The up-sweep's own empty-layer reset, for both sets.
-            if !cached {
-                current.u.fill(f32::INFINITY);
-                reach::commit_layer(&mut current, &masks.carry);
-                let empty = BaselineLayer {
-                    rooted: Vec::new(),
-                    carry: vec![f32::INFINITY; carry_cells.len()],
-                };
-                if *enabled && layer == base.len() {
-                    if budget.take(empty.bytes()) {
-                        base.push(empty);
-                    } else {
-                        *enabled = false;
-                    }
-                }
-                work.baseline_computed += 1;
-                work.baseline_computed_restart += u64::from(!first);
-            } else {
-                work.baseline_reused += 1;
-            }
+        let empty = if cached {
+            !layer_reader.cover_any(layer)
+        } else {
+            produced_empty
+        };
+        if empty {
+            // The up-sweep's own empty-layer reset.
             if let Some(state) = proposed.as_mut() {
                 state.u.fill(f32::INFINITY);
                 reach::commit_layer(state, &masks.carry);
             }
-            continue;
+            return None;
         }
-        creep.load_layer(grid, context.planes[layer] - context.layer_height_mm, context.planes[layer]);
-        // Below the lowest doomed seat the two sets are the same set, so the
-        // proposed one is only started there, from the current one's carry.
-        if proposed.is_none() && !trial_done && layer >= lowest {
-            assert!(current_ready, "the proposed set starts from a baseline that was not walked");
-            let mut state = new_state();
-            state.u_prev.copy_from_slice(&current.u_prev);
-            proposed = Some(state);
-        }
-        let local;
         let base_layer: &BaselineLayer = if cached {
-            work.baseline_reused += 1;
             &base[layer]
         } else {
-            work.baseline_computed += 1;
-            work.baseline_computed_restart += u64::from(!first);
-            let _baseline_span = crate::perf::span(if first {
-                crate::perf::Span::ReplayBaseline
-            } else {
-                crate::perf::Span::ReplayBaselineRestart
-            });
-            reach::recompute_potential_layer(
-                grid,
-                &layer_reader,
-                layer,
-                context.kappa,
-                context.layer_height_mm,
-                &[],
-                &creep,
-                &mut current,
-            );
-            // The up-sweep's bridged births, read where it read them: before any
-            // root of this layer relaxes.
-            let bridged_current = context.births.bridged(layer, &masks.cover, &current);
-            for &index in &roots_by_layer[layer] {
-                relax(&mut current, &masks.cover, struts[index].cell, &mut queue, &mut touched);
-            }
-            if !bridged_current.is_empty() {
-                let roots = crate::births::BirthRoots::of(
-                    layer,
-                    roots_by_layer[layer].iter().map(|&index| &struts[index]),
-                );
-                context
-                    .births
-                    .unroot_unseated(layer, &bridged_current, &roots, &masks.cover, &mut current);
-            }
-            let rooted = rooted_words(
-                &masks.cover,
-                &current.u,
-                first.then_some(&mut outcome.baseline_unrooted_cells),
-            );
-            reach::commit_layer(&mut current, &masks.carry);
-            let record = BaselineLayer {
-                rooted,
-                carry: carry_values(&current, carry_cells),
-            };
-            if *enabled && layer == base.len() && budget.take(record.bytes()) {
-                base.push(record);
-                local = None;
-            } else {
-                *enabled = false;
-                local = Some(record);
-            }
             local.as_ref().unwrap_or_else(|| &base[layer])
         };
-        let Some(trial) = proposed.as_mut() else {
-            continue;
-        };
+        let trial = proposed.as_mut()?;
+        creep.load_layer(
+            grid,
+            context.planes[layer] - context.layer_height_mm,
+            context.planes[layer],
+        );
         outcome.trial_layers += 1;
         work.trial_computed += 1;
         let _trial_span = crate::perf::span(crate::perf::Span::ReplayTrial);
         reach::recompute_potential_layer(
             grid,
-            &layer_reader,
+            layer_reader,
             layer,
             context.kappa,
             context.layer_height_mm,
             &[],
-            &creep,
+            creep,
             trial,
         );
         let bridged_trial = context.births.bridged(layer, &masks.cover, trial);
         for &index in &roots_by_layer[layer] {
             if !doomed[index] {
-                relax(trial, &masks.cover, struts[index].cell, &mut queue, &mut touched);
+                relax(trial, &masks.cover, struts[index].cell, queue, touched);
             }
         }
         // The cells the current set roots (`rooted`); a stale baseline is the
@@ -1039,7 +1429,7 @@ fn replay_once(
                 break;
             }
             outcome.newly_unrooted_cells += fresh.len() as u64;
-            for &cell in &fresh {
+            for &cell in fresh.iter() {
                 let u = trial.u[cell];
                 if u.is_finite() {
                     outcome.newly_unrooted_max_u = outcome.newly_unrooted_max_u.max(f64::from(u));
@@ -1050,7 +1440,7 @@ fn replay_once(
             }
             let mut restart = false;
             let mut restored_any = false;
-            for &cell in &fresh {
+            for &cell in fresh.iter() {
                 let u = trial.u[cell];
                 if u <= 1.0 {
                     // Rooted by an arm restored earlier in this sweep of `fresh`.
@@ -1072,20 +1462,20 @@ fn replay_once(
                 outcome.refused += 1;
                 restored_any = true;
                 if struts[index].k_top == layer {
-                    relax(trial, &masks.cover, struts[index].cell, &mut queue, &mut touched);
+                    relax(trial, &masks.cover, struts[index].cell, queue, touched);
                 } else {
                     restart = true;
                 }
             }
             if restart {
-                return Pass::Restart;
+                return Some(Pass::Restart);
             }
             if !restored_any {
                 // No doomed arm at or below this layer is left to blame, yet
                 // the proposed set roots less than the current one. Nothing
                 // proposed can be trusted: keep every arm.
                 restore_all(doomed, blame_u, outcome);
-                return Pass::Verified;
+                return Some(Pass::Verified);
             }
         }
         reach::commit_layer(trial, &masks.carry);
@@ -1101,13 +1491,13 @@ fn replay_once(
                 .all(|(&cell, value)| trial.u_prev[cell as usize].eq(value))
         {
             if !first {
-                return Pass::Verified;
+                return Some(Pass::Verified);
             }
-            proposed = None;
-            trial_done = true;
+            *proposed = None;
+            *trial_done = true;
         }
+        None
     }
-    Pass::Verified
 }
 
 #[cfg(test)]
@@ -1834,6 +2224,34 @@ mod tests {
                 assert_eq!(tally.baseline_reused, 0, "{tally:?}");
             }
         }
+    }
+
+    /// Runs `run` with the two walks forced to overlap (`true`) or to run
+    /// serially (`false`) when called from this thread.
+    fn with_overlap<T>(overlap: bool, run: impl FnOnce() -> T) -> T {
+        super::FORCE_OVERLAP.with(|cell| cell.set(Some(overlap)));
+        let out = run();
+        super::FORCE_OVERLAP.with(|cell| cell.set(None));
+        out
+    }
+
+    /// The same sweeps with the two walks overlapping, at every pool budget:
+    /// the answer, the blame potentials by bits and the work counters are the
+    /// reference's, and a restart still reuses the cache.
+    #[test]
+    fn overlapped_walks_give_the_reference_answer() {
+        with_overlap(true, || {
+            let tally = sweep(60, 7, pool_of(u64::MAX / 2), false);
+            assert_eq!(tally.mismatches, 0, "{tally:?}");
+            assert_eq!(tally.accounting_breaks, 0, "{tally:?}");
+            assert!(tally.restarts > 0, "no scenario restarted: {tally:?}");
+            assert!(tally.baseline_reused > 0, "the baseline was never reused: {tally:?}");
+            for limit in [0, 600, 40_000, 400_000] {
+                let tally = sweep(15, 11, pool_of(limit), false);
+                assert_eq!(tally.mismatches, 0, "limit {limit}: {tally:?}");
+                assert_eq!(tally.accounting_breaks, 0, "limit {limit}: {tally:?}");
+            }
+        });
     }
 
     /// One field on the staircase, one doomed set, both engines: the cached
