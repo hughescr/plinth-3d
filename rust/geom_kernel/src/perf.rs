@@ -21,11 +21,12 @@
 //!   `PLINTH_PERF_DIR`.
 //! * **Light mode** (`PLINTH_PERF_LIGHT=1` beside `--perf`, S0 2026-10-15):
 //!   counters, spans, pose frames, stage marks and the light row kinds
-//!   ([`Rows::light`]) are on; [`enabled`] reads false, so every
-//!   measurement-only scan, per-batch timing, per-layer row and the
-//!   orientation diagnostics stay off. That trace is what makes a full
-//!   `--perf` run ~2.7x slower in the sizing; light mode prices the stages
-//!   at near-untraced speed. [`on`] is the light-or-full gate.
+//!   ([`Rows::light`]) are on, every work total included ([`enabled`] is
+//!   the counting gate); [`traced`] reads false, so every measurement-only
+//!   scan, per-batch or per-row clock, trace row and the orientation
+//!   diagnostics stay off. That trace is what makes a full `--perf` run
+//!   ~2.7x slower in the sizing; light mode prices the stages at
+//!   near-untraced speed.
 //! * **Batch-first charging.** A kernel counts into local integers and calls
 //!   [`add`] once per query, call or batch, never inside a per-triangle or
 //!   per-cell loop. A brute-force scan is charged as `rows * faces` before its
@@ -1263,11 +1264,7 @@ impl Rows {
             ],
             // Rounds and their driver time by the number of open jobs at the
             // round's start (1, 2-3, 4-11, 12 or more), the boundary-2
-            // refusals by kind (deltas over the call), the nubs dropped, and
-            // the within-sweep memo probe (traced runs only): mover trial
-            // reads sent to the kernel and how many repeat a key already read
-            // earlier in the same sweep (seat, radius profile, candidate,
-            // path).
+            // refusals by kind (deltas over the call) and the nubs dropped.
             Self::LipApplyOpen => &[
                 "rounds_1",
                 "rounds_2_3",
@@ -1283,8 +1280,6 @@ impl Rows {
                 "ref_measured",
                 "ref_slender",
                 "nubs",
-                "memo_reads",
-                "memo_repeats",
             ],
             // `pass` and `attempt` from 0; `removed` arms the attempt took;
             // `outcome`: 0 nothing removed (the pass ends), 1 accepted, 2
@@ -1514,7 +1509,7 @@ fn ticker() {
 /// lock, so it can neither interleave with `set_phase` nor land after
 /// `end_model` has taken the slot (a later tick finds none and writes nothing).
 fn checkpoint_now() {
-    if !on() {
+    if !enabled() {
         return;
     }
     if let Ok(guard) = SLOT.lock() {
@@ -1524,27 +1519,30 @@ fn checkpoint_now() {
     }
 }
 
-/// Whether the full trace is on: counting is on and light mode is not. The
-/// gate of every measurement-only scan, per-batch timing and per-layer row.
-/// Two `Relaxed` loads.
-#[inline]
-#[must_use]
-pub fn enabled() -> bool {
-    ENABLED.load(Relax) && !LIGHT.load(Relax)
-}
-
-/// Whether counting is on at all, light mode included: counters, spans, pose
-/// frames, stage marks and the light row kinds ([`Rows::light`]). One
+/// Whether counting is on, light mode included: the gate of every counter,
+/// span, pose frame, stage mark and light row kind ([`Rows::light`]). One
 /// `Relaxed` load.
 #[inline]
 #[must_use]
-pub fn on() -> bool {
+pub fn enabled() -> bool {
     ENABLED.load(Relax)
+}
+
+/// Whether the full trace is on: counting is on and light mode is not. The
+/// gate of the measurement-only work light mode leaves out: the per-batch and
+/// per-row clocks, the trace row kinds' scans and hashes, the reuse probe,
+/// the pose-search diagnostics. An ordinary counter add is gated on
+/// [`enabled`], never on this, so light mode keeps every work total. Two
+/// `Relaxed` loads.
+#[inline]
+#[must_use]
+pub fn traced() -> bool {
+    ENABLED.load(Relax) && !LIGHT.load(Relax)
 }
 
 /// Start a model: zero every counter, enter [`Phase::Load`], name the sidecar.
 pub fn begin_model(model: &str) {
-    if !on() {
+    if !enabled() {
         return;
     }
     let Some(dir) = DIR.lock().ok().and_then(|slot| slot.clone()) else {
@@ -1646,7 +1644,7 @@ impl Drop for SidecarHold {
 
 fn switch_phase(phase: Phase, write: bool) -> Phase {
     let previous = Phase::from_index(PHASE.load(Relax));
-    if !on() {
+    if !enabled() {
         return previous;
     }
     let now = Instant::now();
@@ -1667,7 +1665,7 @@ fn switch_phase(phase: Phase, write: bool) -> Phase {
 
 /// Finish the model: write the final sidecar (`"partial": false`).
 pub fn end_model() {
-    if !on() {
+    if !enabled() {
         return;
     }
     let now = Instant::now();
@@ -1692,7 +1690,7 @@ pub fn end_model() {
 /// Any I/O error from creating the folder, writing or renaming; the caller
 /// decides whether that matters (the diagnostics warn and go on).
 pub fn write_side_file(ext: &str, bytes: &[u8]) -> std::io::Result<Option<PathBuf>> {
-    if !on() {
+    if !enabled() {
         return Ok(None);
     }
     let target = SLOT.lock().ok().and_then(|guard| {
@@ -1799,7 +1797,7 @@ fn pose_id(text: &str) -> u64 {
 /// Name the next frame this thread opens (the next [`Span::SweepRun`]). The
 /// closure runs only when counting is on.
 pub fn pose_label(label: impl FnOnce() -> String) {
-    if on() {
+    if enabled() {
         let text = label();
         let _ = PENDING_LABEL.try_with(|cell| *cell.borrow_mut() = Some(text));
     }
@@ -1880,7 +1878,7 @@ fn charge_frame(span: Span, ns: u64) {
 /// it with `T::default()` on first use. `None` when counting is off or this
 /// thread has no frame. `f` must not open or drop a span.
 pub fn with_pose_slot<T: Any + Default, R>(f: impl FnOnce(&mut T) -> R) -> Option<R> {
-    if !enabled() {
+    if !traced() {
         return None;
     }
     FRAMES
@@ -1905,7 +1903,7 @@ fn current_pose() -> u64 {
 /// thread named, taking the name (a later `run` without a charge reads
 /// [`Span::SizeOther`]).
 pub fn size_span() -> SpanGuard {
-    if !on() {
+    if !enabled() {
         return SpanGuard(None, 0);
     }
     let named = SITE.with(|cell| cell.replace(0));
@@ -2022,7 +2020,7 @@ fn lock_clear<T>(store: &Mutex<Vec<T>>) {
 
 /// Store one row of `kind`. `payload` longer than [`ROW_WIDTH`] is cut.
 pub fn row(kind: Rows, payload: &[u64]) {
-    if !on() || (LIGHT.load(Relax) && !kind.light()) {
+    if !enabled() || (LIGHT.load(Relax) && !kind.light()) {
         return;
     }
     let mut cols = [0_u64; ROW_WIDTH];
@@ -2044,7 +2042,7 @@ pub fn row(kind: Rows, payload: &[u64]) {
 /// counting is off.
 #[must_use = "a stage mark measures until it is dropped"]
 pub fn stage(label: &'static str) -> StageGuard {
-    if on() {
+    if enabled() {
         StageGuard(Some((label, Phase::from_index(charged_phase()), Instant::now())))
     } else {
         StageGuard(None)
@@ -2863,17 +2861,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Light mode (S0): counters, spans, frames and the light row kinds are
-    /// on; the full trace (`enabled`, the trace row kinds, the pose slot) is
-    /// off.
+    /// Light mode (S0): counters (every work total), spans, frames and the
+    /// light row kinds are on; the full trace (`traced`, the trace row kinds,
+    /// the pose slot) is off.
     #[test]
     fn light_mode_keeps_counters_spans_and_s0_rows_and_drops_the_trace() {
         let _guard = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = scratch("light");
         enable(dir.clone(), HOUR);
         LIGHT.store(true, Relax);
-        assert!(on());
-        assert!(!enabled(), "the full trace is off in light mode");
+        assert!(enabled(), "counting is on in light mode");
+        assert!(!traced(), "the full trace is off in light mode");
         begin_model("lt");
         set_phase(Phase::FinalSweep);
         pose_label(|| "p2".to_owned());
@@ -2891,6 +2889,7 @@ mod tests {
         ENABLED.store(false, Relax);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(text.contains("\"light\":true"), "{text}");
+        assert!(text.contains("\"sweep.runs\":3"), "the work total is kept: {text}");
         assert!(text.contains("\"label\":\"p2\""), "{text}");
         assert!(text.contains(&format!("[8,{},1,2,3", pose_id("p2"))), "{text}");
         assert!(text.contains("\"tip.batch\":{\"stored\":0,"), "{text}");

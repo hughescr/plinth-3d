@@ -5055,7 +5055,8 @@ fn route_within_cover(
     // the time it takes is returned so the caller can leave it out of the
     // route time.
     let mut counting_ns = 0_u64;
-    let measured = if crate::perf::enabled() {
+    // Full trace only (`perf::traced`): light mode leaves this scan out.
+    let measured = if crate::perf::traced() {
         let _count_span = crate::perf::span(crate::perf::Span::CountOverhead);
         let started = std::time::Instant::now();
         let eligible = (0..grid.cells())

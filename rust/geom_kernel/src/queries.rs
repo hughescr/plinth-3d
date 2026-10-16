@@ -3469,8 +3469,11 @@ impl NativeSurface {
         }
         // Write-only batch tally for `perf`: per row, faces tested and time,
         // folded with integer sums and maxima (order-free), one charge and one
-        // row per batch. Off, `timing` is false and the loop is the plain one.
-        let timing = crate::perf::enabled();
+        // row per batch. Off, `counting` is false and the loop is the plain one.
+        // The clocks and the row are the full trace's; the face tallies and
+        // the batch counters are kept in light mode too.
+        let counting = crate::perf::enabled();
+        let timing = crate::perf::traced();
         let _batch_span = crate::perf::span(crate::perf::Span::ClearBatch);
         let batch_started = timing.then(std::time::Instant::now);
         let tris_sum = std::sync::atomic::AtomicU64::new(0);
@@ -3495,20 +3498,22 @@ impl NativeSurface {
                         frustum,
                         at_least.get(i).copied().unwrap_or(f64::NEG_INFINITY),
                     );
-                    if let Some(started) = row_started {
+                    if counting {
                         let tris = crate::perf::walk_tris();
-                        let ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                         let relaxed = std::sync::atomic::Ordering::Relaxed;
                         tris_sum.fetch_add(tris, relaxed);
                         tris_max.fetch_max(tris, relaxed);
-                        ns_sum.fetch_add(ns, relaxed);
-                        ns_max.fetch_max(ns, relaxed);
+                        if let Some(started) = row_started {
+                            let ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                            ns_sum.fetch_add(ns, relaxed);
+                            ns_max.fetch_max(ns, relaxed);
+                        }
                     }
                     result
                 })
                 .collect()
         }));
-        if let Some(started) = batch_started {
+        if counting {
             let relaxed = std::sync::atomic::Ordering::Relaxed;
             let (rows_n, tris, tris_top) = (
                 crate::perf::count(n),
@@ -3519,6 +3524,14 @@ impl NativeSurface {
             crate::perf::add(crate::perf::Work::ClearBatchRows, rows_n);
             crate::perf::add(crate::perf::Work::ClearBatchTris, tris);
             crate::perf::add(crate::perf::Work::ClearBatchTrisMaxRow, tris_top);
+        }
+        if let Some(started) = batch_started {
+            let relaxed = std::sync::atomic::Ordering::Relaxed;
+            let (rows_n, tris, tris_top) = (
+                crate::perf::count(n),
+                tris_sum.load(relaxed),
+                tris_max.load(relaxed),
+            );
             crate::perf::row(
                 crate::perf::Rows::ClearBatch,
                 &[

@@ -1276,7 +1276,9 @@ pub fn search_deferred(
     for warning in &switches.warnings {
         eprintln!("WARNING: PLINTH_ORIENT_DIAG: {warning}");
     }
-    let perf_on = geom_kernel::perf::enabled();
+    // The diagnostics are extra work: they run with the full trace only, not in
+    // light mode (`PLINTH_PERF_LIGHT=1`).
+    let perf_on = geom_kernel::perf::traced();
     if switches.wants_production_sweeps() && !switches.off && !perf_on {
         eprintln!(
             "WARNING: PLINTH_ORIENT_DIAG: prod-all and extra= need --perf (the diagnostics have \
