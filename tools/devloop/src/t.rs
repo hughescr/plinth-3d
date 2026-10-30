@@ -49,6 +49,29 @@ fn parse_level(s: &str) -> Result<Level, String> {
     }
 }
 
+/// The bench epoch signal: in the bench slot every nextest run selects the `bench` profile,
+/// which also runs the `threads_bench_*` tests (3 and 8 workers) that the default profile
+/// leaves out and reports as skipped (`.config/nextest.toml`, design section 5.6).
+#[must_use]
+pub fn with_bench_profile(cmd: Vec<String>) -> Vec<String> {
+    const RUN: &str = "cargo nextest run";
+    let mut out = Vec::with_capacity(cmd.len() + 2);
+    let mut prev_nextest = false;
+    for a in cmd {
+        let is_run = prev_nextest && a == "run";
+        prev_nextest = a == "nextest";
+        if a.contains(RUN) {
+            out.push(a.replace(RUN, &format!("{RUN} --profile bench")));
+        } else {
+            out.push(a);
+        }
+        if is_run {
+            out.extend(["--profile".to_owned(), "bench".to_owned()]);
+        }
+    }
+    out
+}
+
 /// Package name for a crate argument: `geom`, `plinth-geom`, `check` and `checker` all work.
 #[must_use]
 pub fn package_of(arg: &str) -> String {
@@ -219,6 +242,11 @@ pub fn prepare(root: &Path, args: &[String]) -> Result<Plan, Exit> {
     }
     let extra = args.get(2..).unwrap_or_default();
     let (cmd, cwd, crate_label) = build_command(root, level, &crate_arg, extra);
+    let cmd = if alloc.slot == "bench" {
+        with_bench_profile(cmd)
+    } else {
+        cmd
+    };
     Ok(Plan {
         root: root.to_path_buf(),
         level_name,
@@ -288,7 +316,7 @@ pub fn execute(plan: &Plan, abort: &dyn Fn() -> bool) -> Result<Outcome, Exit> {
     };
     let v = verdict::decide(&facts);
     let line = format!(
-        "{} {} {} s / budget {} s / target {} s / load {:.2} / tests {} / pkg-cache waits {} ({} s) / threads {} / {}",
+        "{} {} {} s / budget {} s / target {} s / load {:.2} / tests {} (skipped {}) / pkg-cache waits {} ({} s) / threads {} / {}",
         plan.level_name,
         plan.crate_label,
         secs(ran.elapsed),
@@ -296,6 +324,7 @@ pub fn execute(plan: &Plan, abort: &dyn Fn() -> bool) -> Result<Outcome, Exit> {
         plan.target,
         load,
         stats.tests,
+        stats.skipped,
         ran.watch.pc_count,
         secs(ran.watch.pc_wait),
         plan.alloc.threads,
@@ -421,6 +450,30 @@ mod tests {
             ])
         );
         assert_eq!((cwd, label.as_str()), (PathBuf::from("/r"), "geom"));
+    }
+
+    #[test]
+    fn bench_slot_selects_the_bench_profile_for_every_nextest_run() {
+        let (l1, _, _) = build_command(Path::new("/r"), Level::L1, "geom", &[]);
+        assert_eq!(
+            with_bench_profile(l1),
+            s(&[
+                "cargo",
+                "nextest",
+                "run",
+                "--profile",
+                "bench",
+                "-p",
+                "plinth-geom",
+                "--locked"
+            ])
+        );
+        let (l2, _, _) = build_command(Path::new("/r"), Level::L2, "", &[]);
+        let sh = &with_bench_profile(l2)[2];
+        assert!(sh.starts_with("cargo nextest run --profile bench --workspace --locked"));
+        assert!(sh.contains("cd checker && cargo nextest run --profile bench --config-file"));
+        let (l0, _, _) = build_command(Path::new("/r"), Level::L0, "geom", &[]);
+        assert_eq!(with_bench_profile(l0.clone()), l0);
     }
 
     #[test]

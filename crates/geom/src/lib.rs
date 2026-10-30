@@ -1,8 +1,36 @@
-//! plinth-geom: mesh core. Empty skeleton (step 1 of the build plan).
+//! plinth-geom: the mesh core.
+//!
+//! * [`parse_stl`] / [`read_stl_file`]: binary and ASCII STL into a [`Mesh`].
+//! * [`Mesh`]: structure-of-arrays vertices (`xs`, `ys`, `zs` as f64) and a flat `u32`
+//!   index array, welded and Morton-ordered, with its [`Aabb`] bounds.
+//! * [`Bvh`]: a flat 32-byte-node hierarchy built once per frozen mesh.
+//! * [`closest_points`] / [`closest_points_par`]: the batched closest-point query. They
+//!   take slices and fill caller-owned output; there is no single-point public query.
+//!   [`reference::closest_points_reference`] is the scalar reference they must equal.
+//! * [`counters`]: calls and items per batch operation, to prove no per-item calls.
 
+pub mod aabb;
+pub mod bvh;
+pub mod counters;
+pub mod error;
 pub mod loop_canary;
+pub mod mesh;
+pub mod morton;
+pub mod query;
+pub mod reference;
+pub mod stl;
+mod tri;
 
+#[cfg(test)]
+mod testutil;
+
+pub use aabb::Aabb;
+pub use bvh::Bvh;
+pub use error::{GeomError, Result};
 pub use loop_canary::loop_canary;
+pub use mesh::Mesh;
+pub use query::{ClosestHits, Points, closest_points, closest_points_par};
+pub use stl::{parse_stl, read_stl_file};
 
 /// Canary values of this crate and every crate below it, summed. Calling it from
 /// production code makes a canary edit drive the real rebuild chain.
