@@ -10,3 +10,4 @@ L5	scripts/t L5	1800	-	orchestrator starting value
 Cold	scripts/gate --clean	180	-	orchestrator starting value
 Pre-commit	.githooks/pre-commit	5	-	orchestrator starting value
 Gate	scripts/gate	180	-	orchestrator starting value
+Bench	scripts/loop-bench	3180	-	derived: (6 cases x (3 reps + 1 settle) + 2 Lnoop) x 120 s + 60 s cleanup

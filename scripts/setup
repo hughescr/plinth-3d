@@ -16,6 +16,7 @@ need() {
 need cargo "install rustup from https://rustup.rs"
 need jq "brew install jq"
 need hyperfine "brew install hyperfine"
+need cargo-nextest "cargo install cargo-nextest --locked"
 need timeout "brew install coreutils (GNU timeout; scripts/t needs it)"
 
 if [ -n "${RUSTFLAGS:-}" ]; then

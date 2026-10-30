@@ -1,0 +1,48 @@
+# nextest settings (design dev-loop.md section 6.1). scripts/t runs nextest; plain
+# `cargo nextest run` reads this file too. The checker workspace has no copy: scripts/t
+# passes this file with --config-file.
+#
+# Test names choose the cap: native_* and broken_* (T1 native files, T1n broken files),
+# e2e_* (T2 end to end), threads_* (thread-count checks). Everything else is a unit or
+# property test. Do not add #[ignore] or an environment switch that skips a test (6.2).
+
+nextest-version = "0.9.150"
+# Setup scripts are still an experimental nextest feature in 0.9.150; only the
+# RAYON_NUM_THREADS script below uses it.
+experimental = ["setup-scripts"]
+
+[profile.default]
+# Unit and property tests: slow after 2 s, killed at 6 s.
+slow-timeout = { period = "2s", terminate-after = 3 }
+# Passing tests do not fill agent context.
+status-level = "fail"
+final-status-level = "slow"
+# Show every failure, not only the first.
+fail-fast = false
+
+# Eight test processes must never each start eight worker threads. nextest has no plain
+# environment table, so a setup script writes the variable into every test's environment.
+[scripts.setup.one-rayon-worker]
+command = ["sh", "-c", 'echo RAYON_NUM_THREADS=1 >> "$NEXTEST_ENV"']
+
+[[profile.default.scripts]]
+filter = "all()"
+setup = "one-rayon-worker"
+
+# Native-file and broken-file tests: slow after 10 s, killed at 30 s.
+[[profile.default.overrides]]
+filter = "test(/(^|::)(native|broken)_/)"
+slow-timeout = { period = "10s", terminate-after = 3 }
+
+# End-to-end tests: slow after 30 s, killed at 90 s. Each runs alone and may use the
+# slot's whole allocation (NEXTEST_TEST_THREADS, set by scripts/t).
+[[profile.default.overrides]]
+filter = "test(/(^|::)e2e_/)"
+slow-timeout = { period = "30s", terminate-after = 3 }
+threads-required = "num-test-threads"
+
+# Tests that build a multi-thread pool also run alone, at counts no greater than the
+# slot's allocation. The 8-thread checks run only in the bench epoch.
+[[profile.default.overrides]]
+filter = "test(/(^|::)threads_/)"
+threads-required = "num-test-threads"
