@@ -8,7 +8,7 @@ pub fn native_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test-data/chitubox-native")
 }
 
-/// Every `.chitubox` file ChituBox wrote: the nine older ones and the eight v1.4.0
+/// Every `.chitubox` file ChituBox wrote: the seven older ones and the eight v1.4.0
 /// samples, sorted by path.
 pub fn native_files() -> Vec<PathBuf> {
     let dir = native_dir();

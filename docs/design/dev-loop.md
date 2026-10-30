@@ -200,9 +200,9 @@ plinth-3d/
   clippy.toml  rustfmt.toml  loop-budgets.tsv  limits.toml
   .githooks/          pre-commit, pre-push
   scripts/            thin bash shims (≤ 10 lines each, ≤ 400 lines in total): devloop (builds the runner if
-                      stale, then runs it), setup, t, loop-bench, slot; later gate, check-independence
+                      stale, then runs it), setup, t, loop-bench, slot, check-independence; later gate
   tools/devloop/      SEPARATE workspace: the loop runner, binary `devloop` (subcommands t, loop-bench, slot,
-                      setup; later gate, check-independence). std only, no plinth crate, own Cargo.lock,
+                      setup, check-independence; later gate). std only, no plinth crate, own Cargo.lock,
                       clippy.toml and target/. Its unit tests run in L0 scale time.
   crates/
     geom/        plinth-geom        mesh core
@@ -212,7 +212,10 @@ plinth-3d/
     cli/         plinth-cli         binary `plinth`
     acceptance/  plinth-acceptance  tests only: broken files through the production writer; end-to-end tests
   checker/            SEPARATE workspace: its own Cargo.toml, Cargo.lock, rust-toolchain.toml, target/
-    src/              binary `plinth-check`
+    src/              library `plinth_check` (own .chitubox reader, sequential structural walk, own STL
+                      reader, JSON report) and binary `plinth-check` (commands dump, check)
+    tests/native.rs   readers-agree and sabotage tests on every native file
+    approved-registry.tsv  approved registry packages (name, version, source); absent = none allowed
 ```
 
 The main workspace's `Cargo.toml` lists `checker` in `exclude`. The checker's own config uses the same profile settings and `target-cpu`.
@@ -252,7 +255,7 @@ Why this keeps rebuilds small:
 
 1. **Separate program.** The CLI writes the file to disk, then runs `plinth-check` on those exact bytes. They exchange a versioned JSON report, never Rust types. The checker gets paths only: the .chitubox file, the input STL, the pose record and the permitted-change record, with their hashes. It treats those records as claims to verify, not as facts.
 2. **`scripts/check-independence`** examines the checker's complete resolved dependency graph (`cargo metadata --locked --offline`, checked with jq), including normal, build and development dependencies. Every package must be either a path package whose canonical source lies inside `checker/`, or an explicitly approved registry package. Git sources and external path packages are rejected. The approved registry list, including transitive dependencies, is committed with exact package identity and source from the lockfile. Dependency changes require review of the complete changed graph; numerical geometry kernels shared with the generator are prohibited, so a bug in a shared kernel cannot hide on both sides. A dependency-free checker may start with an empty registry allowlist.
-3. A grep rejects `#[path`, `include!` and `include_str!` in `checker/` that point outside `checker/`.
+3. A token scan (a small Rust lexer in `tools/devloop`, so spacing, line breaks and comments cannot hide a call) rejects every occurrence of the names `include`, `include_str` and `include_bytes` in `checker/` sources outside comments and string literals, in any context (a call, a `use`, a name passed to another macro as an identifier, a path built with `concat!` or `env!`), and every `#[path = ...]` attribute. The scan covers every regular file under `checker/` whatever its extension (so a file pulled in with a non-`.rs` name is read too), except `checker/target` and `Cargo.lock`. It also rejects symbolic links that leave `checker/` and any target source file (library, binary, test, build script) outside `checker/`. Threat model: this check guards against agents sharing code by accident, not against a deliberate adversary, so text-scanner bypasses beyond that are out of scope.
 4. Copied code cannot be caught by a tool. Reviewers check that no generator routine was pasted into the checker.
 5. **`limits.toml`** holds the limit values (H1 0.50 mm², H4 5.0 mm, H6 0.3 mm, H9 0.1 mm, region length 3.0 mm). It is data, not code. Each side parses it with its own code. The checker prints the values it used in every report. A checker test pins them to the PRD values, so a wrong edit to the file is caught.
 6. **Readers agree.** A test in `plinth-acceptance` runs `plinth-check dump` and the `plinth-chitubox` reader on every native file. It compares a neutral list of numbers (record type, end points, radii). No shared types.

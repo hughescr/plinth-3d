@@ -5,7 +5,8 @@ This document says how ChituBox v1.4.0 stores a project in a `.chitubox` file. I
 ## 0. Evidence and markers
 
 - The owner made eight sample files in ChituBox v1.4.0. They are in `test-data/chitubox-native/samples/`. Each sample differs from the one it builds on by one change. The folder README lists them.
-- Seven older `.chitubox` files are in `test-data/chitubox-native/`. Their ChituBox version is not known. They are used only as extra checks. (The counts of "17 files" below were made on a larger set. This checkout holds 15 `.chitubox` files: these seven and the eight samples. The `.ctp` file in the same folder has another magic number, `0xAB231253`, and is not this format.)
+- Seven older `.chitubox` files are in `test-data/chitubox-native/`. Their ChituBox version is not known. They are used only as extra checks: `basic-cube-supports-raft`, `cylinder-cube-sphere`, `cylinder-supported-bottom-connected`, `empty`, `morel`, `morel_mudskipper_supports` and `two-supports`.
+- Every count of files in this document is over the 15 `.chitubox` files in this checkout: the seven above and the eight samples `01-round25-plain`, `02-round25-lifted`, `03-round25-supports`, `04-round25-supports-raft-connected`, `04-round25-supports-raft-hex`, `05-two-plates`, `06-round25-flipped` and `07-round25-on-edge-braced`. The `.ctp` file in the same folder has another magic number, `0xAB231253`, and is not this format. The `.cfgx` file is a settings export.
 - One agent decoded each sample pair. A second agent, from a different model family, checked each decode with its own decoder. Where the checker found a claim wrong, this document uses the correction. Where a point could not be settled, it is in section 15.
 - Every section has a marker:
   - **Verified from samples**: measured from the bytes of the samples and checked by the second decoder.
@@ -42,7 +43,7 @@ Per-model data, for each model in turn:
 
 Facts:
 
-- In 16 of the 17 files, every byte belongs to exactly one region. The region sizes add up to the file size. The exception is `morel_mudskipper_supports.chitubox`. It is not a clean ChituBox save (section 14).
+- In 14 of the 15 files, every byte belongs to exactly one region. The region sizes add up to the file size. The exception is `morel_mudskipper_supports.chitubox`. It is not a clean ChituBox save (section 14).
 - The file has no footer after the last model, no version token, and no compression.
 - No checksum field was found. Every nonzero byte outside the bulk regions is explained by a known field. This shows that no separate checksum region exists in these files. It does not prove that ChituBox does no integrity check.
 - `empty.chitubox` (420 B) is the header plus the zero block. It has no preview.
@@ -69,10 +70,10 @@ Baseline map of `01` (184,646 B, one model, no supports):
 | 4 | u32 | Model count. |
 | 8 | u32 | `off8`: model-table offset. Always `452 + preview data_len`. In `empty.chitubox` it is 420. |
 | 12 | u32 | `f12`: 420 in every file with a model, 0 in `empty.chitubox`. 420 is the offset of the preview header. Guess: "preview-header offset, 0 if no preview". |
-| 16 | u32 | `f16`: 412 in all 17 files. Meaning unknown. |
+| 16 | u32 | `f16`: 412 in all 15 files. Meaning unknown. |
 | 20 | u32 | `off20`: front-block offset. Always `off8 + 680 × count`. 0 when the count is 0. |
 
-The 396-byte zero block at [24, 420) is zero in all 17 files. That includes supported, rafted and two-plate files. The old docs called it a "settings blob". No print settings are stored in it in any sample.
+The 396-byte zero block at [24, 420) is zero in all 15 files. That includes supported, rafted and two-plate files. The old docs called it a "settings blob". No print settings are stored in it in any sample.
 
 ## 3. Preview
 
@@ -126,7 +127,7 @@ One 680-byte record per model, back to back from `off8`, in model order.
 | 268 | u32 | Offset of this model's support index. 0 if the model has no supports. |
 | 272 | u32 | Offset of this model's mesh. |
 | 276 | u32 | Mesh size in bytes, a multiple of 36. |
-| 280..679 | bytes | Zero in all 17 files. |
+| 280..679 | bytes | Zero in all 15 files. |
 
 - Names seen: `Round 25.stl`, and `Round 25.stl #1`, `Round 25.stl #2` for duplicates. The longest name seen has 23 characters. The real capacity is not proven.
 - No other field in the file refers to the name.
@@ -593,7 +594,7 @@ Ordered by what they unblock. Each needs a load test in ChituBox or a new owner 
 
 Source reviewed: the old `rust/chitubox_io` crate (about 2,500 lines of library code, 3,300 lines of tests and examples), restored to the session scratch area. It was written for ChituBox Basic 1.3.0.
 
-Test run: I built the old reader and ran parse then save on all 17 files. All 17 parsed, and every save was byte-identical to the input. So the old reader reads v1.4.0 files and keeps them intact when nothing is changed.
+Test run: I built the old reader and ran parse then save on every native file. All parsed, and every save was byte-identical to the input. So the old reader reads v1.4.0 files and keeps them intact when nothing is changed.
 
 ### 16.1 Choices the samples confirm
 
@@ -635,7 +636,7 @@ Reasons:
 - Much of the old surface is not needed now: the opaque-region API, the rotation snapshot state, the API version constant, and the Python-era history.
 - The format is now known well enough that every region can be typed. A new crate can model the header, preview (with an RLE codec), model records, front block (descriptors, presets, attrs), support sections and trailers as plain data. It can then rebuild every offset and count on save. That is smaller and easier to test than patching the old design.
 
-Keep these ideas from the old crate (not its code): pointer-chain parse, the every-byte-in-one-region check, checked arithmetic, validate-all-then-change, and absolute-offset rebasing. Use the 17 files as the round-trip test set: the new reader must save each one byte-identical, as the old one did.
+Keep these ideas from the old crate (not its code): pointer-chain parse, the every-byte-in-one-region check, checked arithmetic, validate-all-then-change, and absolute-offset rebasing. Use the 15 files as the round-trip test set: the new reader must save each one byte-identical, as the old one did.
 
 The first output of the new writer must still go through the owner's ChituBox load test (PRD §12). Questions 1 to 3 in section 15 decide how much of section 13 the writer must copy exactly.
 

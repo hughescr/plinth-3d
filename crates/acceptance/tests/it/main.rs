@@ -1,5 +1,7 @@
 //! The one integration-test binary of this crate (design section 4.3).
 
+mod readers_agree;
+
 #[test]
 fn cli_chain_is_emit_chain_plus_cli_canary() {
     assert_eq!(

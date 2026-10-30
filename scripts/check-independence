@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Checker independence: no main-workspace dependency, no outside include (design dev-loop.md
+# section 4.4); logic in tools/devloop.
+exec "$(dirname "$0")/devloop" check-independence "$@"
