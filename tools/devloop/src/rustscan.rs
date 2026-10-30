@@ -5,13 +5,14 @@
 //! are skipped as units, so a token inside them is not code.
 //!
 //! Rules, on code tokens only:
-//! - `include!`, `include_str!` and `include_bytes!` must be called with exactly one string
-//!   literal that names a plain relative path: not empty, not absolute, no `..` component, no
-//!   backslash (also how an escape such as `\x2e` is refused) and no drive colon. A computed
-//!   argument (`concat!`, `env!`, a macro variable) is refused.
-//! - Those names must not appear in a `use` declaration (an alias would hide the call).
-//! - `path = <value>` (the `#[path]` attribute, also inside `cfg_attr`, also passed through a
-//!   macro) must have a plain relative path string literal as its value.
+//! - The identifiers `include`, `include_str` and `include_bytes` must not appear at all: not
+//!   called, not imported or renamed, not passed to another macro as an identifier argument
+//!   (`p!(include_str)` with `$m!("../x")` inside `p`), not given a computed path
+//!   (`concat!`, `env!`). The checker has no use for them, and any context can hide a path
+//!   outside `checker/`. A raw identifier (`r#include_str`) counts as the same name.
+//! - `path = <value>` inside any attribute (the `#[path]` attribute, also inside `cfg_attr`)
+//!   fails whatever its value. Outside an attribute (for example passed through a macro), a
+//!   `path = "<string>"` must name a plain relative path.
 //! - `#[` followed by `$` (an attribute a macro assembles) is refused.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,20 +209,6 @@ fn plain_literal(t: Option<&Lexed>) -> bool {
     matches!(t, Some(Lexed { tok: Tok::Str(s), .. }) if plain_path(s))
 }
 
-/// True if the tokens after an include macro's `!` are `( "plain path" )` (any bracket pair,
-/// an optional trailing comma).
-fn include_call_is_plain(rest: &[Lexed]) -> bool {
-    let close = match rest.first().map(|l| &l.tok) {
-        Some(Tok::Punct('(')) => ')',
-        Some(Tok::Punct('[')) => ']',
-        Some(Tok::Punct('{')) => '}',
-        _ => return false,
-    };
-    plain_literal(rest.get(1))
-        && (is_punct(rest.get(2), close)
-            || (is_punct(rest.get(2), ',') && is_punct(rest.get(3), close)))
-}
-
 /// For each token, whether it lies inside a `#[...]` or `#![...]` attribute.
 fn attribute_marks(toks: &[Lexed]) -> Vec<bool> {
     let mut marks = vec![false; toks.len()];
@@ -251,35 +238,29 @@ fn attribute_marks(toks: &[Lexed]) -> Vec<bool> {
     marks
 }
 
-/// Violations in one source file's text, each `file:line: reason`.
+/// Violations in one file's text, each `file:line: reason`. Any file type is scanned as Rust
+/// tokens. In a `.toml` file `path = "..."` is ordinary data (a clippy.toml entry, a Cargo
+/// manifest key), so the rule for a `path = "<string>"` outside an attribute is not applied there.
 #[must_use]
 pub fn scan_text(file: &str, text: &str) -> Vec<String> {
+    let toml = std::path::Path::new(file)
+        .extension()
+        .is_some_and(|x| x == "toml");
     let toks = lex(text);
     let mut bad = Vec::new();
     let in_attr = attribute_marks(&toks);
-    let mut in_use = false;
     for (i, t) in toks.iter().enumerate() {
         let mut flag = |why: &str| bad.push(format!("{file}:{}: {why}", t.line));
         match &t.tok {
-            Tok::Ident(name) if name == "use" => in_use = true,
-            Tok::Punct(';') => in_use = false,
             Tok::Ident(name) if INCLUDE_MACROS.contains(&name.as_str()) => {
-                if is_punct(toks.get(i + 1), '!') {
-                    if !include_call_is_plain(&toks[i + 2..]) {
-                        flag(&format!(
-                            "{name}! must be called with one string literal naming a plain relative path inside checker/"
-                        ));
-                    }
-                } else if in_use {
-                    flag(&format!(
-                        "{name} must not be imported or renamed in a use declaration"
-                    ));
-                }
+                flag(&format!(
+                    "the name {name} must not appear in checker sources (in any context)"
+                ));
             }
             Tok::Ident(name) if name == "path" && is_punct(toks.get(i + 1), '=') => {
-                // Any `path = "<not plain>"`, and inside an attribute any `path =` whose value is
-                // not a plain string literal. A plain assignment such as `path = p.join(x)`
-                // outside an attribute is ordinary code.
+                // Inside an attribute, every `path =` fails (the checker has no use for #[path]).
+                // Elsewhere, any `path = "<not plain>"`; a plain assignment such as
+                // `path = p.join(x)` outside an attribute is ordinary code.
                 let value = toks.get(i + 2);
                 let literal = matches!(
                     value,
@@ -288,7 +269,9 @@ pub fn scan_text(file: &str, text: &str) -> Vec<String> {
                         ..
                     })
                 );
-                if (literal || in_attr[i]) && !plain_literal(value) {
+                if in_attr[i] {
+                    flag("#[path = ...] must not appear in checker sources (in any form)");
+                } else if literal && !toml && !plain_literal(value) {
                     flag(
                         "path = must be a string literal naming a plain relative path inside checker/",
                     );
@@ -317,10 +300,60 @@ mod tests {
     }
 
     #[test]
-    fn plain_inside_includes_pass() {
-        let ok = "#[path = \"sub/mod.rs\"]\nmod sub;\nconst A: &str = include_str!(\"data.txt\");\n\
-                  const B: &[u8] = include_bytes!(\"d/e.bin\",);\ninclude!{\"gen.rs\"}\n";
-        assert_eq!(scan_text("a.rs", ok), Vec::<String>::new());
+    fn every_path_attribute_fails_even_with_a_plain_path() {
+        for bad in [
+            "#[path = \"sub/mod.rs\"]\nmod sub;",
+            "#[cfg_attr(unix, path = \"u/mod.rs\")]\nmod u;",
+            "#![path = \"sub/mod.rs\"]",
+        ] {
+            assert_eq!(count(bad), 1, "{bad}");
+        }
+        // A plain assignment is ordinary code.
+        assert_eq!(count("let path = 1; path = p.join(x);"), 0);
+        // A TOML key is data; the include ban still applies to a TOML file.
+        let toml = "disallowed = [{ path = \"std::env::var\" }]\n[lib]\npath = \"../x/lib.rs\"\n";
+        assert_eq!(scan_text("clippy.toml", toml), Vec::<String>::new());
+        assert_eq!(scan_text("a.rs", toml).len(), 2);
+        assert_eq!(scan_text("clippy.toml", "x = include_str\n").len(), 1);
+    }
+
+    #[test]
+    fn every_include_name_fails_even_with_a_plain_path() {
+        for bad in [
+            "const A: &str = include_str!(\"data.txt\");",
+            "const B: &[u8] = include_bytes!(\"d/e.bin\",);",
+            "include!{\"gen.rs\"}",
+        ] {
+            assert_eq!(count(bad), 1, "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_include_name_passed_to_another_macro_fails() {
+        // The verifier's probe: the name travels as an identifier argument, so no `name !`
+        // appears next to a path. Every context counts.
+        for bad in [
+            "macro_rules! p { ($m:ident) => { pub const X: &str = $m!(\"../../limits.toml\"); }; }\n\
+             p!(include_str);",
+            "p!(include_bytes);",
+            "p!(include);",
+            "p!(r#include_str);",
+            "p!(std::include_str);",
+            "let f = include_str;",
+            "fn f(include: bool) {}",
+        ] {
+            assert!(count(bad) >= 1, "{bad}");
+        }
+        // The probe is flagged once, on the invocation, with a message that names the identifier.
+        let hit = scan_text(
+            "a.rs",
+            "macro_rules! p { ($m:ident) => { pub const X: &str = $m!(\"../../limits.toml\"); }; }\np!(include_str);\n",
+        );
+        assert_eq!(hit.len(), 1, "{hit:?}");
+        assert!(
+            hit[0].starts_with("a.rs:2:") && hit[0].contains("include_str"),
+            "{hit:?}"
+        );
     }
 
     #[test]
@@ -380,7 +413,7 @@ mod tests {
         let ok = "// include_str!(\"../x\") in a comment\n/* include!(\"../y\") /* nested */ still */\n\
                   /// #[path = \"../z\"]\nconst S: &str = \"include_str!(\\\"../x\\\")\";\n\
                   const R: &str = r#\"#[path = \"../q\"]\"#;\nlet c = '\"'; let l: &'static str = \"\";\n\
-                  fn f(include: bool, path: &str) { let _ = (include, path); }\nlet path = 1;\n";
+                  fn f(inc: bool, path: &str) { let _ = (inc, path); }\nlet path = 1;\nlet included = include_str_len + my_include;\n";
         assert_eq!(scan_text("a.rs", ok), Vec::<String>::new());
     }
 

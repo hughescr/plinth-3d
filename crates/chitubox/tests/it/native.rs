@@ -6,8 +6,7 @@ use plinth_chitubox::{Deviation, parse};
 #[test]
 fn native_all_files_round_trip_byte_for_byte() {
     let files = native_files();
-    // 7 older files and the 8 v1.4.0 samples. (The format document says "17 files";
-    // the folder holds 15 `.chitubox` files. `cylinder-cube-sphere.ctp` is another
+    // 7 older files and the 8 v1.4.0 samples. (`cylinder-cube-sphere.ctp` is another
     // format, tested below, and the `.cfgx` is a profile export.)
     assert_eq!(files.len(), 15, "expected 7 older files and 8 samples");
     let mut supported_models = 0;

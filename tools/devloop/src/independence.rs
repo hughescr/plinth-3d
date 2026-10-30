@@ -9,10 +9,15 @@
 //!    must also be its own workspace.
 //!    The source file of every target (library, binaries, tests, build script) of a path package
 //!    must lie inside `checker/` too.
-//! 2. Lex the checker's Rust sources (`rustscan`, token based, so spacing and comments cannot hide
-//!    anything) and reject `#[path]`, `include!`, `include_str!` and `include_bytes!` that do not
-//!    name a plain relative path inside `checker/`. A symbolic link that leaves `checker/` is
-//!    rejected.
+//! 2. Lex every regular file under `checker/` whatever its extension (so a `.inc` file pulled in
+//!    by `#[path]` is scanned too), except the top-level `target/` and `Cargo.lock`
+//!    (`rustscan`, token based, so spacing and comments cannot hide anything). Reject every
+//!    occurrence of the names `include`, `include_str` and `include_bytes` outside comments and
+//!    string literals, in any context, and every `#[path = ...]` attribute. A symbolic link that
+//!    leaves `checker/` is rejected.
+//!
+//! Threat model: the check guards against code sharing by accident, not against a deliberate
+//! adversary; text-scanner bypasses beyond that are out of scope.
 //!
 //! Exit codes: 0 pass; 1 violation (or a dependency graph that cannot be resolved as committed);
 //! 4 setup error (no cargo or jq).
@@ -142,9 +147,9 @@ pub fn judge(
     bad
 }
 
-/// Every `.rs` file under the checker, except its top-level `target/`, into `files`. A symbolic
-/// link whose real location is outside the checker is a violation (it would put outside code
-/// into the checker without any text that names it).
+/// Every regular file under the checker (any extension), except its top-level `target/` and
+/// `Cargo.lock`, into `files`. A symbolic link whose real location is outside the checker is a
+/// violation (it would put outside code into the checker without any text that names it).
 fn walk_checker(checker: &Path, dir: &Path, files: &mut Vec<PathBuf>, bad: &mut Vec<String>) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
@@ -164,7 +169,9 @@ fn walk_checker(checker: &Path, dir: &Path, files: &mut Vec<PathBuf>, bad: &mut 
             if !(dir == checker && p.file_name().is_some_and(|n| n == "target")) {
                 walk_checker(checker, &p, files, bad);
             }
-        } else if p.extension().is_some_and(|x| x == "rs") {
+        } else if p.is_file()
+            && !(dir == checker && p.file_name().is_some_and(|n| n == "Cargo.lock"))
+        {
             files.push(p);
         }
     }
@@ -255,8 +262,9 @@ pub fn main(root: &Path) -> i32 {
             .unwrap_or(f)
             .display()
             .to_string();
-        match std::fs::read_to_string(f) {
-            Ok(text) => bad.extend(rustscan::scan_text(&rel, &text)),
+        // Lossy: a binary file (a fixture) is scanned as text rather than rejected.
+        match std::fs::read(f) {
+            Ok(bytes) => bad.extend(rustscan::scan_text(&rel, &String::from_utf8_lossy(&bytes))),
             Err(e) => bad.push(format!("{rel}: cannot read the source file: {e}")),
         }
     }
@@ -394,6 +402,8 @@ mod tests {
         std::fs::write(tmp.join("outside.rs"), "pub fn f() {}\n").expect("write");
         std::fs::write(checker.join("src/a.rs"), "pub fn a() {}\n").expect("write");
         std::fs::write(checker.join("target/skipped.rs"), "\n").expect("write");
+        std::fs::write(checker.join("src/data.inc"), "\n").expect("write");
+        std::fs::write(checker.join("Cargo.lock"), "\n").expect("write");
         let real = canon(&checker);
         let (mut files, mut bad) = (Vec::new(), Vec::new());
         std::os::unix::fs::symlink(checker.join("src/a.rs"), checker.join("src/inside.rs"))
@@ -402,8 +412,12 @@ mod tests {
         assert!(bad.is_empty(), "{bad:?}");
         assert_eq!(
             files.len(),
-            1,
-            "target/ is skipped and links are not followed: {files:?}"
+            2,
+            "a.rs and data.inc only: target/ and Cargo.lock are skipped, links are not followed: {files:?}"
+        );
+        assert!(
+            files.iter().any(|f| f.ends_with("src/data.inc")),
+            "{files:?}"
         );
         std::os::unix::fs::symlink(tmp.join("outside.rs"), checker.join("src/out.rs"))
             .expect("link");
@@ -411,6 +425,73 @@ mod tests {
         assert_eq!(bad.len(), 1, "{bad:?}");
         assert!(bad[0].contains("out.rs"), "{bad:?}");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A throwaway repo root with a dependency-free `checker/` whose lib is `lib_rs`, plus
+    /// `extra` (path under `checker/`, text) files.
+    fn temp_root(tag: &str, lib_rs: &str, extra: &[(&str, &str)]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("devloop-e2e-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let checker = root.join("checker");
+        std::fs::create_dir_all(checker.join("src")).expect("mkdir");
+        std::fs::write(
+            checker.join("Cargo.toml"),
+            "[workspace]\nmembers = [\".\"]\n\n[package]\nname = \"probe\"\nversion = \"0.0.0\"\n\
+             edition = \"2021\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .expect("write");
+        std::fs::write(
+            checker.join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"probe\"\nversion = \"0.0.0\"\n",
+        )
+        .expect("write");
+        std::fs::write(checker.join("src/lib.rs"), lib_rs).expect("write");
+        for (rel, text) in extra {
+            let p = checker.join(rel);
+            std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+            std::fs::write(p, text).expect("write");
+        }
+        root
+    }
+
+    #[test]
+    fn end_to_end_a_clean_checker_passes() {
+        if !proc::has_tool("jq") || !proc::has_tool("cargo") {
+            return;
+        }
+        let root = temp_root("clean", "pub fn f() {}\n", &[("src/notes.txt", "hello\n")]);
+        assert_eq!(main(&root), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn end_to_end_a_path_attribute_to_an_inc_probe_fails() {
+        if !proc::has_tool("jq") || !proc::has_tool("cargo") {
+            return;
+        }
+        // lib.rs pulls in an `.inc` file by `#[path]`; the `.inc` file includes an outside file.
+        let root = temp_root(
+            "path-inc",
+            "#[path = \"probe.inc\"]\nmod probe;\n",
+            &[("src/probe.inc", "pub const X: &str = \"outside\";\n")],
+        );
+        assert_ne!(main(&root), 0, "a #[path] attribute must fail the check");
+        // The same tree without the attribute but with the name in the `.inc` file alone.
+        let root2 = temp_root(
+            "inc-only",
+            "pub fn f() {}\n",
+            &[(
+                "src/probe.inc",
+                "pub const X: &str = include_str!(\"../../limits.toml\");\n",
+            )],
+        );
+        assert_ne!(
+            main(&root2),
+            0,
+            "an include name in a non-.rs file must fail"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&root2);
     }
 
     #[test]
