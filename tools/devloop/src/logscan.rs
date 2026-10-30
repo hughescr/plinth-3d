@@ -8,7 +8,8 @@ pub struct Stats {
     pub touched: u32,
     /// `Finished` lines.
     pub finished: u32,
-    /// Tests run, from the last nextest summary line (0 when there is none).
+    /// Tests run, summed over every nextest summary line (L2 runs two workspaces; 0 when
+    /// there is none).
     pub tests: u32,
     /// nextest said it had no tests to run.
     pub no_tests_msg: bool,
@@ -41,7 +42,7 @@ pub fn scan(log: &str) -> Stats {
             _ => {}
         }
         if let Some(n) = summary_tests(line) {
-            s.tests = n;
+            s.tests = s.tests.saturating_add(n);
         }
         if line.contains("no tests to run") {
             s.no_tests_msg = true;
@@ -74,10 +75,10 @@ mod tests {
     }
 
     #[test]
-    fn single_test_wording_and_last_summary_wins() {
+    fn single_test_wording_and_summaries_add_up() {
         let s =
             scan("Summary [ 0.1s] 1 test run: 1 passed\nSummary [ 0.2s] 5 tests run: 5 passed\n");
-        assert_eq!(s.tests, 5);
+        assert_eq!(s.tests, 6);
         assert_eq!(scan("Summary [ 0.1s] 1 test run: 1 passed\n").tests, 1);
     }
 

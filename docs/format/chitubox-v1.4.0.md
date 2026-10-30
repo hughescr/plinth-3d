@@ -5,7 +5,7 @@ This document says how ChituBox v1.4.0 stores a project in a `.chitubox` file. I
 ## 0. Evidence and markers
 
 - The owner made eight sample files in ChituBox v1.4.0. They are in `test-data/chitubox-native/samples/`. Each sample differs from the one it builds on by one change. The folder README lists them.
-- Nine older `.chitubox` files are in `test-data/chitubox-native/`. Their ChituBox version is not known. They are used only as extra checks.
+- Seven older `.chitubox` files are in `test-data/chitubox-native/`. Their ChituBox version is not known. They are used only as extra checks. (The counts of "17 files" below were made on a larger set. This checkout holds 15 `.chitubox` files: these seven and the eight samples. The `.ctp` file in the same folder has another magic number, `0xAB231253`, and is not this format.)
 - One agent decoded each sample pair. A second agent, from a different model family, checked each decode with its own decoder. Where the checker found a claim wrong, this document uses the correction. Where a point could not be settled, it is in section 15.
 - Every section has a marker:
   - **Verified from samples**: measured from the bytes of the samples and checked by the second decoder.
@@ -627,7 +627,7 @@ Test run: I built the old reader and ran parse then save on all 17 files. All 17
 
 ### 16.3 Recommendation
 
-**Do not restore it. Write a new reader/writer, and use the old crate only as a read-only reference.**
+**Do not restore it. Write a new reader/writer, and use the old crate only as a read-only reference.** (Done: `crates/chitubox` is the new crate; section 17.)
 
 Reasons:
 
@@ -638,3 +638,27 @@ Reasons:
 Keep these ideas from the old crate (not its code): pointer-chain parse, the every-byte-in-one-region check, checked arithmetic, validate-all-then-change, and absolute-offset rebasing. Use the 17 files as the round-trip test set: the new reader must save each one byte-identical, as the old one did.
 
 The first output of the new writer must still go through the owner's ChituBox load test (PRD §12). Questions 1 to 3 in section 15 decide how much of section 13 the writer must copy exactly.
+
+## 17. How `plinth-chitubox` reads and writes this format
+
+**Verified by tests on the 15 `.chitubox` files in `test-data/chitubox-native/`.** Every one parses and writes back byte for byte. This says nothing about what ChituBox accepts (section 0).
+
+Typed data: `Project { header_f16, preview, models }`. A `Model` holds name, translate, mesh and optional `Supports { presets, attrs, unreferenced_blob, records }`. No offset, count or length is stored. The writer rebuilds all of them (sections 13 and 9).
+
+The reader follows the pointer chain in file order. Each pointer must equal the position where the previous region ended, so every byte is in one region and regions cannot overlap. It rejects:
+
+- a region that is zero in every native file but holds a nonzero byte (zero block, preview header padding, model record bytes 280..679, group header, trailer, bytes after a name's NUL);
+- a name without a NUL (the name must be shorter than 256 bytes), or a name or preset name that is not UTF-8;
+- a NaN or infinite float in a translate, mesh vertex, record start, end or radius;
+- preview data that is not the canonical greedy run-length encoding of exactly `w × h` pixels, or a preview over 33,554,432 pixels;
+- a support record whose mesh does not start where the previous record's mesh ended;
+- bytes after the last region.
+
+Two points where the reader differs from a plain reading of sections 8 and 9, so that `morel_mudskipper_supports.chitubox` (section 14) parses:
+
+- The attr array has no length field. The reader takes it as the bytes from the attr pointer to the next preset block, or to the first mesh. A clean save has one entry per record. `morel_mudskipper_supports` has 13 entries and 243 records.
+- The support mesh blob may start with bytes that no record refers to (`unreferenced_blob`). The record meshes follow them with no gap. A clean save has none. `morel_mudskipper_supports` has 88,272: morel's old blob. The new record meshes start where morel's index was.
+
+`Project::deviations()` lists both cases. It is empty for every file except `morel_mudskipper_supports`. A writer that builds a project from nothing leaves it empty.
+
+The writer refuses before it writes a byte: a name of 256 bytes or more or with a NUL, a non-finite float, a preview whose pixel count is not `w × h` or has bit 5 set in a pixel, and any size or offset that does not fit 32 bits. It does not check that the attr array has one entry per record, that preset ids in attrs exist, or any other meaning (sections 8.3, 10, 13). Those are the caller's job until a load test shows what ChituBox needs.
