@@ -5,6 +5,11 @@
 //! The counters are thread-local and cost one add per batch call, never one per item. A
 //! batch operation records on the calling thread only; helper threads it starts do not
 //! record, so one batch call is always one record.
+//!
+//! A parallel batch also leaves a [`ParReport`] on the calling thread: how many tasks it
+//! made and how many distinct threads ran them, measured from the threads that really ran.
+//! [`take_par`] reads it through the public entrypoint, so a test can prove the allocation
+//! was respected without a second code path.
 
 use std::cell::Cell;
 
@@ -55,8 +60,31 @@ impl Count {
     }
 }
 
+/// What the last parallel batch on this thread did: the tasks it made and the distinct
+/// threads that ran them (the calling thread included). Both are 0 for an empty batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParReport {
+    /// Number of tasks the batch was split into.
+    pub tasks: usize,
+    /// Number of distinct threads that ran a task, measured by thread identity.
+    pub threads: usize,
+}
+
 thread_local! {
     static COUNTS: Cell<[Count; OPS]> = const { Cell::new([Count::ZERO; OPS]) };
+    static LAST_PAR: Cell<Option<ParReport>> = const { Cell::new(None) };
+}
+
+/// Keep the report of a parallel batch that just finished (one store per batch).
+pub(crate) fn record_par(r: ParReport) {
+    LAST_PAR.with(|c| c.set(Some(r)));
+}
+
+/// The report of the last parallel batch finished on the calling thread, cleared by the
+/// read. `None` when no batch finished since the last read.
+#[must_use]
+pub fn take_par() -> Option<ParReport> {
+    LAST_PAR.with(Cell::take)
 }
 
 /// Record one batch call of `items` items (called once at the top of a batch function).
@@ -86,7 +114,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn records_calls_and_items_per_thread() {
+    fn threads_records_calls_and_items_per_thread() {
+        // The test starts one helper thread: allowed only when the allocation is 2 or more.
+        let spawn_ok = crate::testutil::slot_threads() >= 2;
         reset();
         record(Op::ClosestPoints, 10);
         record(Op::ClosestPoints, 30);
@@ -95,10 +125,24 @@ mod tests {
         assert_eq!(c.mean_items_per_call(), Some(20.0));
         assert_eq!(snapshot(Op::MortonKeys), Count::default());
         assert_eq!(snapshot(Op::MortonKeys).mean_items_per_call(), None);
-        std::thread::spawn(|| assert_eq!(snapshot(Op::ClosestPoints), Count::default()))
-            .join()
-            .expect("thread");
+        if spawn_ok {
+            std::thread::spawn(|| assert_eq!(snapshot(Op::ClosestPoints), Count::default()))
+                .join()
+                .expect("thread");
+        }
         reset();
         assert_eq!(snapshot(Op::ClosestPoints), Count::default());
+    }
+
+    #[test]
+    fn par_report_is_kept_per_thread_and_cleared_by_the_read() {
+        let _ = take_par();
+        let r = ParReport {
+            tasks: 2,
+            threads: 2,
+        };
+        record_par(r);
+        assert_eq!(take_par(), Some(r));
+        assert_eq!(take_par(), None);
     }
 }

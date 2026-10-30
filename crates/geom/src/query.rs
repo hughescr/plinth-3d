@@ -2,7 +2,7 @@
 //! slices; there is no single-point public query (design section 8).
 
 use crate::bvh::Bvh;
-use crate::counters::{self, Op};
+use crate::counters::{self, Op, ParReport};
 use crate::error::{GeomError, Result};
 
 /// The smallest work unit handed to one thread, in query points (design section 8:
@@ -224,6 +224,10 @@ pub fn closest_points(bvh: &Bvh<'_>, queries: &Points, out: &mut ClosestHits) ->
 /// least [`MIN_POINTS_PER_TASK`] queries. The output is identical for every `threads`.
 /// The calling thread is one of the workers; counted once, on the calling thread.
 ///
+/// Each finished batch also leaves a [`ParReport`] on the calling thread (the tasks made and
+/// the distinct threads that really ran them); read it with [`counters::take_par`], so a
+/// caller can prove it stayed within its thread allocation.
+///
 /// # Errors
 /// Returns [`GeomError::LengthMismatch`] when `out` does not have one slot per query.
 pub fn closest_points_par(
@@ -236,17 +240,44 @@ pub fn closest_points_par(
     counters::record(Op::ClosestPoints, queries.len());
     let n = queries.len();
     if n == 0 {
+        counters::record_par(ParReport {
+            tasks: 0,
+            threads: 0,
+        });
         return Ok(());
     }
     let mut chunks = out.split_mut(task_count(n, threads));
-    std::thread::scope(|s| {
+    let tasks = chunks.len();
+    let ids = std::thread::scope(|s| {
         let last = chunks.pop();
-        for mut c in chunks {
-            s.spawn(move || c.fill(bvh, queries));
-        }
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|mut c| {
+                s.spawn(move || {
+                    c.fill(bvh, queries);
+                    std::thread::current().id()
+                })
+            })
+            .collect();
+        let mut ids = Vec::with_capacity(tasks);
         if let Some(mut c) = last {
             c.fill(bvh, queries);
+            ids.push(std::thread::current().id());
         }
+        for h in handles {
+            ids.push(h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)));
+        }
+        ids
+    });
+    let mut distinct = Vec::with_capacity(ids.len());
+    for id in ids {
+        if !distinct.contains(&id) {
+            distinct.push(id);
+        }
+    }
+    counters::record_par(ParReport {
+        tasks,
+        threads: distinct.len(),
     });
     Ok(())
 }
@@ -255,7 +286,10 @@ pub fn closest_points_par(
 mod tests {
     use super::*;
     use crate::mesh::Mesh;
-    use crate::testutil::{assert_pt, cube_soup, plate_soup};
+    use crate::testutil::{
+        assert_pt, assert_report_within, cube_soup, in_bench_epoch, par_within, plate_soup,
+        slot_threads,
+    };
 
     fn pts(v: &[[f64; 3]]) -> Points {
         Points::new(
@@ -322,13 +356,13 @@ mod tests {
             })
         ));
         assert!(matches!(
-            closest_points_par(&b, &q, &mut short, 2),
+            closest_points_par(&b, &q, &mut short, 1),
             Err(GeomError::LengthMismatch { .. })
         ));
         let none = pts(&[]);
         let mut o = ClosestHits::with_len(0);
         closest_points(&b, &none, &mut o).expect("empty");
-        closest_points_par(&b, &none, &mut o, 4).expect("empty par");
+        closest_points_par(&b, &none, &mut o, 1).expect("empty par");
         assert!(o.is_empty() && none.is_empty());
     }
 
@@ -398,31 +432,112 @@ mod tests {
         assert_eq!(task_count(100 * m, 8), 8);
     }
 
-    #[test]
-    fn parallel_equals_serial_around_the_task_boundaries() {
+    fn boundary_points(n: usize) -> Points {
+        Points::new(
+            (0..n).map(|i| (i % 97) as f64 * 0.05 - 1.0).collect(),
+            (0..n).map(|i| (i % 89) as f64 * 0.07 - 0.5).collect(),
+            (0..n).map(|i| (i % 13) as f64 * 0.3 - 1.0).collect(),
+        )
+        .expect("points")
+    }
+
+    /// Parallel output equals serial output at every `threads` in `counts`, for batch
+    /// sizes around the task boundaries; each run must make exactly the expected tasks.
+    fn check_parallel_equals_serial(limit: usize, counts: &[usize], ns: &[usize]) {
         let (x, y, z) = plate_soup();
         let m = Mesh::from_soup(&x, &y, &z).expect("plate");
         let b = Bvh::build(&m).expect("bvh");
-        let k = MIN_POINTS_PER_TASK;
-        for n in [k - 1, k, k + 1, 2 * k - 1, 2 * k, 2 * k + 1, 3 * k + 7] {
-            let q = Points::new(
-                (0..n).map(|i| (i % 97) as f64 * 0.05 - 1.0).collect(),
-                (0..n).map(|i| (i % 89) as f64 * 0.07 - 0.5).collect(),
-                (0..n).map(|i| (i % 13) as f64 * 0.3 - 1.0).collect(),
-            )
-            .expect("points");
+        for &n in ns {
+            let q = boundary_points(n);
             let mut a = ClosestHits::with_len(n);
             closest_points(&b, &q, &mut a).expect("serial");
-            for threads in [2, 3, 8] {
+            for &threads in counts {
                 let mut p = ClosestHits::with_len(n);
-                closest_points_par(&b, &q, &mut p, threads).expect("parallel");
+                let r = par_within(limit, &b, &q, &mut p, threads);
                 assert_eq!(a, p, "n {n} threads {threads}");
+                let want = task_count(n, threads);
+                assert_eq!(
+                    (r.tasks, r.threads),
+                    (want, want),
+                    "n {n} threads {threads}"
+                );
             }
         }
     }
 
     #[test]
-    fn counters_see_one_call_per_batch_not_per_item() {
+    fn threads_parallel_equals_serial_around_the_task_boundaries() {
+        let alloc = slot_threads();
+        let k = MIN_POINTS_PER_TASK;
+        let counts: Vec<usize> = (1..=alloc).collect();
+        check_parallel_equals_serial(
+            alloc,
+            &counts,
+            &[k - 1, k, k + 1, 2 * k - 1, 2 * k, 2 * k + 1, 3 * k + 7],
+        );
+    }
+
+    /// The 3 and 8 worker cases. They start more workers than a writing slot may use, so
+    /// they run only in the bench epoch: the `bench` nextest profile selects them, the
+    /// default profile's `default-filter` skips them and nextest counts them as skipped.
+    /// Started outside the bench epoch, the test fails; it never passes without running.
+    #[test]
+    fn threads_bench_parallel_equals_serial_at_3_and_8_workers() {
+        assert!(
+            in_bench_epoch() && slot_threads() >= 8,
+            "bench-epoch test started outside the bench epoch (profile bench, 8 threads)"
+        );
+        let k = MIN_POINTS_PER_TASK;
+        check_parallel_equals_serial(
+            8,
+            &[3, 8],
+            &[k - 1, 2 * k, 3 * k + 7, 8 * k - 1, 8 * k, 8 * k + 5],
+        );
+    }
+
+    /// Allocation witness: a query given the whole allocation makes exactly that many tasks
+    /// on exactly that many distinct threads, and the check fails for anything above it.
+    #[test]
+    fn threads_witness_query_uses_exactly_the_allocation() {
+        let alloc = slot_threads();
+        let (x, y, z) = plate_soup();
+        let m = Mesh::from_soup(&x, &y, &z).expect("plate");
+        let b = Bvh::build(&m).expect("bvh");
+        let n = 40 * MIN_POINTS_PER_TASK;
+        let q = boundary_points(n);
+        let mut o = ClosestHits::with_len(n);
+        let r = par_within(alloc, &b, &q, &mut o, alloc);
+        assert_eq!((r.tasks, r.threads), (alloc, alloc));
+    }
+
+    #[test]
+    #[should_panic(expected = "allowed")]
+    fn witness_fails_a_request_above_the_allocation() {
+        let alloc = slot_threads();
+        let (x, y, z) = plate_soup();
+        let m = Mesh::from_soup(&x, &y, &z).expect("plate");
+        let b = Bvh::build(&m).expect("bvh");
+        let q = boundary_points(4);
+        let mut o = ClosestHits::with_len(4);
+        // Refused before any worker starts.
+        par_within(alloc, &b, &q, &mut o, alloc + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "allowed")]
+    fn witness_fails_a_report_above_the_allocation() {
+        let alloc = slot_threads();
+        assert_report_within(
+            alloc,
+            ParReport {
+                tasks: alloc + 1,
+                threads: alloc + 1,
+            },
+        );
+    }
+
+    #[test]
+    fn threads_counters_see_one_call_per_batch_not_per_item() {
         let (x, y, z) = plate_soup();
         let m = Mesh::from_soup(&x, &y, &z).expect("plate");
         let b = Bvh::build(&m).expect("bvh");
@@ -436,7 +551,7 @@ mod tests {
         let mut o = ClosestHits::with_len(q.len());
         counters::reset();
         closest_points(&b, &q, &mut o).expect("serial");
-        closest_points_par(&b, &q, &mut o, 3).expect("parallel");
+        par_within(slot_threads(), &b, &q, &mut o, slot_threads());
         let c = counters::snapshot(Op::ClosestPoints);
         assert_eq!((c.calls, c.items), (2, 5000));
         assert_eq!(c.mean_items_per_call(), Some(2500.0));

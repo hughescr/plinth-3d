@@ -12,6 +12,9 @@ nextest-version = "0.9.150"
 experimental = ["setup-scripts"]
 
 [profile.default]
+# Bench-epoch tests (threads_bench_*) are left out here and reported as skipped; see the
+# bench profile at the end of this file.
+default-filter = "not test(/(^|::)threads_bench_/)"
 # Unit and property tests: slow after 2 s, killed at 6 s.
 slow-timeout = { period = "2s", terminate-after = 3 }
 # Passing tests do not fill agent context.
@@ -46,3 +49,11 @@ threads-required = "num-test-threads"
 [[profile.default.overrides]]
 filter = "test(/(^|::)threads_/)"
 threads-required = "num-test-threads"
+
+# Bench-epoch tests (threads_bench_*) start 3 and 8 workers, more than a writing slot may
+# use. The default profile leaves them out with default-filter, and nextest reports them
+# in its summary as skipped. scripts/t selects `--profile bench` in the bench slot, which
+# runs every test. A threads_bench_* test started in any other profile fails (it checks).
+[profile.bench]
+inherits = "default"
+default-filter = "all()"

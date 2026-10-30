@@ -38,8 +38,29 @@ fn slot_threads() -> usize {
     std::env::var("NEXTEST_TEST_THREADS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(2)
+        .unwrap_or(1)
         .clamp(1, 8)
+}
+
+/// Run a parallel batch and fail unless the request and the threads that really ran stay
+/// within the slot allocation (design section 5.6). Every test that starts workers uses it.
+#[track_caller]
+fn par_in_allocation(bvh: &Bvh<'_>, q: &Points, out: &mut ClosestHits, threads: usize) {
+    let alloc = slot_threads();
+    assert!(
+        threads <= alloc,
+        "test asks for {threads} workers; the slot allocation is {alloc}"
+    );
+    // Drop any stale report, run the PUBLIC entrypoint, then read what it measured.
+    let _ = counters::take_par();
+    closest_points_par(bvh, q, out, threads).expect("parallel");
+    let r = counters::take_par().expect("closest_points_par left no report");
+    assert!(
+        r.tasks <= alloc && r.threads <= alloc,
+        "query used {} tasks on {} threads; the slot allocation is {alloc}",
+        r.tasks,
+        r.threads
+    );
 }
 
 /// Deterministic generator for query points (no rand crate).
@@ -271,9 +292,9 @@ fn threads_round_output_is_identical_at_one_thread_and_the_slot_allocation() {
     let bvh = Bvh::build(&m).expect("bvh");
     let mut serial = ClosestHits::with_len(q.len());
     closest_points(&bvh, &q, &mut serial).expect("serial");
-    for threads in [1, 2, alloc] {
+    for threads in 1..=alloc {
         let mut par = ClosestHits::with_len(q.len());
-        closest_points_par(&bvh, &q, &mut par, threads).expect("parallel");
+        par_in_allocation(&bvh, &q, &mut par, threads);
         assert_hits_identical(&par, &serial, &format!("{threads} threads"));
     }
     let want = closest_points_reference(&m, &q).expect("reference");
@@ -381,8 +402,8 @@ proptest! {
         check_against_reference(&mesh, &q, 1);
     }
 
-    /// Same output at 1 thread and at 2 threads (the smallest slot allocation), with
-    /// enough queries to split into more than one task.
+    /// Same output at every thread count up to the slot allocation, with enough queries to
+    /// split into more than one task.
     #[test]
     fn threads_prop_parallel_equals_serial(tris in tri_list(), g in grid_points(2100..2600)) {
         let mesh = mesh_of(&tris);
@@ -390,9 +411,9 @@ proptest! {
         let bvh = Bvh::build(&mesh).expect("bvh");
         let mut serial = ClosestHits::with_len(q.len());
         closest_points(&bvh, &q, &mut serial).expect("serial");
-        for threads in [1, 2] {
+        for threads in 1..=slot_threads() {
             let mut par = ClosestHits::with_len(q.len());
-            closest_points_par(&bvh, &q, &mut par, threads).expect("parallel");
+            par_in_allocation(&bvh, &q, &mut par, threads);
             assert_hits_identical(&par, &serial, "parallel vs serial");
         }
     }

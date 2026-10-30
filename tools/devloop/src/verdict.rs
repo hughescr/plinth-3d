@@ -129,6 +129,7 @@ mod tests {
             touched,
             finished,
             tests,
+            skipped: 0,
             no_tests_msg: false,
         }
     }

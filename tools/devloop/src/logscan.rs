@@ -11,6 +11,10 @@ pub struct Stats {
     /// Tests run, summed over every nextest summary line (L2 runs two workspaces; 0 when
     /// there is none).
     pub tests: u32,
+    /// Tests nextest left out (`N skipped` on its summary lines), for any reason. Outside the
+    /// bench epoch this includes the `threads_bench_*` tests the profile's `default-filter`
+    /// drops; the log does not split the two.
+    pub skipped: u32,
     /// nextest said it had no tests to run.
     pub no_tests_msg: bool,
 }
@@ -28,6 +32,16 @@ fn summary_tests(line: &str) -> Option<u32> {
     (tail.starts_with("test run") || tail.starts_with("tests run")).then_some(n)
 }
 
+/// `... 12 passed, 3 skipped` on a summary line gives 3.
+fn summary_skipped(line: &str) -> Option<u32> {
+    line.split_once("Summary [")?;
+    let head = line.split_once(" skipped")?.0;
+    head.rsplit(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
 #[must_use]
 pub fn scan(log: &str) -> Stats {
     let mut s = Stats::default();
@@ -43,6 +57,7 @@ pub fn scan(log: &str) -> Stats {
         }
         if let Some(n) = summary_tests(line) {
             s.tests = s.tests.saturating_add(n);
+            s.skipped = s.skipped.saturating_add(summary_skipped(line).unwrap_or(0));
         }
         if line.contains("no tests to run") {
             s.no_tests_msg = true;
@@ -72,6 +87,16 @@ mod tests {
         let s = scan(LOG);
         assert_eq!((s.compiled, s.touched, s.finished, s.tests), (1, 2, 1, 3));
         assert!(!s.no_tests_msg);
+    }
+
+    #[test]
+    fn skipped_tests_are_counted_from_the_summary() {
+        let s = scan(
+            "Summary [ 0.1s] 5 tests run: 5 passed, 2 skipped\nSummary [ 0.1s] 1 test run: 1 passed, 1 skipped\n",
+        );
+        assert_eq!((s.tests, s.skipped), (6, 3));
+        assert_eq!(scan(LOG).skipped, 0);
+        assert_eq!(scan("Summary [ 0.1s] 1 test run: 1 passed\n").skipped, 0);
     }
 
     #[test]
