@@ -11,7 +11,11 @@
 # Exit codes: 0 ok; 4 setup error or refusal.
 set -euo pipefail
 
-root="$(cd "$(dirname "$0")/.." && pwd)"
+here="$(cd "$(dirname "$0")/.." && pwd)"
+# The main checkout is the first worktree git lists, so the script behaves the same when it is
+# run from a slot's copy of itself.
+root="$(git -C "$here" worktree list --porcelain | sed -n '1s/^worktree //p')"
+[ -n "$root" ] || { echo "SLOT: cannot find the main checkout" >&2; exit 4; }
 slots_dir="$(dirname "$root")/plinth-slots"
 all_slots="s1 s2 s3 bench"
 writing_slots="s1 s2 s3"
@@ -22,7 +26,8 @@ warn_kb=$((12 * 1024 * 1024))                    # 12 GB per slot
 die() { echo "SLOT: $*" >&2; exit 4; }
 
 # "main" in the design is the branch the orchestrator's checkout has. Override: PLINTH_MAIN.
-main_branch="${PLINTH_MAIN:-$(git -C "$root" symbolic-ref --short HEAD)}"
+main_branch="${PLINTH_MAIN:-$(git -C "$root" symbolic-ref --short -q HEAD || true)}"
+[ -n "$main_branch" ] || die "the main checkout has a detached HEAD; set PLINTH_MAIN=<branch>"
 
 is_slot() { case " $all_slots " in *" $1 "*) return 0 ;; esac; return 1; }
 is_writing() { case " $writing_slots " in *" $1 "*) return 0 ;; esac; return 1; }
@@ -56,9 +61,22 @@ disk_check() {
 cmd_init() {
   mkdir -p "$slots_dir"
   for s in $all_slots; do
-    if [ -e "$slots_dir/$s/.git" ]; then echo "$s: exists"; continue; fi
-    git -C "$root" worktree add --detach "$slots_dir/$s" "$main_branch" >/dev/null
-    echo "$s: created at $(git -C "$slots_dir/$s" rev-parse --short HEAD)"
+    local d="$slots_dir/$s"
+    if [ ! -e "$d/.git" ]; then
+      git -C "$root" worktree add --detach "$d" "$main_branch" >/dev/null
+      echo "$s: created at $(git -C "$d" rev-parse --short HEAD)"
+      continue
+    fi
+    # An idle, clean, detached slot follows the main branch; anything else is left alone.
+    if [ -e "$(marker "$s")" ] || [ -n "$(git -C "$d" status --porcelain)" ] ||
+      git -C "$d" symbolic-ref -q HEAD >/dev/null; then
+      echo "$s: exists (left as it is)"
+    elif [ "$(git -C "$d" rev-parse HEAD)" = "$(git -C "$root" rev-parse "$main_branch")" ]; then
+      echo "$s: exists, at $main_branch"
+    else
+      git -C "$d" switch --detach "$main_branch" >/dev/null 2>&1
+      echo "$s: moved to $(git -C "$d" rev-parse --short HEAD)"
+    fi
   done
 }
 
@@ -97,8 +115,13 @@ cmd_start() {
   done
   [ $((sum + threads)) -le "$total_threads" ] ||
     die "no thread allocation left: main $main_threads + active slots $((sum - main_threads)) + new $threads > $total_threads"
-  git -C "$d" switch -c "$lane" "$main_branch"
-  printf 'lane=%s\nthreads=%s\nbase=%s\n' "$lane" "$threads" "$(git -C "$d" rev-parse --short HEAD)" >"$(marker "$s")"
+  # Reserve first, then switch; undo the reservation if the switch fails. The whole of cmd_start
+  # runs under the exclusive lock (see the dispatch below), so no other start sees a half state.
+  printf 'lane=%s\nthreads=%s\nbase=%s\n' "$lane" "$threads" "$(git -C "$root" rev-parse --short "$main_branch")" >"$(marker "$s")"
+  if ! git -C "$d" switch -c "$lane" "$main_branch"; then
+    rm -f "$(marker "$s")"
+    die "$s: could not create $lane (allocation released)"
+  fi
   echo "$s: started $lane with $threads threads"
   disk_check "$s"
 }
@@ -119,6 +142,24 @@ cmd_end() {
 }
 
 [ $# -ge 1 ] || die "usage: scripts/slot init | status | <slot> start lane/<name> [--threads N] | <slot> end"
+
+# Every command that changes slots or reads the allocation to decide runs under one exclusive
+# lock (section 5.6: the check and the reservation are one critical section). The lock is a
+# kernel flock held by a perl wrapper that then runs this script again; it is released when that
+# process exits, even if it is killed, so it never goes stale. macOS has no flock(1).
+if [ "$1" != status ] && [ -z "${PLINTH_SLOT_LOCKED:-}" ]; then
+  mkdir -p "$slots_dir"
+  exec perl -e '
+    $^F = 255;                                   # keep the lock file open across exec
+    $SIG{ALRM} = sub { print STDERR "SLOT: timed out after 60 s waiting for another scripts/slot command\n"; exit 4 };
+    open(L, ">>", shift) or do { print STDERR "SLOT: cannot open the lock file: $!\n"; exit 4 };
+    alarm 60;
+    flock(L, 2) or do { print STDERR "SLOT: cannot lock: $!\n"; exit 4 };
+    alarm 0;
+    exec { $ARGV[0] } @ARGV or do { print STDERR "SLOT: cannot run: $!\n"; exit 4 };
+  ' "$slots_dir/.slot.lock" env PLINTH_SLOT_LOCKED=1 "$0" "$@"
+fi
+
 case "$1" in
   init) cmd_init ;;
   status) cmd_status ;;
