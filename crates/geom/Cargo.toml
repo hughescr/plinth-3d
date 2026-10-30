@@ -9,6 +9,9 @@ publish.workspace = true
 [lib]
 doctest = false
 
+[dev-dependencies]
+proptest = { workspace = true }
+
 # Not `lints.workspace = true`: cargo cannot extend the workspace table. Keep this table
 # identical to the workspace table. `unsafe_code` is `forbid` because there is no
 # `geom::simd` module yet; when it is added, scope its exception to that one module only.

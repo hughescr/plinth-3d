@@ -17,6 +17,7 @@ plinth-chitubox = { path = "crates/chitubox" }
 plinth-support = { path = "crates/support" }
 plinth-emit = { path = "crates/emit" }
 plinth-cli = { path = "crates/cli" }
+proptest = { version = "1.12.0", default-features = true }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
