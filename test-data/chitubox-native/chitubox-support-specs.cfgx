@@ -1,0 +1,1089 @@
+{
+    "create_time": "",
+    "id": "",
+    "version": "",
+    "printerinfo": {
+        "vendor": "ELEGOO",
+        "direction_type": "Front",
+        "input_slice_suffixs": "CHITUBOX slicer(*.cbddlp);;CHITUBOX slicer(*.ctb);;Photon Series(*.photon);;WoW(*.wow);;Fhd(*.fhd);;SLC(*.slc);;ZIP(*.zip);;NOVA3D(*.cws);;CHITUBOX general format(*.gf);;Phrozen file(*.phz);;FlashDLPrint file(*.svgx);;fdg(*.fdg);;Goo(*.goo);;Prz(*.prz)",
+        "output_slice_suffixs": "CHITUBOX slicer(*.ctb);;CHITUBOX slicer(*.goo)",
+        "net_send_slice_suffixs": "CHITUBOX slicer(*.ctb);;CHITUBOX slicer(*.goo)",
+        "netsending": {
+            "currentvalue": true
+        },
+        "machinetype": {
+            "currentvalue": "ELEGOO Saturn 4 Ultra 16K"
+        },
+        "machinename": {
+            "currentvalue": "ELEGOO Saturn 4 Ultra 16K"
+        },
+        "projecttype": {
+            "currentvalue": 1
+        },
+        "resolutionx": {
+            "currentvalue": 15120
+        },
+        "resolutiony": {
+            "currentvalue": 6230
+        },
+        "machinewidth": {
+            "currentvalue": 211.67999267578125
+        },
+        "machinedepth": {
+            "currentvalue": 118.37000274658203
+        },
+        "machineheight": {
+            "currentvalue": 220.0
+        },
+        "blockxysizeRatio": {
+            "currentvalue": false
+        },
+        "resolutionLock": {
+            "currentvalue": false
+        },
+        "sizeLock": {
+            "currentvalue": false
+        },
+        "bdisplaycorrectenable": {
+            "currentvalue": false
+        },
+        "displaycorrectlefttopx": {
+            "currentvalue": 0.0
+        },
+        "displaycorrectlefttopy": {
+            "currentvalue": 0.0
+        },
+        "displaycorrectrighttopx": {
+            "currentvalue": 0.0
+        },
+        "displaycorrectrighttopy": {
+            "currentvalue": 0.0
+        },
+        "displaycorrectleftbottomx": {
+            "currentvalue": 0.0
+        },
+        "displaycorrectleftbottomy": {
+            "currentvalue": 0.0
+        },
+        "displaycorrectrightbottomx": {
+            "currentvalue": 0.0
+        },
+        "displaycorrectrightbottomy": {
+            "currentvalue": 0.0
+        },
+        "bbuildareaoffsetenable": {
+            "currentvalue": false
+        },
+        "buildareaoffsetleft": {
+            "currentvalue": 0.0
+        },
+        "buildareaoffsetright": {
+            "currentvalue": 0.0
+        },
+        "buildareaoffsettop": {
+            "currentvalue": 0.0
+        },
+        "buildareaoffsetbottom": {
+            "currentvalue": 0.0
+        },
+        "printtype": {
+            "currentvalue": 0
+        },
+        "mirrortype": {
+            "currentvalue": 0
+        },
+        "sliceformat": {
+            "currentvalue": 0
+        },
+        "zliftheightinsupportmode": {
+            "currentvalue": 3.0
+        },
+        "raftshape": {
+            "currentvalue": 4
+        },
+        "autoSupportMode": {
+            "currentvalue": 2
+        },
+        "autoSupportType": {
+            "currentvalue": 2
+        }
+    },
+    "current_support": 2,
+    "current_material": 0,
+    "current_magic": 0,
+    "current_multislice": 0,
+    "material": [],
+    "support": [
+        {
+            "visible": true,
+            "support_profile_id": 1784995636706665,
+            "id": "",
+            "name": "Light",
+            "material": "",
+            "material_id": "",
+            "top_support": {
+                "visible": true,
+                "supporttouchtipshape": {
+                    "currentvalue": 0
+                },
+                "supporttouchtipdiameter": {
+                    "currentvalue": 0.3
+                },
+                "supporttiptouchdepth": {
+                    "currentvalue": 0.1
+                },
+                "supporttipshape": {
+                    "currentvalue": 0
+                },
+                "supporttipupdiameter": {
+                    "currentvalue": 0.2
+                },
+                "supporttipdowndiameter": {
+                    "currentvalue": 0.6
+                },
+                "supporttiplength": {
+                    "currentvalue": 2.0
+                }
+            },
+            "middle_support": {
+                "visible": true,
+                "supportmiddleshape": {
+                    "currentvalue": 2
+                },
+                "supportmiddlediameter": {
+                    "currentvalue": 0.6
+                },
+                "supportmiddlediameter2": {
+                    "currentvalue": 0.6
+                },
+                "supportmiddlemaxconnectangle": {
+                    "currentvalue": 70.0
+                },
+                "supportmiddlesmallpillarshape": {
+                    "currentvalue": 0
+                },
+                "supportmiddlesmallpillardiameter": {
+                    "currentvalue": 0.15
+                },
+                "supportmiddlesmallpillartouchdiameter": {
+                    "currentvalue": 0.2
+                },
+                "supportmiddlesmallpillaruppercontactdepth": {
+                    "currentvalue": 0.1
+                },
+                "supportmiddlesmallpillarlowercontactdepth": {
+                    "currentvalue": 0.1
+                }
+            },
+            "bottom_support": {
+                "visible": true,
+                "supportbottomshape": {
+                    "currentvalue": 1
+                },
+                "supportbottomdiameter": {
+                    "currentvalue": 10.0
+                },
+                "supportbottomthickness": {
+                    "currentvalue": 0.8
+                },
+                "supporttouchtailshape": {
+                    "currentvalue": 0
+                },
+                "supporttouchtailpoint": {
+                    "currentvalue": 0
+                },
+                "supporttouchtaildiameter": {
+                    "currentvalue": 0.35
+                },
+                "supporttailtouchdepth": {
+                    "currentvalue": 0.15
+                }
+            },
+            "raft_support": {
+                "visible": true,
+                "raftshape": {
+                    "currentvalue": 2
+                },
+                "raftarearatio": {
+                    "currentvalue": 110.0
+                },
+                "raftthickness": {
+                    "currentvalue": 0.2
+                },
+                "raftheight": {
+                    "currentvalue": 1.8
+                },
+                "raftangle": {
+                    "currentvalue": 30.0
+                },
+                "raftgridpolylen": {
+                    "currentvalue": 2.0
+                },
+                "raftgridwidth": {
+                    "currentvalue": 2.0
+                },
+                "raft_protect_case": {
+                    "currentvalue": 0
+                },
+                "raft_distance_wall_to_model": {
+                    "currentvalue": 0.5
+                },
+                "raft_distance_from_height_model": {
+                    "currentvalue": 2.5
+                }
+            },
+            "support_general_para": {
+                "visible": true,
+                "supportdensity": {
+                    "currentvalue": 50.0
+                },
+                "supportlengthmin": {
+                    "currentvalue": 5.0
+                },
+                "autosupportangle": {
+                    "currentvalue": 45.0
+                },
+                "touchtipdistance": {
+                    "currentvalue": 6.0
+                },
+                "zliftheightinsupportmode": {
+                    "currentvalue": 5.0
+                },
+                "supportconnminheight": {
+                    "currentvalue": 3.0
+                },
+                "supportcrosswidth": {
+                    "currentvalue": 4.0
+                },
+                "supporthiddenangle": {
+                    "currentvalue": 45.0
+                },
+                "benablesupportmodelcenter": {
+                    "currentvalue": false
+                },
+                "bshowsupportguideline": {
+                    "currentvalue": true
+                },
+                "mbrealtimeaddsup": {
+                    "currentvalue": true
+                },
+                "supportcrossenable": {
+                    "currentvalue": true
+                },
+                "supportinshellenable": {
+                    "currentvalue": true
+                },
+                "supportEnhancedAutomaticEnable": {
+                    "currentvalue": true
+                },
+                "supportslimattachflag": {
+                    "currentvalue": true
+                },
+                "minimalsupportcrossspacingz": {
+                    "currentvalue": 4.0
+                },
+                "maximalsupportcrossspacingxy": {
+                    "currentvalue": 15.0
+                },
+                "supportmarginfromedge": {
+                    "currentvalue": 0.5
+                },
+                "supportspacingfrommodel": {
+                    "currentvalue": 0.6
+                },
+                "supportmaxsmallpillarlength": {
+                    "currentvalue": 3.0
+                },
+                "supportmaxoffsetfromcontact": {
+                    "currentvalue": 8.0
+                },
+                "supportcrossdiameter": {
+                    "currentvalue": 0.5
+                },
+                "heightofboss": {
+                    "currentvalue": 1.0
+                },
+                "distforktohornend": {
+                    "currentvalue": 0.0
+                },
+                "triggerheightofLowmidsupdiam": {
+                    "currentvalue": 5.0
+                },
+                "radiusofadsorption": {
+                    "currentvalue": 8.0
+                },
+                "modelbottomsupportdensity": {
+                    "currentvalue": 100.0
+                },
+                "diameterofbossbottom": {
+                    "currentvalue": 2.2
+                },
+                "middlesupportdistance": {
+                    "currentvalue": 8.0
+                },
+                "autoSupportAvoidHoles": {
+                    "currentvalue": false
+                },
+                "enhancedAutoSupportMode": {
+                    "currentvalue": 2
+                },
+                "generateBidirectionalCrossStructure": {
+                    "currentvalue": false
+                },
+                "autoSnapping": {
+                    "currentvalue": false
+                },
+                "maxSnappingAngle": {
+                    "currentvalue": 0.0
+                },
+                "boundarySupportAdditionMode": {
+                    "currentvalue": 0
+                },
+                "supportSpacingDistributionPattern": {
+                    "currentvalue": 1
+                },
+                "directAdsorb": {
+                    "currentvalue": true
+                },
+                "doublePointAdsorb": {
+                    "currentvalue": true
+                },
+                "littlePillarAdsorb": {
+                    "currentvalue": true
+                }
+            }
+        },
+        {
+            "visible": true,
+            "support_profile_id": 1763938025696471,
+            "id": "",
+            "name": "Middle",
+            "material": "",
+            "material_id": "",
+            "top_support": {
+                "visible": true,
+                "supporttouchtipshape": {
+                    "currentvalue": 0
+                },
+                "supporttouchtipdiameter": {
+                    "currentvalue": 0.5
+                },
+                "supporttiptouchdepth": {
+                    "currentvalue": 0.2
+                },
+                "supporttipshape": {
+                    "currentvalue": 0
+                },
+                "supporttipupdiameter": {
+                    "currentvalue": 0.4
+                },
+                "supporttipdowndiameter": {
+                    "currentvalue": 1.2
+                },
+                "supporttiplength": {
+                    "currentvalue": 2.0
+                }
+            },
+            "middle_support": {
+                "visible": true,
+                "supportmiddleshape": {
+                    "currentvalue": 2
+                },
+                "supportmiddlediameter": {
+                    "currentvalue": 1.2
+                },
+                "supportmiddlediameter2": {
+                    "currentvalue": 1.2
+                },
+                "supportmiddlemaxconnectangle": {
+                    "currentvalue": 70.0
+                },
+                "supportmiddlesmallpillarshape": {
+                    "currentvalue": 0
+                },
+                "supportmiddlesmallpillardiameter": {
+                    "currentvalue": 0.5
+                },
+                "supportmiddlesmallpillartouchdiameter": {
+                    "currentvalue": 0.3
+                },
+                "supportmiddlesmallpillaruppercontactdepth": {
+                    "currentvalue": 0.15
+                },
+                "supportmiddlesmallpillarlowercontactdepth": {
+                    "currentvalue": 0.15
+                }
+            },
+            "bottom_support": {
+                "visible": true,
+                "supportbottomshape": {
+                    "currentvalue": 1
+                },
+                "supportbottomdiameter": {
+                    "currentvalue": 12.0
+                },
+                "supportbottomthickness": {
+                    "currentvalue": 1.0
+                },
+                "supporttouchtailshape": {
+                    "currentvalue": 0
+                },
+                "supporttouchtailpoint": {
+                    "currentvalue": 0
+                },
+                "supporttouchtaildiameter": {
+                    "currentvalue": 0.5
+                },
+                "supporttailtouchdepth": {
+                    "currentvalue": 0.2
+                }
+            },
+            "raft_support": {
+                "visible": true,
+                "raftshape": {
+                    "currentvalue": 2
+                },
+                "raftarearatio": {
+                    "currentvalue": 110.0
+                },
+                "raftthickness": {
+                    "currentvalue": 0.2
+                },
+                "raftheight": {
+                    "currentvalue": 1.8
+                },
+                "raftangle": {
+                    "currentvalue": 30.0
+                },
+                "raftgridpolylen": {
+                    "currentvalue": 2.0
+                },
+                "raftgridwidth": {
+                    "currentvalue": 2.0
+                },
+                "raft_protect_case": {
+                    "currentvalue": 0
+                },
+                "raft_distance_wall_to_model": {
+                    "currentvalue": 0.5
+                },
+                "raft_distance_from_height_model": {
+                    "currentvalue": 2.5
+                }
+            },
+            "support_general_para": {
+                "visible": true,
+                "supportdensity": {
+                    "currentvalue": 50.0
+                },
+                "supportlengthmin": {
+                    "currentvalue": 5.0
+                },
+                "autosupportangle": {
+                    "currentvalue": 45.0
+                },
+                "touchtipdistance": {
+                    "currentvalue": 8.0
+                },
+                "zliftheightinsupportmode": {
+                    "currentvalue": 5.0
+                },
+                "supportconnminheight": {
+                    "currentvalue": 3.0
+                },
+                "supportcrosswidth": {
+                    "currentvalue": 4.0
+                },
+                "supporthiddenangle": {
+                    "currentvalue": 45.0
+                },
+                "benablesupportmodelcenter": {
+                    "currentvalue": false
+                },
+                "bshowsupportguideline": {
+                    "currentvalue": true
+                },
+                "mbrealtimeaddsup": {
+                    "currentvalue": true
+                },
+                "supportcrossenable": {
+                    "currentvalue": true
+                },
+                "supportinshellenable": {
+                    "currentvalue": true
+                },
+                "supportEnhancedAutomaticEnable": {
+                    "currentvalue": true
+                },
+                "supportslimattachflag": {
+                    "currentvalue": true
+                },
+                "minimalsupportcrossspacingz": {
+                    "currentvalue": 2.0
+                },
+                "maximalsupportcrossspacingxy": {
+                    "currentvalue": 30.0
+                },
+                "supportmarginfromedge": {
+                    "currentvalue": 0.5
+                },
+                "supportspacingfrommodel": {
+                    "currentvalue": 0.6
+                },
+                "supportmaxsmallpillarlength": {
+                    "currentvalue": 3.0
+                },
+                "supportmaxoffsetfromcontact": {
+                    "currentvalue": 15.0
+                },
+                "supportcrossdiameter": {
+                    "currentvalue": 0.8
+                },
+                "heightofboss": {
+                    "currentvalue": 1.0
+                },
+                "distforktohornend": {
+                    "currentvalue": 0.0
+                },
+                "triggerheightofLowmidsupdiam": {
+                    "currentvalue": 5.0
+                },
+                "radiusofadsorption": {
+                    "currentvalue": 8.0
+                },
+                "modelbottomsupportdensity": {
+                    "currentvalue": 100.0
+                },
+                "diameterofbossbottom": {
+                    "currentvalue": 2.2
+                },
+                "middlesupportdistance": {
+                    "currentvalue": 12.0
+                },
+                "autoSupportAvoidHoles": {
+                    "currentvalue": false
+                },
+                "enhancedAutoSupportMode": {
+                    "currentvalue": 3
+                },
+                "generateBidirectionalCrossStructure": {
+                    "currentvalue": false
+                },
+                "autoSnapping": {
+                    "currentvalue": false
+                },
+                "maxSnappingAngle": {
+                    "currentvalue": 0.0
+                },
+                "boundarySupportAdditionMode": {
+                    "currentvalue": 0
+                },
+                "supportSpacingDistributionPattern": {
+                    "currentvalue": 1
+                },
+                "directAdsorb": {
+                    "currentvalue": true
+                },
+                "doublePointAdsorb": {
+                    "currentvalue": true
+                },
+                "littlePillarAdsorb": {
+                    "currentvalue": true
+                }
+            }
+        },
+        {
+            "visible": true,
+            "support_profile_id": 1762198867544547,
+            "id": "",
+            "name": "Heavy",
+            "material": "",
+            "material_id": "",
+            "top_support": {
+                "visible": true,
+                "supporttouchtipshape": {
+                    "currentvalue": 0
+                },
+                "supporttouchtipdiameter": {
+                    "currentvalue": 0.8
+                },
+                "supporttiptouchdepth": {
+                    "currentvalue": 0.3
+                },
+                "supporttipshape": {
+                    "currentvalue": 0
+                },
+                "supporttipupdiameter": {
+                    "currentvalue": 0.6
+                },
+                "supporttipdowndiameter": {
+                    "currentvalue": 1.5
+                },
+                "supporttiplength": {
+                    "currentvalue": 3.0
+                }
+            },
+            "middle_support": {
+                "visible": true,
+                "supportmiddleshape": {
+                    "currentvalue": 2
+                },
+                "supportmiddlediameter": {
+                    "currentvalue": 1.5
+                },
+                "supportmiddlediameter2": {
+                    "currentvalue": 1.5
+                },
+                "supportmiddlemaxconnectangle": {
+                    "currentvalue": 70.0
+                },
+                "supportmiddlesmallpillarshape": {
+                    "currentvalue": 0
+                },
+                "supportmiddlesmallpillardiameter": {
+                    "currentvalue": 0.5
+                },
+                "supportmiddlesmallpillartouchdiameter": {
+                    "currentvalue": 0.5
+                },
+                "supportmiddlesmallpillaruppercontactdepth": {
+                    "currentvalue": 0.2
+                },
+                "supportmiddlesmallpillarlowercontactdepth": {
+                    "currentvalue": 0.2
+                }
+            },
+            "bottom_support": {
+                "visible": true,
+                "supportbottomshape": {
+                    "currentvalue": 1
+                },
+                "supportbottomdiameter": {
+                    "currentvalue": 12.0
+                },
+                "supportbottomthickness": {
+                    "currentvalue": 1.0
+                },
+                "supporttouchtailshape": {
+                    "currentvalue": 0
+                },
+                "supporttouchtailpoint": {
+                    "currentvalue": 1
+                },
+                "supporttouchtaildiameter": {
+                    "currentvalue": 0.35
+                },
+                "supporttailtouchdepth": {
+                    "currentvalue": 0.15
+                }
+            },
+            "raft_support": {
+                "visible": true,
+                "raftshape": {
+                    "currentvalue": 2
+                },
+                "raftarearatio": {
+                    "currentvalue": 110.0
+                },
+                "raftthickness": {
+                    "currentvalue": 0.2
+                },
+                "raftheight": {
+                    "currentvalue": 1.8
+                },
+                "raftangle": {
+                    "currentvalue": 30.0
+                },
+                "raftgridpolylen": {
+                    "currentvalue": 2.0
+                },
+                "raftgridwidth": {
+                    "currentvalue": 2.0
+                },
+                "raft_protect_case": {
+                    "currentvalue": 0
+                },
+                "raft_distance_wall_to_model": {
+                    "currentvalue": 0.5
+                },
+                "raft_distance_from_height_model": {
+                    "currentvalue": 2.5
+                }
+            },
+            "support_general_para": {
+                "visible": true,
+                "supportdensity": {
+                    "currentvalue": 50.0
+                },
+                "supportlengthmin": {
+                    "currentvalue": 5.0
+                },
+                "autosupportangle": {
+                    "currentvalue": 45.0
+                },
+                "touchtipdistance": {
+                    "currentvalue": 8.0
+                },
+                "zliftheightinsupportmode": {
+                    "currentvalue": 5.0
+                },
+                "supportconnminheight": {
+                    "currentvalue": 3.0
+                },
+                "supportcrosswidth": {
+                    "currentvalue": 4.0
+                },
+                "supporthiddenangle": {
+                    "currentvalue": 45.0
+                },
+                "benablesupportmodelcenter": {
+                    "currentvalue": false
+                },
+                "bshowsupportguideline": {
+                    "currentvalue": true
+                },
+                "mbrealtimeaddsup": {
+                    "currentvalue": true
+                },
+                "supportcrossenable": {
+                    "currentvalue": true
+                },
+                "supportinshellenable": {
+                    "currentvalue": true
+                },
+                "supportEnhancedAutomaticEnable": {
+                    "currentvalue": true
+                },
+                "supportslimattachflag": {
+                    "currentvalue": true
+                },
+                "minimalsupportcrossspacingz": {
+                    "currentvalue": 2.0
+                },
+                "maximalsupportcrossspacingxy": {
+                    "currentvalue": 30.0
+                },
+                "supportmarginfromedge": {
+                    "currentvalue": 0.5
+                },
+                "supportspacingfrommodel": {
+                    "currentvalue": 0.6
+                },
+                "supportmaxsmallpillarlength": {
+                    "currentvalue": 3.0
+                },
+                "supportmaxoffsetfromcontact": {
+                    "currentvalue": 15.0
+                },
+                "supportcrossdiameter": {
+                    "currentvalue": 0.8
+                },
+                "heightofboss": {
+                    "currentvalue": 1.0
+                },
+                "distforktohornend": {
+                    "currentvalue": 0.0
+                },
+                "triggerheightofLowmidsupdiam": {
+                    "currentvalue": 5.0
+                },
+                "radiusofadsorption": {
+                    "currentvalue": 8.0
+                },
+                "modelbottomsupportdensity": {
+                    "currentvalue": 100.0
+                },
+                "diameterofbossbottom": {
+                    "currentvalue": 2.2
+                },
+                "middlesupportdistance": {
+                    "currentvalue": 12.0
+                },
+                "autoSupportAvoidHoles": {
+                    "currentvalue": false
+                },
+                "enhancedAutoSupportMode": {
+                    "currentvalue": 3
+                },
+                "generateBidirectionalCrossStructure": {
+                    "currentvalue": true
+                },
+                "autoSnapping": {
+                    "currentvalue": false
+                },
+                "maxSnappingAngle": {
+                    "currentvalue": 0.0
+                },
+                "boundarySupportAdditionMode": {
+                    "currentvalue": 0
+                },
+                "supportSpacingDistributionPattern": {
+                    "currentvalue": 1
+                },
+                "directAdsorb": {
+                    "currentvalue": true
+                },
+                "doublePointAdsorb": {
+                    "currentvalue": true
+                },
+                "littlePillarAdsorb": {
+                    "currentvalue": true
+                }
+            }
+        },
+        {
+            "visible": true,
+            "support_profile_id": 1763938025696475,
+            "id": "",
+            "name": "Ultralight",
+            "material": "",
+            "material_id": "",
+            "top_support": {
+                "visible": true,
+                "supporttouchtipshape": {
+                    "currentvalue": 0
+                },
+                "supporttouchtipdiameter": {
+                    "currentvalue": 0.2
+                },
+                "supporttiptouchdepth": {
+                    "currentvalue": 0.1
+                },
+                "supporttipshape": {
+                    "currentvalue": 0
+                },
+                "supporttipupdiameter": {
+                    "currentvalue": 0.15
+                },
+                "supporttipdowndiameter": {
+                    "currentvalue": 0.3
+                },
+                "supporttiplength": {
+                    "currentvalue": 1.5
+                }
+            },
+            "middle_support": {
+                "visible": true,
+                "supportmiddleshape": {
+                    "currentvalue": 2
+                },
+                "supportmiddlediameter": {
+                    "currentvalue": 0.5
+                },
+                "supportmiddlediameter2": {
+                    "currentvalue": 0.7
+                },
+                "supportmiddlemaxconnectangle": {
+                    "currentvalue": 70.0
+                },
+                "supportmiddlesmallpillarshape": {
+                    "currentvalue": 0
+                },
+                "supportmiddlesmallpillardiameter": {
+                    "currentvalue": 0.1
+                },
+                "supportmiddlesmallpillartouchdiameter": {
+                    "currentvalue": 0.2
+                },
+                "supportmiddlesmallpillaruppercontactdepth": {
+                    "currentvalue": 0.1
+                },
+                "supportmiddlesmallpillarlowercontactdepth": {
+                    "currentvalue": 0.1
+                }
+            },
+            "bottom_support": {
+                "visible": true,
+                "supportbottomshape": {
+                    "currentvalue": 1
+                },
+                "supportbottomdiameter": {
+                    "currentvalue": 10.0
+                },
+                "supportbottomthickness": {
+                    "currentvalue": 0.8
+                },
+                "supporttouchtailshape": {
+                    "currentvalue": 0
+                },
+                "supporttouchtailpoint": {
+                    "currentvalue": 0
+                },
+                "supporttouchtaildiameter": {
+                    "currentvalue": 0.25
+                },
+                "supporttailtouchdepth": {
+                    "currentvalue": 0.15
+                }
+            },
+            "raft_support": {
+                "visible": true,
+                "raftshape": {
+                    "currentvalue": 2
+                },
+                "raftarearatio": {
+                    "currentvalue": 110.0
+                },
+                "raftthickness": {
+                    "currentvalue": 0.2
+                },
+                "raftheight": {
+                    "currentvalue": 1.8
+                },
+                "raftangle": {
+                    "currentvalue": 30.0
+                },
+                "raftgridpolylen": {
+                    "currentvalue": 2.0
+                },
+                "raftgridwidth": {
+                    "currentvalue": 2.0
+                },
+                "raft_protect_case": {
+                    "currentvalue": 0
+                },
+                "raft_distance_wall_to_model": {
+                    "currentvalue": 0.5
+                },
+                "raft_distance_from_height_model": {
+                    "currentvalue": 2.5
+                }
+            },
+            "support_general_para": {
+                "visible": true,
+                "supportdensity": {
+                    "currentvalue": 50.0
+                },
+                "supportlengthmin": {
+                    "currentvalue": 5.0
+                },
+                "autosupportangle": {
+                    "currentvalue": 45.0
+                },
+                "touchtipdistance": {
+                    "currentvalue": 4.0
+                },
+                "zliftheightinsupportmode": {
+                    "currentvalue": 5.0
+                },
+                "supportconnminheight": {
+                    "currentvalue": 3.0
+                },
+                "supportcrosswidth": {
+                    "currentvalue": 4.0
+                },
+                "supporthiddenangle": {
+                    "currentvalue": 45.0
+                },
+                "benablesupportmodelcenter": {
+                    "currentvalue": false
+                },
+                "bshowsupportguideline": {
+                    "currentvalue": true
+                },
+                "mbrealtimeaddsup": {
+                    "currentvalue": true
+                },
+                "supportcrossenable": {
+                    "currentvalue": true
+                },
+                "supportinshellenable": {
+                    "currentvalue": true
+                },
+                "supportEnhancedAutomaticEnable": {
+                    "currentvalue": true
+                },
+                "supportslimattachflag": {
+                    "currentvalue": true
+                },
+                "minimalsupportcrossspacingz": {
+                    "currentvalue": 4.0
+                },
+                "maximalsupportcrossspacingxy": {
+                    "currentvalue": 15.0
+                },
+                "supportmarginfromedge": {
+                    "currentvalue": 0.5
+                },
+                "supportspacingfrommodel": {
+                    "currentvalue": 0.6
+                },
+                "supportmaxsmallpillarlength": {
+                    "currentvalue": 3.0
+                },
+                "supportmaxoffsetfromcontact": {
+                    "currentvalue": 8.0
+                },
+                "supportcrossdiameter": {
+                    "currentvalue": 0.3
+                },
+                "heightofboss": {
+                    "currentvalue": 1.0
+                },
+                "distforktohornend": {
+                    "currentvalue": 0.0
+                },
+                "triggerheightofLowmidsupdiam": {
+                    "currentvalue": 5.0
+                },
+                "radiusofadsorption": {
+                    "currentvalue": 8.0
+                },
+                "modelbottomsupportdensity": {
+                    "currentvalue": 100.0
+                },
+                "diameterofbossbottom": {
+                    "currentvalue": 2.2
+                },
+                "middlesupportdistance": {
+                    "currentvalue": 8.0
+                },
+                "autoSupportAvoidHoles": {
+                    "currentvalue": false
+                },
+                "enhancedAutoSupportMode": {
+                    "currentvalue": 2
+                },
+                "generateBidirectionalCrossStructure": {
+                    "currentvalue": false
+                },
+                "autoSnapping": {
+                    "currentvalue": false
+                },
+                "maxSnappingAngle": {
+                    "currentvalue": 0.0
+                },
+                "boundarySupportAdditionMode": {
+                    "currentvalue": 1
+                },
+                "supportSpacingDistributionPattern": {
+                    "currentvalue": 0
+                },
+                "directAdsorb": {
+                    "currentvalue": true
+                },
+                "doublePointAdsorb": {
+                    "currentvalue": true
+                },
+                "littlePillarAdsorb": {
+                    "currentvalue": true
+                }
+            }
+        }
+    ],
+    "magic": [],
+    "multiSliceConfig": {
+        "areaSliceModel": {
+            "defaultProFileCurIndex": 0,
+            "sliceModel": []
+        },
+        "heightSliceModel": {
+            "defaultProFileCurIndex": 0,
+            "sliceModel": []
+        },
+        "modelSliceModel": {
+            "defaultProFileCurIndex": 0,
+            "sliceModel": []
+        }
+    }
+}

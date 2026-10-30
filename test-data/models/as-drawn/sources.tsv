@@ -1,0 +1,22 @@
+# corpus/as-drawn/sources.tsv: the recipe for every file in this folder.
+#
+# One row per committed <stem>.stl. Each has an empty <stem>.asdrawn marker beside it.
+# Columns (tab-separated):
+#   stem           the model name; the committed file is corpus/as-drawn/<stem>.stl
+#   source         the provisioned original, relative to the repository root
+#   turn           x180 = turned 180 deg about X by plinth_mesh::turn_binary_stl_x180;
+#                  none = an exact byte copy (the source is already drawn the way the owner wants it)
+#   source_sha256  sha256 of the provisioned source; a different source is refused
+#   result_sha256  sha256 of the committed file
+#
+# Made, and checked, ONLY by the example (never by hand):
+#   cargo run --profile gate --offline -p plinth-mesh --example as_drawn_corpus            # write
+#   cargo run --profile gate --offline -p plinth-mesh --example as_drawn_corpus -- --check # verify only
+# plinth-orient's `as_drawn_corpus` tests regenerate every row from its source and compare byte for byte.
+#
+# stem	source	turn	source_sha256	result_sha256
+Round_25	corpus/models/Round_25.stl	x180	c293b0b6a397cc62a25445a1281ece7dbfb6c6ae07c68d0f3f191e10a35b2b17	c470ac7749ec9fe02c32fed68580e75923107917929e4c5d008769291478cdc7
+Round_50	corpus/models/Round_50.stl	x180	f2de1f789a9ed2bfbf2dafb65b8e3f44dcd391de7c0da3563dde8ba97d13d104	93f2b0d037681aaad36fd0676964e648a7482c4d6c19fba149661f95befb1e91
+Round_100	corpus/models/Round_100.stl	x180	cb6b4b0687f1e8f02a8fc59dc1391931e615417c42a23a398ad8824c65d04f82	c399c1f04c86e2617e4cb806288ecb0a13da12d7e3eee832cd0f7f7800dc7554
+make_overhang_table	corpus/models/make_overhang_table.stl	none	a776132a2cc4a43298d9ca646a4265a7ba60ed7d37de7618147ac754dfe8c996	a776132a2cc4a43298d9ca646a4265a7ba60ed7d37de7618147ac754dfe8c996
+make_raking_blade	corpus/models/make_raking_blade.stl	x180	0979f5812c26b3bd88f6e36bb792573fbdc9c023656c46544f2bffdecddefb97	c6f77ffd8df98d31680ab39439d9412381d661f9f2bca19f2a2dda7d2b67615a

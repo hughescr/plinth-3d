@@ -1,0 +1,1222 @@
+{
+  "join": {
+    "cell_summary": [
+      {
+        "orientation": "Vertical",
+        "radius_mm": 0.3,
+        "outcomes_by_span": "span6=V11 present_intact | span12=V21 permanently_bent | span18=V31 permanently_bent | span24=V41 permanently_bent -> intact 1, bent 3, failed 0. Boundary: vertical r=0.30 survives 6 mm only; every span >=12 mm takes permanent set but no head is lost."
+      },
+      {
+        "orientation": "Vertical",
+        "radius_mm": 0.5,
+        "outcomes_by_span": "span6=V12 present_intact | span12=V22 MISSING (head off support, shaft present) | span18=V32 MISSING (head off support, shaft present) | span24=V42 present_intact -> intact 2, bent 0, failed 2. NON-MONOTONIC: the two mid spans lost heads while the longest span survived intact. This is the single most physics-inconsistent cell block on the plate."
+      },
+      {
+        "orientation": "Vertical",
+        "radius_mm": 0.7,
+        "outcomes_by_span": "span6=V13 | span12=V23 | span18=V33 | span24=V43 all present_intact -> intact 4, bent 0, failed 0."
+      },
+      {
+        "orientation": "Vertical",
+        "radius_mm": 0.9,
+        "outcomes_by_span": "span6=V14 | span12=V24 | span18=V34 | span24=V44 all present_intact -> intact 4, bent 0, failed 0."
+      },
+      {
+        "orientation": "ProjectPositiveY",
+        "radius_mm": 0.3,
+        "outcomes_by_span": "span6=Y11 present_intact | span12=Y21 present_intact | span18=Y31 permanently_bent | span24=Y41 permanently_bent -> intact 2, bent 2, failed 0. OWNER CAVEAT: heads on Y31/Y41 fully formed; owner attributes the bend to plate removal (S2 guard stands were grounded to the build plate, not to the assembly base, and broke during removal), not to printing. If the caveat is accepted this cell is intact 4 / bent 0 and the S2 strip carries NO print-attributable failures."
+      },
+      {
+        "orientation": "ProjectPositiveY",
+        "radius_mm": 0.5,
+        "outcomes_by_span": "span6=Y12 | span12=Y22 | span18=Y32 | span24=Y42 all present_intact -> intact 4, bent 0, failed 0."
+      },
+      {
+        "orientation": "ProjectPositiveY",
+        "radius_mm": 0.7,
+        "outcomes_by_span": "span6=Y13 | span12=Y23 | span18=Y33 | span24=Y43 all present_intact -> intact 4, bent 0, failed 0."
+      },
+      {
+        "orientation": "ProjectPositiveY",
+        "radius_mm": 0.9,
+        "outcomes_by_span": "span6=Y14 | span12=Y24 | span18=Y34 | span24=Y44 all present_intact -> intact 4, bent 0, failed 0."
+      },
+      {
+        "orientation": "ProjectPositiveX",
+        "radius_mm": 0.3,
+        "outcomes_by_span": "span6=X11 present_intact | span12=X21 present_intact | span18=X31 permanently_bent (worse of the two) | span24=X41 permanently_bent_uncertain (slight bend AND glued to its guard posts; owner scores '??', suspects post-removal wet-resin contact that cured in place) -> intact 2, bent 1, bent-uncertain 1, failed 0. Same boundary shape as ProjectPositiveY r=0.30: survives to 12 mm, bends at 18 mm and beyond."
+      },
+      {
+        "orientation": "ProjectPositiveX",
+        "radius_mm": 0.5,
+        "outcomes_by_span": "span6=X12 | span12=X22 | span18=X32 | span24=X42 all present_intact -> intact 4, bent 0, failed 0. (S3B strip, y=+5.)"
+      },
+      {
+        "orientation": "ProjectPositiveX",
+        "radius_mm": 0.7,
+        "outcomes_by_span": "span6=X13 | span12=X23 | span18=X33 | span24=X43 all present_intact -> intact 4, bent 0, failed 0. (S3A strip, y=-9.)"
+      },
+      {
+        "orientation": "ProjectPositiveX",
+        "radius_mm": 0.9,
+        "outcomes_by_span": "span6=X14 | span12=X24 | span18=X34 | span24=X44 all present_intact -> intact 4, bent 0, failed 0. (S3B strip, y=+5.)"
+      },
+      {
+        "orientation": "ProjectPositiveX (braced, S4)",
+        "radius_mm": 0.5,
+        "outcomes_by_span": "all span18: BX50 brace=None MISSING (head not attached to support) | BX51 brace=Single present_intact | BX52 brace=X present_intact -> intact 2, bent 0, failed 1. The only unbraced r=0.5/18 mm X specimen failed; its two braced siblings at the same radius/span survived. Confounded with plate position (BX50 is the -X-most S4 specimen; see edge_analysis)."
+      },
+      {
+        "orientation": "ProjectPositiveX (braced, S4)",
+        "radius_mm": 0.9,
+        "outcomes_by_span": "all span18: BX90 brace=None | BX91 brace=Single | BX92 brace=X all present_intact -> intact 3, bent 0, failed 0."
+      },
+      {
+        "orientation": "ProjectPositiveY (braced, S4)",
+        "radius_mm": 0.5,
+        "outcomes_by_span": "all span18: BY50 brace=None present_intact | BY51 brace=Single present_intact | BY52 brace=X present_intact -> intact 3, bent 0, failed 0. BY50 is the geometric twin of BX50 (same 18 mm span, same 0.5 mm radius, same head/support, no brace) differing only in project axis and plate X position, and it survived. Owner flags this as anomalous; it is the cleanest position-vs-geometry contrast on the plate."
+      },
+      {
+        "orientation": "ProjectPositiveY (braced, S4)",
+        "radius_mm": 0.9,
+        "outcomes_by_span": "all span18: BY90 brace=None | BY91 brace=Single | BY92 brace=X all present_intact -> intact 3, bent 0, failed 0."
+      },
+      {
+        "orientation": "Vertical (removal tiles, S5)",
+        "radius_mm": 0.65,
+        "outcomes_by_span": "all span10: T01 (contact 0.2r/0.4d) COLLAPSED - two left-most edge support pillars and the outer guard pillar failed, roof element came down | T02 (0.2/0.8) | T03 (0.3/0.4) | T04 (0.3/0.8) | T05 (0.4/0.4) | T06 (0.4/0.8) | T07 (0.5/0.4) | T08 (0.5/0.8) all present_intact -> intact 7, bent 0, failed 1. T01 and T02 share the same contact radius (0.2 mm), so contact geometry alone does not explain T01; owner recommends discounting T01 for physics."
+      },
+      {
+        "orientation": "Vertical (validity controls, S5)",
+        "radius_mm": 1.2,
+        "outcomes_by_span": "all span24, control_expectation=must_survive: CS1 (x=18) | CS2 (x=40) | CS3 (x=62) | CS4 (x=84) all present_intact -> intact 4, bent 0, failed 0. Strong-control gate PASSES 4/4."
+      },
+      {
+        "orientation": "Vertical (validity controls, S5)",
+        "radius_mm": 0.25,
+        "outcomes_by_span": "all span24, control_expectation=deliberately_marginal: CM1 (x=29) | CM2 (x=51) | CM3 (x=73) | CM4 (x=95) all MISSING -> intact 0, bent 0, failed 4. CM1/CM2/CM4: heads gone, support columns printed and still present though bent. CM3: only the very beginnings of a head present. Marginal-control sensitivity gate PASSES (>=1 shows sensitivity) but is saturated - 4/4 failed, so the CM ladder gives no gradation this run."
+      }
+    ],
+    "control_design": "CONTROL POSITIONS (all in strip S5-TILES-CONTROLS, all at y=+49.000 mm, base z=1.500, terminal z=25.500, alternating along +X on an 11 mm pitch starting after the tile block ends at x=-6):\n  CS1 x=+18.000  strip_order 9   r=1.20  span 24  must_survive          -> present_intact\n  CM1 x=+29.000  strip_order 10  r=0.25  span 24  deliberately_marginal -> missing (columns present but bent)\n  CS2 x=+40.000  strip_order 11  r=1.20  span 24  must_survive          -> present_intact\n  CM2 x=+51.000  strip_order 12  r=0.25  span 24  deliberately_marginal -> missing (columns present but bent)\n  CS3 x=+62.000  strip_order 13  r=1.20  span 24  must_survive          -> present_intact\n  CM3 x=+73.000  strip_order 14  r=0.25  span 24  deliberately_marginal -> missing (only the very beginnings of a head present)\n  CS4 x=+84.000  strip_order 15  r=1.20  span 24  must_survive          -> present_intact\n  CM4 x=+95.000  strip_order 16  r=0.25  span 24  deliberately_marginal -> missing (columns present but bent)\n\nMANIFEST-DECLARED DESIGN INTENT (home-support-calibration-manifest.json .specimens[], README.md \"Validity and repeats\"):\n  The ONLY design difference between CS and CM is shaft radius. Every other declared field is identical: family=validity_control, free_span_mm=24.0, angle_from_vertical_deg=0.0, orientation=vertical, brace=none, terminal_crossbar_length_mm=3.0, terminal_crossbar_radius_mm=1.5, debris_catcher=true, detachable_for_loading=true, base z=1.5, terminal z=25.5, y=49.0. Radius: CS = 1.200 mm, CM = 0.250 mm.\n  What makes CM \"deliberately marginal\" is therefore purely the section: radius ratio 4.8x, cross-sectional area ratio (1.2/0.25)^2 = 23.0x, second-moment-of-area ratio (1.2/0.25)^4 = 530.8x bending stiffness. CM's 0.25 mm radius is deliberately set BELOW the smallest radius anywhere in the experimental ladder (0.30 mm), so CM is an out-of-ladder floor, not an interpolation point.\n  Both control types are detachable_for_loading=true, i.e. both are intended to be cut off the carrier after cure and run through the lever fixture; the CM failures mean no marginal control reaches the fixture phase.\n  Placement intent, per README: \"The strong and deliberately marginal 24 mm controls are at matched height around the plate\" - matched terminal height (25.5 mm, the tallest feature class on the plate, equal to V41-V44) and distributed across the +X half of the rear strip so a positional gradient would show up as a CS/CM pattern rather than a single-point result.\n  Validity rule (README, \"Validity and repeats\"): \"A run is still reported if controls fail, but it is not used to infer a safe policy unless all strong controls survive and at least one marginal control shows the intended sensitivity.\"\n  VERDICT ON THE GATE: all 4 CS survived and all 4 CM failed, so both clauses are satisfied and this run MAY be used to infer a safe policy - subject to the separate README rule that one plate is one replicate and three independently prepared plates are required before promoting any exact tested cell. Caveat worth recording: the CM side is saturated (4/4 failed rather than a mix), so the marginal controls confirm sensitivity exists but cannot bound where it starts; and CS/CM show no positional gradient across x=18..95, which is evidence AGAINST a plate-wide +X positional effect (CS4 at x=84 and CM4 at x=95 behave exactly like CS1/CM1 at x=18/29).",
+    "data_issues": [
+      "PRINTED FILE IS NOT THE PREREGISTERED FILE (digest level). The protocol (README.md in /private/tmp/plinth-home-loading-fixture-inspection/) instructs printing home-support-calibration-plate.chitubox, sha256 807bc6483cac784c2ecf00be24717bdbbbb6cb5266da8058eff888bfeae37930, 26,101,380 bytes. The owner's record says the printed file was H2-exact-grounded-full-plate.chitubox, sha256 a33b2e10c1293b322f89fe2910c79055fa59b2d8b7bf3b2d4df64c804a53a679, 26,101,476 bytes (verified by shasum in /private/tmp/plinth-chitubox-diagnosis/). The two are NOT byte-identical: (a) the pre-mesh front descriptor block is 4,128 bytes in the protocol file vs 4,224 in H2 (+96 bytes), (b) every model record's mesh-offset field (record byte 272) is shifted by 96, (c) 75 float32 slots differ. This trips the protocol's fixed exclusion 'No auto-support, auto-repair, rescale, or layout change after preregistration' at the digest level even though geometry is unchanged (next item).",
+      "GEOMETRY IS EFFECTIVELY IDENTICAL between the two files: the 75 differing float32 slots are all in models 1/2/3 (S2-INCLINED-Y 30 slots, S3A-INCLINED-X 25, S3B-INCLINED-X 20), maximum absolute delta 9.5367431640625e-7 mm (one float32 ULP at ~9.8). Models 0, 4, 5 (S1, S4, S5) hash byte-identical. This is float regeneration noise, ~4 orders of magnitude below the manifest's own practical_change_threshold_mm of 0.1. No specimen moved.",
+      "H2 SPECIMEN POSITIONS MATCH THE MANIFEST EXACTLY, but the raw placement fields do NOT and will mislead anyone reading them directly. H2 model placement x/y are: S1 (0, -51), S2 (0, -30.31472015380859), S3A (-16, -9), S3B (-16, +5), S4 (0, +28), S5 (+2.9000015258789062, +49) - versus the older E-current-full-plate.chitubox placements S2 (0, -37) and S5 (+3.0, +49). The apparent -37 -> -30.3147 (delta +6.68528 in Y) and 3.0 -> 2.9000015 (delta -0.0999985 in X) shifts are exactly cancelled by the descriptors-only writer re-centering the merged triangle soup on its own bounding box. Verified by summing mesh bbox + placement: world bboxes are bit-for-bit equal in X and Y between E and H2 for all six assemblies (S1 x[-98.5,98.5] y[-57.25,-44.75]; S2 x[-95,95] y[-43.25,-17.3794]; S3A x[-96,64] y[-15.25,-2.75]; S3B x[-96,64] y[-1.25,11.25]; S4 x[-91,91] y[19,37]; S5 x[-96.2,102] y[40,58]). Every manifest base_x_mm/base_y_mm is therefore honoured by the printed file. Zero coordinate deltas to report.",
+      "Z CONVENTION DIFFERS FROM THE OLDER PLATE and is worth a sanity check in the GUI, though it is shared with the preregistered file so it is not an H2-specific deviation. E-current-full-plate has z_lift=0.75 with mesh bottom at local z=-0.75, i.e. the assembly base sits exactly on z=0. Both home-support-calibration-plate.chitubox and H2 have z_lift=+0 (IEEE +0) with the mesh centred on its own bbox, so the stored mesh bottom is at z=-13.375 (S1, S5), -9.8603 (S2, S3A, S3B) and -10.375 (S4). Taken literally each assembly is half-buried below the build plate; ChituBox evidently re-grounds on import (the print succeeded). The h2_audit tool (/private/tmp/plinth-chitubox-diagnosis/h2_audit/src/main.rs) exists solely to zero those six 4-byte placement-Z fields and prove the binary diff escapes nothing else - it changed exactly 18 bytes vs F-descriptors-only-full-plate.chitubox, all inside the six Z fields at file offsets 684, 1364, 2044, 2724, 3404, 4084.",
+      "THE PRINTED FILE CARRIES NO PER-SPECIMEN SUPPORT METADATA. H2 (like F and the preregistered plate) has support_record_count = 0 for all six models; the supports are baked into the ordinary model triangle soup. Confirmed by reconstruction: H2 model 0's 4,985,136-byte mesh = E's 432-byte model mesh + E's 4,984,704-byte support-mesh region, exactly. Consequence for this analysis: per-specimen geometry (shaft start/end, radii, cradle mast and guard-post positions) is only recoverable from E-current-full-plate.inventory.txt, which is a DIFFERENT file from the one printed. The join above therefore rests on manifest coordinates plus the verified world-bbox equality, not on reading specimen records out of H2.",
+      "There is no H2 layout.txt or H2 inventory.txt in /private/tmp/plinth-chitubox-diagnosis/. The h2_audit/ subdirectory is a Rust binary, not a data dump. Only A/B/C/D/E have .layout.txt/.inventory.txt. All H2 structural facts above were derived by direct byte parsing (scratchpad scripts under /private/tmp/claude-501/-Users-craig-code-hughescr-dnd-campaigns/d0490c5c-5036-418a-aec2-ba31ad38a4b6/scratchpad/).",
+      "ID JOIN IS CLEAN: all 76 manifest IDs are scored, all 76 scored IDs exist in the manifest, no duplicates, no orphans in either direction. Counts per strip match the manifest specimen_count fields exactly (S1 16, S2 16, S3A 8, S3B 8, S4 12, S5 16 = 76).",
+      "THREE SCORED FAILURES ARE OWNER-ATTRIBUTED TO HANDLING, NOT PRINTING, and must not be fed to a physics model as printed: Y31 and Y41 (S2 guard stands were attached directly to the build plate rather than to the assembly base and broke during removal; heads fully formed and intact) and X41 (slight bend AND glued to its guard posts, owner scores '??', suspects wet-resin contact after plate removal that cured in place). If all three are excluded, the ProjectPositiveY r=0.30 cell becomes 4/4 intact and the ProjectPositiveX r=0.30 boundary rests on X31 alone.",
+      "TWO SCORED FAILURES ARE ASSEMBLY-STRUCTURE FAILURES, NOT SPECIMEN FAILURES: T01 (two left-most edge support pillars and the outer guard pillar failed, roof element collapsed) and the outer guard post of the S4 assembly (failed about halfway up; adjacent to BX50). Neither is a specimen head/shaft result. The manifest print_outcomes vocabulary has no term for 'the assembly scaffold failed' - the nearest terms (missing, cracked, delaminated) all imply the specimen. T01 is recorded here as outcome 'collapsed', a term outside the declared vocabulary; the protocol needs an explicit code for it.",
+      "X41 is recorded here as 'permanently_bent_uncertain', also outside the manifest's declared print_outcomes vocabulary, to preserve the owner's '??' rather than silently promoting it to a clean permanently_bent.",
+      "THE PROTOCOL RUN IS DESCRIPTIVE ONLY. README 'Before printing' steps 2-4 require the slicer version and every profile setting or profile export, resin product and lot, tank temperature, PFA installation/use state, and photographs of the clean build plate and vat film. None were kept. The fixed exclusion 'A visibly damaged release film or non-production resin/profile makes the run descriptive only' cannot even be evaluated because film state is unknown. Treat as a screening run.",
+      "NO FORENSIC DETAIL WAS CAPTURED for any failure: break-surface location (at the base fillet, mid-shaft, or at the head junction), bend direction in project axes, and whether detached heads were recovered in the cradles, the vat, or the wash basket are all unrecorded. This directly defeats the manifest limitation that says to 'inspect both wash basket and vat for detached material before scoring, matching the recovered Plate-6 handling practice', and it is the single largest information loss in the run - see questions for what re-inspection of the retained parts should capture.",
+      "MEASUREMENT DATA MISSING: README requires three reseated caliper readings of each terminal-center position from the molded coupon datums, plus fixed top/+X-side/+Y-side photographs of the whole plate before anything is removed, plus removal-tile metrics for T01-T08 (removal time, model-tile fracture, support fracture, max remnant height, max scar width, touch-up time). None are present in the owner's report. Every 'permanently_bent' score is therefore a visual call with no residual-set magnitude attached, so no bend can be compared against the 0.10 mm unresolved threshold or the 1.0 mm permanent-set stop criterion.",
+      "NON-MONOTONIC CELL - PHYSICALLY INCONSISTENT AS SCORED: Vertical r=0.50 loses heads at 12 mm (V22) and 18 mm (V32) but survives intact at 24 mm (V42), while r=0.30 at all of 12/18/24 mm only bends and never loses a head. Under any peel-force model, a longer span and a thinner shaft are both worse, so V42 intact alongside V22/V32 missing cannot be explained by span/radius. Either an unrecorded process event (localised film adhesion, a lifted layer, mechanical contact during drain/wash) or a scoring/labelling error is present. Their plate positions do not help: V22 (x=-30, y=-51), V32 (x=+18, y=-51), V42 (x=+66, y=-51) are all mid-plate, none near an edge.",
+      "PLATE ENVELOPE IS VERY TIGHT IN Y and this constrains any future re-layout. Registered build volume 211.68 x 118.37 x 220.0 mm (half-extents +/-105.84 X, +/-59.185 Y). Manifest bounds_mm 200.5 x 115.25 x 26.75 - independently confirmed from geometry (X extent -98.5 [S1 base] to +102.0 [S5 base] = 200.5; Y extent -57.25 [S1 base] to +58.0 [S5 base] = 115.25; Z 0 to 26.75). That leaves 5.59 mm clearance per side in X but only 1.185 mm at the +Y edge (S5) and 1.935 mm at the -Y edge (S1). S5 and S1 are essentially against the Y limits.",
+      "S4 carries 60 ChituBox support records in E-current-full-plate.inventory.txt versus 64 for S1/S2/S5 and 32 for S3A/S3B. This is consistent (12 specimens x 4 records + 12 brace/guard records = 60 vs 16 x 4 = 64 and 8 x 4 = 32); it is not a missing entity, noted only to pre-empt the question."
+    ],
+    "edge_analysis": "FRAME. Registered build volume is 211.68 (X) x 118.37 (Y) x 220.0 mm (manifest .plate.registered_build_volume_mm, printer_profile_id saturn4-ultra), so the plate half-extents in project axes are +/-105.84 in X and +/-59.185 in Y. All distances below are from a specimen's manifest base center to the nearest plate limit. Note the manifest's own project_axis_notice: \"X/Y are project axes; vendor sources do not name the physical tilt axis.\"\n\nTHE TWO SUSPECT FAILURES, MEASURED.\n  T01: base (x=-90.000, y=+49.000). 15.84 mm from the -X limit; 10.19 mm from the +Y limit. Failure mode: the two left-most edge support pillars and the OUTER guard pillar failed, collapsing the roof.\n  BX50: base (x=-85.000, y=+28.000). 20.84 mm from the -X limit; 31.19 mm from the +Y limit. Failure mode: head not attached to support; separately, the guard post on the OUTER edge of the S4 assembly failed about halfway up.\n  Both are strip_order = 1, i.e. the -X-most (first) member of their assembly.\n  Both damage reports name the OUTER (-X-most) guard/cradle mast of the assembly, which sits further out than the specimen itself. Extracted from E-current-full-plate.inventory.txt, the -X-most cradle/guard geometry (record type=3) per strip, in world coordinates, is: S5 -96.200 (this is T01's own mast, and it is the outermost tall structure anywhere on the plate, 9.64 mm from the -X limit), S1 -94.150, S2 -94.150, S3A -88.407, S3B -88.407, S4 -87.650 (this is BX50's mast, 18.19 mm from the -X limit).\n\nWHICH EDGE. Both failures are on the -X side, and both are in the two rear (+Y) strips. In project axes the shared locus is the BACK-LEFT quadrant: -X and +Y. The two rear strips are S4 (y=+28) and S5 (y=+49); S1/S2/S3A/S3B all sit at y <= +5. Given the Saturn 4 tilt-release geometry on record (front, -Y, travels furthest and layers release front-to-back), +Y is the LAST-RELEASING side, which is the physically interesting half of the observation. The -X half of the observation is much weaker (below).\n\nSPECIMENS COMPARABLY CLOSE TO THE SAME -X EDGE THAT SURVIVED. This is the decisive counter-evidence and it is strong:\n  V11  x=-90.000, y=-51.0  -> 15.84 mm from -X limit  -> present_intact   (EXACTLY as close as T01, closer than BX50)\n  Y11  x=-90.000, y=-37.0  -> 15.84 mm                -> present_intact\n  X11  x=-90.000, y= -9.0  -> 15.84 mm                -> present_intact\n  X12  x=-90.000, y= +5.0  -> 15.84 mm                -> present_intact\n  T02  x=-78.000, y=+49.0  -> 27.84 mm                -> present_intact   (same strip and same Y as T01, and the same 0.2 mm nominal contact radius)\n  BX51 x=-70.000, y=+28.0  -> 35.84 mm                -> present_intact   (same strip and same Y as BX50, same 18 mm span and 0.5 mm radius, but braced)\n  X13/X14 x=-76.757        -> 29.08 mm                -> present_intact\n  V12/Y12 x=-78.000        -> 27.84 mm                -> present_intact\n  And in assembly-geometry terms the S1 carrier base reaches world x=-98.5 (7.34 mm from the -X limit), further out than the entire S4 assembly (-91.0) and further out than T01's mast (-96.2), yet S1's -X end (V11) printed clean.\n  CONCLUSION ON X: four specimens sit at exactly the same X as T01 and closer than BX50, and all four survived. \"Extreme -X coordinate\" alone does NOT predict these failures. Do not accept the plate-edge hypothesis as an X-axis effect.\n\nTHE +X EDGE, FOR COMPLETENESS. The nearest specimen to the +X limit is CM4 (x=+95, 10.84 mm) - closer to its edge than T01 or BX50 are to theirs. CM4 failed, but so did CM1/CM2/CM3 at x=29/51/73, so CM4 is explained by design (r=0.25 deliberately_marginal), not position. CS4 (x=+84, 21.84 mm from the +X limit) and V44/Y44 (x=+90, 15.84 mm) all survived. There is no +X edge effect.\n\nTHE +Y EDGE. All eight S5 tiles and all eight S5 controls share y=+49 (10.19 mm from the +Y limit; the S5 carrier base itself reaches y=+58.0, only 1.185 mm of clearance). Of the 16 specimens at that single Y, T01 collapsed, CM1-CM4 failed by design, and the remaining 11 survived. So being at the extreme +Y row is not sufficient either - but note that Y is a constant within each strip, so this plate CANNOT separate a Y-position effect from a strip effect. Every +Y observation is confounded with \"is an S4/S5 assembly\", and the memory-of-record on this project says Y sensitivity is <=1 rung and should be randomised over rather than measured.\n\nTHE STRONGEST POSITIONAL EVIDENCE ON THE PLATE IS THE BX50 / BY50 PAIR. BX50 (x=-85.0, y=+28.0) and BY50 (x=+7.5, y=+25.5) are declared identical in every dimensional field: family braced, free_span 18.0, radius 0.5, angle_from_vertical 0.0, brace none, terminal crossbar 3.0/1.5, debris_catcher true, detachable true, base z 1.5, terminal z 19.5. They differ only in declared orientation (project_positive_x vs project_positive_y) and in plate position - BX50 is 20.84 mm from the -X limit, BY50 is mid-plate (98.34 mm from -X, 113.34 mm from +X). BX50 lost its head; BY50 survived. The owner already flags this as anomalous. This is a 1-vs-1 comparison, so it proves nothing on its own, but it is exactly the contrast a replicate plate should be designed to resolve, and it is confounded three ways at once: orientation, X position, and strip_order (BX50 is order 1, the free end of the carrier; BY50 is order 7, mid-carrier).\n\nWHAT ACTUALLY CORRELATES BETTER THAN \"EDGE\". Both failures are (a) strip_order 1 - the outermost element of the carrier, where the carrier base has material on one side only and the outer guard mast is the single most cantilevered feature of the assembly; and (b) in S4/S5, the only two strips with maximum_open_bridge_length_mm = 1.0 and minimum_handling_width_mm = 16.0 (S1/S2/S3 use 2.0 and 12.0), and the only two strips whose failures involved the guard masts. In both reports the OUTER guard mast is named as a failing element, and T01's mast (world x=-96.2) is genuinely the outermost tall structure on the plate. A plausible unified reading is not \"the plate edge is bad\" but \"the outermost guard mast of a rear assembly is the least-supported tall feature on the plate, it failed first, and its failure took the neighbouring specimen or roof with it.\" That is a scaffold-design defect, not a specimen-physics result, and it is consistent with the owner's instruction to discount T01 for physics purposes.\n\nRECOMMENDED TREATMENT. Score T01 and BX50 as scaffold-induced losses with position confounded by strip_order, exclude both from the survival ladder, and resolve the question on the next plate by (i) mirroring the assemblies left-right so strip_order 1 lands at +X for half the strips, (ii) putting a duplicate of the BX50 geometry at both the -X end and mid-plate within the same strip, and (iii) thickening or double-anchoring the outermost guard mast so a mast failure cannot cascade into a specimen.",
+    "questions": [
+      "The printed file H2-exact-grounded-full-plate.chitubox (sha256 a33b2e10...) is not byte-identical to the protocol's preregistered home-support-calibration-plate.chitubox (sha256 807bc648...): +96 bytes of front descriptor block and 75 float32 slots differing by <=9.5e-7 mm in S2/S3A/S3B. Geometry is unchanged well below the 0.1 mm practical threshold. Do you want this recorded as a benign deviation (my recommendation) or as a hard protocol violation of the 'no layout change after preregistration' exclusion, which would make the run non-conforming rather than merely descriptive?",
+      "Vertical r=0.50 is non-monotonic and cannot be reconciled with any peel model: V22 (12 mm) and V32 (18 mm) lost their heads while V42 (24 mm, same radius) is intact, and r=0.30 never lost a head at any span. Before I build a failure boundary from this, can you re-examine the retained V22, V32 and V42 parts and confirm the IDs were not transposed - specifically that the intact 24 mm 0.5 mm specimen really is at x=+66 and not at x=+18 or x=-30?",
+      "BX50 vs BY50 is the cleanest positional signal available, but it is confounded three ways (project axis, X position, strip_order). Do you want the next plate to break that confound - i.e. shall I specify a layout with mirrored strip order and duplicated geometry at both -X and mid-plate - or do you want the current single-replicate result reported as inconclusive and left alone?",
+      "The protocol vocabulary has no code for 'the assembly scaffold failed rather than the specimen'. T01 (roof collapse after edge and guard pillars failed) and the S4 outer guard post (failed halfway up) both need one. May I add a print_outcome code such as 'scaffold_failed' to the manifest schema, and re-score T01 under it instead of the non-vocabulary 'collapsed' I have used here?",
+      "X41 is scored '??' by you (slight bend AND glued to its guard posts, possibly wet-resin contact after plate removal). For the survival ladder, do you want X41 treated as a censored observation (excluded, with the ProjectPositiveX r=0.30 boundary resting on X31 alone), as a failure, or as intact? The three answers give materially different r=0.30 boundaries.",
+      "You attribute the Y31/Y41 bends to plate removal because the S2 guard stands were grounded to the build plate rather than to the assembly base. Should I file that as a generator defect against plate.rs add_open_cage_components (open-cradle masts must anchor to the assembly base, never to the build plate) so it is fixed before the replicate plates, and should the S2 strip then be reported as having zero print-attributable failures?",
+      "No resin lot, slicer profile export, film photograph or tank temperature was kept. Confirm you want this run classified as a screening run whose cells can never be promoted (README requires three independently prepared plates plus full preregistration), so that its only outputs are (a) the boundary shape and (b) the scaffold defects to fix - and not any safe-support policy.",
+      "RE-INSPECTION OF RETAINED PARTS - please confirm you can still do this, because it is recoverable information that is currently lost. For every non-intact ID, capture: (1) break-surface location as a height in mm from the base datum plus which of base-fillet / mid-shaft / head-junction it is, (2) break-surface appearance - flat and glassy (brittle, print-time) vs fibrous, whitened or torn (ductile, handling-time), (3) bend direction expressed as a project-axis vector (+X/-X/+Y/-Y) with residual tip offset measured by caliper to 0.1 mm, since bend direction toward -Y would corroborate the tilt-peel model, (4) where each detached head was recovered - still in its debris cradle, loose in the vat, or in the wash basket - because a head in the cradle implies a print-time fracture while a head in the wash basket implies post-print handling, (5) for the CM columns, the residual bend of the column itself, and (6) photographs of T01's and BX50's failed guard masts showing the fracture height relative to the mast base. Also confirm whether the fixed top / +X-side / +Y-side whole-plate photographs were taken before anything was removed; if they exist they can still settle the T01 and BX50 question.",
+      "The S5 carrier base reaches y=+58.0 against a +59.185 mm limit - 1.185 mm of clearance, and S1 has 1.935 mm at the -Y limit. Do you want the replicate plate re-laid out with a larger Y margin (which means dropping a strip or narrowing the assemblies), or is the tight fit deliberate and acceptable?",
+      "H2 and the preregistered plate both store z_lift = +0 with the mesh centred on its own bounding box, so the stored mesh bottom is 9.86-13.375 mm BELOW z=0 and ChituBox must be re-grounding on import. The print succeeded, so this is evidently fine in practice - but do you want the generator changed to emit E-style placement (z_lift = 0.75, mesh bottom at -0.75, assembly base exactly on z=0) so the file is correct without relying on slicer behaviour?"
+    ],
+    "specimens": [
+      {
+        "id": "V11",
+        "strip": "S1-VERTICAL",
+        "orientation": "Vertical",
+        "span_mm": 6,
+        "radius_mm": 0.3,
+        "x": -90,
+        "y": -51,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "V12",
+        "strip": "S1-VERTICAL",
+        "orientation": "Vertical",
+        "span_mm": 6,
+        "radius_mm": 0.5,
+        "x": -78,
+        "y": -51,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "V13",
+        "strip": "S1-VERTICAL",
+        "orientation": "Vertical",
+        "span_mm": 6,
+        "radius_mm": 0.7,
+        "x": -66,
+        "y": -51,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "V14",
+        "strip": "S1-VERTICAL",
+        "orientation": "Vertical",
+        "span_mm": 6,
+        "radius_mm": 0.9,
+        "x": -54,
+        "y": -51,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "V21",
+        "strip": "S1-VERTICAL",
+        "orientation": "Vertical",
+        "span_mm": 12,
+        "radius_mm": 0.3,
+        "x": -42,
+        "y": -51,
+        "detachable": false,
+        "outcome": "permanently_bent"
+      },
+      {
+        "id": "V22",
+        "strip": "S1-VERTICAL",
+        "orientation": "Vertical",
+        "span_mm": 12,
+        "radius_mm": 0.5,
+        "x": -30,
+        "y": -51,
+        "detachable": false,
+        "outcome": "missing"
+      },
+      {
+        "id": "V23",
+        "strip": "S1-VERTICAL",
+        "orientation": "Vertical",
+        "span_mm": 12,
+        "radius_mm": 0.7,
+        "x": -18,
+        "y": -51,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "V24",
+        "strip": "S1-VERTICAL",
+        "orientation": "Vertical",
+        "span_mm": 12,
+        "radius_mm": 0.9,
+        "x": -6,
+        "y": -51,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "V31",
+        "strip": "S1-VERTICAL",
+        "orientation": "Vertical",
+        "span_mm": 18,
+        "radius_mm": 0.3,
+        "x": 6,
+        "y": -51,
+        "detachable": false,
+        "outcome": "permanently_bent"
+      },
+      {
+        "id": "V32",
+        "strip": "S1-VERTICAL",
+        "orientation": "Vertical",
+        "span_mm": 18,
+        "radius_mm": 0.5,
+        "x": 18,
+        "y": -51,
+        "detachable": false,
+        "outcome": "missing"
+      },
+      {
+        "id": "V33",
+        "strip": "S1-VERTICAL",
+        "orientation": "Vertical",
+        "span_mm": 18,
+        "radius_mm": 0.7,
+        "x": 30,
+        "y": -51,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "V34",
+        "strip": "S1-VERTICAL",
+        "orientation": "Vertical",
+        "span_mm": 18,
+        "radius_mm": 0.9,
+        "x": 42,
+        "y": -51,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "V41",
+        "strip": "S1-VERTICAL",
+        "orientation": "Vertical",
+        "span_mm": 24,
+        "radius_mm": 0.3,
+        "x": 54,
+        "y": -51,
+        "detachable": false,
+        "outcome": "permanently_bent"
+      },
+      {
+        "id": "V42",
+        "strip": "S1-VERTICAL",
+        "orientation": "Vertical",
+        "span_mm": 24,
+        "radius_mm": 0.5,
+        "x": 66,
+        "y": -51,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "V43",
+        "strip": "S1-VERTICAL",
+        "orientation": "Vertical",
+        "span_mm": 24,
+        "radius_mm": 0.7,
+        "x": 78,
+        "y": -51,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "V44",
+        "strip": "S1-VERTICAL",
+        "orientation": "Vertical",
+        "span_mm": 24,
+        "radius_mm": 0.9,
+        "x": 90,
+        "y": -51,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "Y11",
+        "strip": "S2-INCLINED-Y",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 6,
+        "radius_mm": 0.3,
+        "x": -90,
+        "y": -37,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "Y12",
+        "strip": "S2-INCLINED-Y",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 6,
+        "radius_mm": 0.5,
+        "x": -78,
+        "y": -37,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "Y13",
+        "strip": "S2-INCLINED-Y",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 6,
+        "radius_mm": 0.7,
+        "x": -66,
+        "y": -37,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "Y14",
+        "strip": "S2-INCLINED-Y",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 6,
+        "radius_mm": 0.9,
+        "x": -54,
+        "y": -37,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "Y21",
+        "strip": "S2-INCLINED-Y",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 12,
+        "radius_mm": 0.3,
+        "x": -42,
+        "y": -37,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "Y22",
+        "strip": "S2-INCLINED-Y",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 12,
+        "radius_mm": 0.5,
+        "x": -30,
+        "y": -37,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "Y23",
+        "strip": "S2-INCLINED-Y",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 12,
+        "radius_mm": 0.7,
+        "x": -18,
+        "y": -37,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "Y24",
+        "strip": "S2-INCLINED-Y",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 12,
+        "radius_mm": 0.9,
+        "x": -6,
+        "y": -37,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "Y31",
+        "strip": "S2-INCLINED-Y",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 18,
+        "radius_mm": 0.3,
+        "x": 6,
+        "y": -37,
+        "detachable": false,
+        "outcome": "permanently_bent"
+      },
+      {
+        "id": "Y32",
+        "strip": "S2-INCLINED-Y",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 18,
+        "radius_mm": 0.5,
+        "x": 18,
+        "y": -37,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "Y33",
+        "strip": "S2-INCLINED-Y",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 18,
+        "radius_mm": 0.7,
+        "x": 30,
+        "y": -37,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "Y34",
+        "strip": "S2-INCLINED-Y",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 18,
+        "radius_mm": 0.9,
+        "x": 42,
+        "y": -37,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "Y41",
+        "strip": "S2-INCLINED-Y",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 24,
+        "radius_mm": 0.3,
+        "x": 54,
+        "y": -37,
+        "detachable": false,
+        "outcome": "permanently_bent"
+      },
+      {
+        "id": "Y42",
+        "strip": "S2-INCLINED-Y",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 24,
+        "radius_mm": 0.5,
+        "x": 66,
+        "y": -37,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "Y43",
+        "strip": "S2-INCLINED-Y",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 24,
+        "radius_mm": 0.7,
+        "x": 78,
+        "y": -37,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "Y44",
+        "strip": "S2-INCLINED-Y",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 24,
+        "radius_mm": 0.9,
+        "x": 90,
+        "y": -37,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "X11",
+        "strip": "S3A-INCLINED-X",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 6,
+        "radius_mm": 0.3,
+        "x": -90,
+        "y": -9,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "X13",
+        "strip": "S3A-INCLINED-X",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 6,
+        "radius_mm": 0.7,
+        "x": -76.757,
+        "y": -9,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "X21",
+        "strip": "S3A-INCLINED-X",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 12,
+        "radius_mm": 0.3,
+        "x": -63.515,
+        "y": -9,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "X23",
+        "strip": "S3A-INCLINED-X",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 12,
+        "radius_mm": 0.7,
+        "x": -46.029,
+        "y": -9,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "X31",
+        "strip": "S3A-INCLINED-X",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 18,
+        "radius_mm": 0.3,
+        "x": -28.544,
+        "y": -9,
+        "detachable": false,
+        "outcome": "permanently_bent"
+      },
+      {
+        "id": "X33",
+        "strip": "S3A-INCLINED-X",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 18,
+        "radius_mm": 0.7,
+        "x": -6.816,
+        "y": -9,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "X41",
+        "strip": "S3A-INCLINED-X",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 24,
+        "radius_mm": 0.3,
+        "x": 14.912,
+        "y": -9,
+        "detachable": false,
+        "outcome": "permanently_bent_uncertain"
+      },
+      {
+        "id": "X43",
+        "strip": "S3A-INCLINED-X",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 24,
+        "radius_mm": 0.7,
+        "x": 40.882,
+        "y": -9,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "X12",
+        "strip": "S3B-INCLINED-X",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 6,
+        "radius_mm": 0.5,
+        "x": -90,
+        "y": 5,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "X14",
+        "strip": "S3B-INCLINED-X",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 6,
+        "radius_mm": 0.9,
+        "x": -76.757,
+        "y": 5,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "X22",
+        "strip": "S3B-INCLINED-X",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 12,
+        "radius_mm": 0.5,
+        "x": -63.515,
+        "y": 5,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "X24",
+        "strip": "S3B-INCLINED-X",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 12,
+        "radius_mm": 0.9,
+        "x": -46.029,
+        "y": 5,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "X32",
+        "strip": "S3B-INCLINED-X",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 18,
+        "radius_mm": 0.5,
+        "x": -28.544,
+        "y": 5,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "X34",
+        "strip": "S3B-INCLINED-X",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 18,
+        "radius_mm": 0.9,
+        "x": -6.816,
+        "y": 5,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "X42",
+        "strip": "S3B-INCLINED-X",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 24,
+        "radius_mm": 0.5,
+        "x": 14.912,
+        "y": 5,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "X44",
+        "strip": "S3B-INCLINED-X",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 24,
+        "radius_mm": 0.9,
+        "x": 40.882,
+        "y": 5,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "BX50",
+        "strip": "S4-BRACED",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 18,
+        "radius_mm": 0.5,
+        "x": -85,
+        "y": 28,
+        "detachable": true,
+        "outcome": "missing"
+      },
+      {
+        "id": "BX51",
+        "strip": "S4-BRACED",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 18,
+        "radius_mm": 0.5,
+        "x": -70,
+        "y": 28,
+        "detachable": true,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "BX52",
+        "strip": "S4-BRACED",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 18,
+        "radius_mm": 0.5,
+        "x": -55,
+        "y": 28,
+        "detachable": true,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "BX90",
+        "strip": "S4-BRACED",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 18,
+        "radius_mm": 0.9,
+        "x": -40,
+        "y": 28,
+        "detachable": true,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "BX91",
+        "strip": "S4-BRACED",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 18,
+        "radius_mm": 0.9,
+        "x": -25,
+        "y": 28,
+        "detachable": true,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "BX92",
+        "strip": "S4-BRACED",
+        "orientation": "ProjectPositiveX",
+        "span_mm": 18,
+        "radius_mm": 0.9,
+        "x": -10,
+        "y": 28,
+        "detachable": true,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "BY50",
+        "strip": "S4-BRACED",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 18,
+        "radius_mm": 0.5,
+        "x": 7.5,
+        "y": 25.5,
+        "detachable": true,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "BY51",
+        "strip": "S4-BRACED",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 18,
+        "radius_mm": 0.5,
+        "x": 22.5,
+        "y": 25.5,
+        "detachable": true,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "BY52",
+        "strip": "S4-BRACED",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 18,
+        "radius_mm": 0.5,
+        "x": 37.5,
+        "y": 25.5,
+        "detachable": true,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "BY90",
+        "strip": "S4-BRACED",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 18,
+        "radius_mm": 0.9,
+        "x": 52.5,
+        "y": 25.5,
+        "detachable": true,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "BY91",
+        "strip": "S4-BRACED",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 18,
+        "radius_mm": 0.9,
+        "x": 67.5,
+        "y": 25.5,
+        "detachable": true,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "BY92",
+        "strip": "S4-BRACED",
+        "orientation": "ProjectPositiveY",
+        "span_mm": 18,
+        "radius_mm": 0.9,
+        "x": 82.5,
+        "y": 25.5,
+        "detachable": true,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "T01",
+        "strip": "S5-TILES-CONTROLS",
+        "orientation": "Vertical",
+        "span_mm": 10,
+        "radius_mm": 0.65,
+        "x": -90,
+        "y": 49,
+        "detachable": false,
+        "outcome": "collapsed"
+      },
+      {
+        "id": "T02",
+        "strip": "S5-TILES-CONTROLS",
+        "orientation": "Vertical",
+        "span_mm": 10,
+        "radius_mm": 0.65,
+        "x": -78,
+        "y": 49,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "T03",
+        "strip": "S5-TILES-CONTROLS",
+        "orientation": "Vertical",
+        "span_mm": 10,
+        "radius_mm": 0.65,
+        "x": -66,
+        "y": 49,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "T04",
+        "strip": "S5-TILES-CONTROLS",
+        "orientation": "Vertical",
+        "span_mm": 10,
+        "radius_mm": 0.65,
+        "x": -54,
+        "y": 49,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "T05",
+        "strip": "S5-TILES-CONTROLS",
+        "orientation": "Vertical",
+        "span_mm": 10,
+        "radius_mm": 0.65,
+        "x": -42,
+        "y": 49,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "T06",
+        "strip": "S5-TILES-CONTROLS",
+        "orientation": "Vertical",
+        "span_mm": 10,
+        "radius_mm": 0.65,
+        "x": -30,
+        "y": 49,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "T07",
+        "strip": "S5-TILES-CONTROLS",
+        "orientation": "Vertical",
+        "span_mm": 10,
+        "radius_mm": 0.65,
+        "x": -18,
+        "y": 49,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "T08",
+        "strip": "S5-TILES-CONTROLS",
+        "orientation": "Vertical",
+        "span_mm": 10,
+        "radius_mm": 0.65,
+        "x": -6,
+        "y": 49,
+        "detachable": false,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "CS1",
+        "strip": "S5-TILES-CONTROLS",
+        "orientation": "Vertical",
+        "span_mm": 24,
+        "radius_mm": 1.2,
+        "x": 18,
+        "y": 49,
+        "detachable": true,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "CM1",
+        "strip": "S5-TILES-CONTROLS",
+        "orientation": "Vertical",
+        "span_mm": 24,
+        "radius_mm": 0.25,
+        "x": 29,
+        "y": 49,
+        "detachable": true,
+        "outcome": "missing"
+      },
+      {
+        "id": "CS2",
+        "strip": "S5-TILES-CONTROLS",
+        "orientation": "Vertical",
+        "span_mm": 24,
+        "radius_mm": 1.2,
+        "x": 40,
+        "y": 49,
+        "detachable": true,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "CM2",
+        "strip": "S5-TILES-CONTROLS",
+        "orientation": "Vertical",
+        "span_mm": 24,
+        "radius_mm": 0.25,
+        "x": 51,
+        "y": 49,
+        "detachable": true,
+        "outcome": "missing"
+      },
+      {
+        "id": "CS3",
+        "strip": "S5-TILES-CONTROLS",
+        "orientation": "Vertical",
+        "span_mm": 24,
+        "radius_mm": 1.2,
+        "x": 62,
+        "y": 49,
+        "detachable": true,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "CM3",
+        "strip": "S5-TILES-CONTROLS",
+        "orientation": "Vertical",
+        "span_mm": 24,
+        "radius_mm": 0.25,
+        "x": 73,
+        "y": 49,
+        "detachable": true,
+        "outcome": "missing"
+      },
+      {
+        "id": "CS4",
+        "strip": "S5-TILES-CONTROLS",
+        "orientation": "Vertical",
+        "span_mm": 24,
+        "radius_mm": 1.2,
+        "x": 84,
+        "y": 49,
+        "detachable": true,
+        "outcome": "present_intact"
+      },
+      {
+        "id": "CM4",
+        "strip": "S5-TILES-CONTROLS",
+        "orientation": "Vertical",
+        "span_mm": 24,
+        "radius_mm": 0.25,
+        "x": 95,
+        "y": 49,
+        "detachable": true,
+        "outcome": "missing"
+      }
+    ]
+  },
+  "proposer": {
+    "conclusions": [
+      {
+        "n": 1,
+        "statement": "The plate's load ratio is exactly X = (1.5/r)^2 = 2.25/r^2, because every specimen head is the same 16-gon of across-vertices diameter 3.000 mm (A_cap = 6.8883 mm^2) and every shaft is a constant-section 16-gon prism (A_arm = 3.0615 r^2). This makes H2 directly comparable to plate 5 (X_STAR_CONE) and plate 6 (X_STAR_CYLINDER) without any modelling assumption.",
+        "confidence": "high",
+        "evidence": "Measured directly from the printed meshes with /private/tmp/claude-501/-Users-craig-code-hughescr-dnd-campaigns/d0490c5c-5036-418a-aec2-ba31ad38a4b6/scratchpad/phys-prof.ts. S1 V41 head rings: z=24.2500 d=2.000 A=3.0615; z=25.5000 d=0.600 A=0.2755 (waist = shaft); z=26.7500 d=3.000 A=6.8883 (16-vertex hull, 80 tris, 51 verts). S1 V41 shaft: 32 tris, hull_area 0.2755 identical at z=0 and z=25.5 -> constant section, 16-gon inscribed in r. Same 6.8883 mm^2 top ring measured on S4 BX50 and BY50 (z=20.75) and on S2 Y41 / S3A X31 (z=19.7206 / 15.4779). A_arm = 8 r^2 sin(22.5 deg) = 3.0615 r^2; ratio A_cap/A_arm = 2.25/r^2 to 5 significant figures. Radius ladder therefore maps to X = 36.00 (r=0.25), 25.00 (r=0.30), 9.00 (r=0.50), 5.325 (r=0.65), 4.592 (r=0.70), 2.778 (r=0.90), 1.5625 (r=1.20)."
+      },
+      {
+        "n": 2,
+        "statement": "The head-detachment boundary on this plate is X* in (25.00, 36.00), which is consistent with plate 5's X_STAR_CONE = [25.00, 25.34] and overlaps plate 6's X_STAR_CYLINDER = (19.91, 30.48). The area law therefore reproduces on a third, independent geometry (16-gon prism arm, bicone head, free spans 6-24 mm, terminal heights 5.7-26.8 mm).",
+        "confidence": "high",
+        "evidence": "Head-loss counts by X across the whole plate: X=1.5625 (r=1.20, CS1-CS4) 0/4 lost; X=2.778 (r=0.90, V14/V24/V34/V44, Y14-Y44, X14-X44, BX90-92, BY90-92) 0/14 lost; X=4.592 (r=0.70) 0/8 lost; X=9.00 (r=0.50) 3/20 lost (V22, V32, BX50 - see conclusion 5); X=25.00 (r=0.30) 0/11 lost (V11/V21/V31/V41, Y11-Y41, X11/X21/X31/X41 all retain fully formed heads); X=36.00 (r=0.25, CM1-CM4) 4/4 lost. Ignoring the r=0.50 trio the ladder is strictly monotone in X with a clean gap between 25.00 (11/11 heads retained) and 36.00 (0/4 retained). Comparison brackets from /private/tmp/plinth-3d-pipeline-integration/docs/reference/plate-05-results.md section 5 finding 1 and plate-06-results.md section 5 finding 2."
+      },
+      {
+        "n": 3,
+        "statement": "H2 puts X* strictly ABOVE 25.00 (11/11 survived there), which is compatible with plate 5 only because plate 5's 25.00 edge was itself a recorded boundary inversion. The three-plate intersection is X* in (25.00, 25.34]; nothing in H2 argues for moving the engine's phenomenological clamp.",
+        "confidence": "medium",
+        "evidence": "plate-05-results.md section 5 finding 1: 'X_STAR_CONE = [25.00, 25.34] ... with one boundary inversion at 25.00 (TB09, the largest cap on the thickest tip, dead, while X = 25.17 and 25.34 lived)'. H2's r=0.30 rung sits at X = 25.000 exactly (2.25/0.09) and all 11 specimens at that rung kept their heads. Intersection of [25.00,25.34] (plate 5), (19.91,30.48) (plate 6) and (25.00,36.00) (H2) = (25.00, 25.34]."
+      },
+      {
+        "n": 4,
+        "statement": "The r=0.30 rung shows a SECOND, distinct failure mode - permanent set of the shaft with the head still attached - and the mode ordering across the whole plate is monotone in section: intact (r>=0.5) -> bent-but-attached (r=0.30) -> bent AND head lost (r=0.25). That ordering is exactly what a single load axis acting on a shrinking section predicts.",
+        "confidence": "high",
+        "evidence": "Owner matrix: r=0.30 gives permanently_bent at V21/V31/V41, Y31/Y41, X31, X41(??) with heads 'fully formed and intact'; r=0.25 (CM1/CM2/CM4) gives 'heads gone; the support columns printed successfully and are still present though bent'. No specimen at r>=0.50 is recorded as bent anywhere on the plate (0/45). So the bend threshold sits between r=0.30 and r=0.50, and the head-loss threshold between r=0.30 and r=0.25; both are ordered, no inversions."
+      },
+      {
+        "n": 5,
+        "statement": "V22, V32 and BX50 (all X = 9.00, r = 0.50) are the only outcomes on the plate that no monotone mechanism explains. They are head losses at a ratio 2.8x below the measured boundary and INSIDE the engine's own X_ALLOWED = 12 envelope, and each has a same-cell sibling that survived. This is the single safety-relevant result of the run.",
+        "confidence": "high",
+        "evidence": "V22 (span 12, z_top 14.75) and V32 (span 18, z_top 20.75) lost heads while V42 (span 24, z_top 26.75, same r=0.50) is intact - a longer span AND a taller head survived, so span, height and area all predict the wrong specimen. r=0.30 (X=25.00, a 2.78x higher load ratio) never lost a head at any span. BX50 lost its head while BY50, which I measured to be geometrically identical (conclusion 6), survived. X_ALLOWED = 12.0 and its 1.66x margin claim are recorded in plate-06-results.md section 5 finding 2."
+      },
+      {
+        "n": 6,
+        "statement": "BX50 and BY50 are geometrically IDENTICAL in the printed mesh - the manifest's 'orientation' factor has no geometric expression at all for the brace=none cells of S4. The BX50/BY50 contrast is therefore a 1-vs-1 positional replicate, not an orientation test, and it cannot support any orientation conclusion.",
+        "confidence": "high",
+        "evidence": "Measured from /private/tmp/plinth-home-loading-fixture-inspection/home-support-calibration-HOME-CAL-S4-BRACED-model.stl. BX50 head rings: z=18.2500 A=4.4086 d=2.400; z=19.5000 A=0.7653 d=1.000; z=20.7500 A=6.8883 d=3.000; shaft 32 tris, A=0.7653 at both z=0 and z=19.5. BY50 head rings and shaft: identical to all four decimal places, same triangle counts (80 head tris / 51 verts; 32 shaft tris). Manifest confirms angle_from_vertical_deg = 0.0 for every S4 specimen, so neither is inclined. (The brace direction DOES differ: BX51's brace lens extends in Y at z=2.60-3.10 and z=16.90-17.40 while BY51's extends in X - so 'orientation' is built only for braced cells, never for the brace=none cells that carry the anomaly.)"
+      },
+      {
+        "n": 7,
+        "statement": "Free span is 100% aliased with terminal height on this plate (every base sits at z=1.50), so 'span' and 'height above the build plate' cannot be separated within a strip. The 45-degree strips break the alias only because a 45-degree shaft of the same length reaches a lower z - and that comparison decisively refutes span/slenderness as the driver of the r=0.30 bend mode.",
+        "confidence": "high",
+        "evidence": "Manifest base_center z = 1.5 for all 76 specimens. Measured head-top (peak-area) heights: vertical span 6/12/18/24 -> z 8.75/14.75/20.75/26.75; 45-degree span 6/12/18/24 -> z 6.99/11.24/15.48/19.72; braced (all vertical, span 18) -> 20.75; CS/CM -> 26.75. All 11 r=0.30 specimens order PERFECTLY by head-top z with a clean gap: intact at z_top = 6.99 (Y11, X11), 8.75 (V11), 11.24 (Y21, X21); bent at 14.75 (V21), 15.48 (Y31, X31), 19.72 (Y41, X41), 26.75 (V41). By free span the same data has an inversion - V21 bent at span 12 while X21/Y21 are intact at span 12 - so no single span threshold fits, while a single height threshold in (11.24, 14.75) mm fits all 11."
+      },
+      {
+        "n": 8,
+        "statement": "Two single-parameter mechanisms fit the r=0.30 bend data equally well and this plate cannot separate them: (A) a terminal-height effect with a threshold at z ~ 11-15 mm, which is the same band plate 6 declared uninterpretable; (B) a per-layer-section effect, since a 45-degree shaft cures sqrt(2) = 1.414x more area per layer than a vertical shaft of the same radius, shifting the inclined ladder up one rung. Both predict inclined tolerates one more span rung than vertical, which is what was observed.",
+        "confidence": "medium",
+        "evidence": "plate-06-results.md section 5 finding 7 rule 1: 'Never score a feature above z ~ 9 mm on this printer until the A6-S artifact is understood.' On H2, all 12 specimens whose peak-area layer sits below 9 mm (V11-V14 at 8.75, Y11-Y14 and X11-X14 at 6.99) are present_intact 12/12; 14 of the 56 non-tile specimens above 9 mm failed or bent (42/56 = 75% survival; P(0 failures in 12 | 25% failure rate) ~ 0.032). Mechanism B: an inclined member's per-layer cured cross-section is pi r^2 / cos(45) = 1.414 x pi r^2, equivalent to a vertical member at r x 2^(1/4) = 1.19r. Neither is decidable here because no specimen on the plate has a high terminal z with a short free span."
+      },
+      {
+        "n": 9,
+        "statement": "The plate's one angle-dependent observation has the OPPOSITE sign to the engine's only angle-dependent sizing term. The engine's _shaft_r_for_L adds F_eff += peel_pressure * pi r^2 * tan(theta), making leaning members require MORE radius; the plate shows 45-degree members tolerating one more span rung than vertical members at identical radius.",
+        "confidence": "medium",
+        "evidence": "Engine term documented in physics_load_sizing.md section 1b (placement.py:130-153) and physics_transient_peel.md section 1b/section 2. Plate observation: at r=0.30, V21 (vertical, span 12) permanently_bent while X21 and Y21 (45 degrees, span 12) present_intact; V11 (vertical, span 6) intact. n = 1 per cell, confounded with strip, plate position and terminal height, so this is a directional flag, not a refutation."
+      },
+      {
+        "n": 10,
+        "statement": "Run on its own constants the engine's tip/tension formula permits X = 416.7, about 12-17x above the boundary this plate re-measured at X* ~ 25-36. H2 independently reconfirms plate 6 finding 6: X must stay a phenomenological clamp and must NEVER be recomputed from peel_pressure_pa and tensile_green_mpa.",
+        "confidence": "high",
+        "evidence": "tip_radius_mm = sqrt(F*SF/(pi*sigma)) with F = A_carried * peel_pressure_pa (physics_load_sizing.md section 1b, placement.py:113-122) implies A_carried/A_tip = tensile_green_mpa/(peel_pressure_pa * tip_safety_factor) = 10e6 / (3000 * 8) = 416.7. config.py values from physics_load_sizing.md section 1a: peel_pressure_pa 3000, tensile_green_mpa 10.0, tip_safety_factor 8.0. plate-06-results.md section 5 finding 6 makes the same argument from a different pair of numbers (predicted ~3900 vs observed ~25)."
+      },
+      {
+        "n": 11,
+        "statement": "The engine's deflection model is conservative by at least 3.4x and at most 6.7x at r=0.30 against this plate's permanent-set onset - but the two use different criteria (0.15 mm visible-ribbing budget vs visible permanent set), so no recalibration is licensed.",
+        "confidence": "medium",
+        "evidence": "max_unbraced_len_mm = (r^4 * 3 E pi delta / (4F))^(1/3) with r=3e-4 m, E=0.5e9 Pa, delta=1.5e-4 m, F=0.01 N gives L = 1.79 mm at r=0.30 (formula from physics_load_sizing.md section 1b, placement.py:156-168). Observed: r=0.30 clean at 6 mm free span (V11, 3.4x the engine limit) and permanently bent at 12 mm (V21, 6.7x). Same formula's forward direction gives modelled tip deflection 0.23 mm at L=6 (survived) and 1.81 mm at L=12 (bent), bracketing the protocol's own 1.0 mm permanent-set stop criterion. No residual-set magnitudes were measured, so nothing can be fitted."
+      },
+      {
+        "n": 12,
+        "statement": "brace_free_span_mm = 18.0 and max_unbraced_shaft_r_mm = 0.9 are both supported (not contradicted) at the fat end: unbraced r=0.70 and r=0.90 members survived 24 mm free spans in all three orientations, 22/22. The plate provides ZERO information about whether bracing helps, because 11 of 12 S4 cells survived and the only failure's unbraced twin also survived.",
+        "confidence": "high",
+        "evidence": "V43/V44 (vertical, span 24, r 0.7/0.9), Y43/Y44, X43/X44 all present_intact; plus BX90-92 and BY90-92 (r=0.9, span 18) all present_intact. config brace_free_span_mm 18.0 / max_unbraced_shaft_r_mm 0.9 from physics_transient_peel.md section 1a. S4 outcomes: brace=none 3/4 intact (BX50 lost, BY50/BX90/BY90 intact), brace=single 4/4, brace=X 4/4 - n=1 per (radius x brace x label) cell, and the one failure is in the unbraced arm whose geometric twin survived, so brace efficacy has zero measured variance."
+      },
+      {
+        "n": 13,
+        "statement": "T01 must be discounted: it is a scaffold failure, not a specimen result, and its own contact-geometry twin survived. BX50 is a weaker case for exclusion - its reported mode ('head not attached to support') is a specimen failure - and it should be scored as a failure with a written, argued, attributable exclusion note, following the plate-6 override precedent rather than being silently dropped.",
+        "confidence": "high",
+        "evidence": "Owner: T01's 'two left-most edge support pillars and the outer guard pillar failed, collapsing the roof element'; T02 shares the identical 0.2 mm nominal contact radius and survived. The tile is a 12.0 x 8.0 mm slab with a ~96 mm^2 down-facing underside at z=10.70 (measured, S5 STL), i.e. a removal/scar cell, not a load-ladder cell. For BX50: edge_analysis shows four specimens at exactly T01's x=-90 (V11, Y11, X11, X12) all present_intact, and BX51 at the same strip/Y survived - so plate-edge X position alone does not predict failure. plate-06-results.md section 6 sets the standing rule that an override is admissible only when written down, argued and attributable."
+      },
+      {
+        "n": 14,
+        "statement": "The CM design point was mislabelled: r=0.25 gives X = 36.00, ABOVE both prior plates' brackets, so CM is a must-fail positive control, not a deliberately marginal one. It failed under every candidate model at once (area law, slenderness, non-formation), which by plate 6's own refuter standard means it discriminates none of them.",
+        "confidence": "high",
+        "evidence": "X_CM = 2.25/0.0625 = 36.00 vs X_STAR_CONE [25.00,25.34] and X_STAR_CYLINDER (19.91,30.48). CM is also the most slender item on the plate (r=0.25, 24 mm free span, 96:1). plate-06-results.md section 3 gate B6-1 records the identical judgement about PB: 'PB fails under every candidate model on the table ... so it discriminates none of them - it establishes only that the scorer did not tick a bare plinth.' A genuinely marginal CM would sit at X ~ 22-28, i.e. r = 0.284-0.320 mm - which is where the ladder's own r=0.30 rung already sits."
+      },
+      {
+        "n": 15,
+        "statement": "The CS/CM pair repeats plate 6's finding-7 rule-2 mistake in milder form: both controls sit at z_top = 26.75 mm, the tallest band on the plate, so they validate only the tallest cells and say nothing about the 12 specimens whose critical layers are below 9 mm or the 45-degree ladder that tops out at 19.72 mm.",
+        "confidence": "high",
+        "evidence": "Manifest: CS/CM terminal z 25.5, measured head top ring at 26.75, matching only V41-V44. plate-06-results.md section 5 finding 7 rule 2: 'Never place a validity control in a different z band than the specimens it validates.' Measured head-top z by class: 45-degree span 6 = 6.99, vertical span 6 = 8.75, 45-degree span 12 = 11.24, tile underside 10.70, 45-degree span 18 = 15.48, vertical span 12 = 14.75, 45-degree span 24 = 19.72, braced = 20.75, vertical span 18 = 20.75, vertical span 24 and controls = 26.75."
+      },
+      {
+        "n": 16,
+        "statement": "The single largest evidentiary gap is that no wash-basket or vat census was performed, so NO H2 failure can be dated to print rather than to handling. Plate 6's entire in-print reading rests on that one observation; H2 has no equivalent licence, which means even the CM result is formally 'head absent at scoring time', not 'head lost in print'.",
+        "confidence": "high",
+        "evidence": "plate-06-results.md section 1: 'the wash basket was empty ... Every failure below is an in-print failure', and section 3 handling rider: 'a wash-basket loss reads as a false failure at precisely the boundary the plate exists to measure'. The H2 manifest limitations already require it: 'inspect both wash basket and vat for detached material before scoring, matching the recovered Plate-6 handling practice'. Owner report records no such inspection, and no break-surface, bend-direction or recovery-location data at all."
+      },
+      {
+        "n": 17,
+        "statement": "The specimen head as built contains an unsupported single-layer flange: the bicone's lower cone presents a flat down-facing 16-gon of diameter 2r+1.4 mm at z_terminal-1.25, hanging off the bare shaft. That is a 2.79 mm^2 (r=0.30) to 3.64 mm^2 (r=0.50) step in one layer, whereas plates 5 and 6 deliberately reached full cap area through a flare. This is a probable generator defect and an alternative failure initiator that the analysis cannot rule out.",
+        "confidence": "medium",
+        "evidence": "Measured ring stack, S1 V41: z=24.2500 d=2.000 A=3.0615 (shaft section there is only 0.2755), narrowing to the shaft at z=25.5000, then flaring to d=3.000 at z=26.7500. S4 BX50/BY50: z=18.2500 d=2.400 A=4.4086 above a 0.7653 shaft. Bottom diameter follows 2r+1.4 in both cases. plate-06-results.md section 2: 'Each cap reaches full diameter through a flare at 0.20 mm per side per 0.050 mm layer ... not through a single-layer step.' The H2 head's upper flare is gentle (0.048 mm/side/layer) but its lower disc is a true single-layer step."
+      }
+    ],
+    "failure_boundary": "TWO SEPARATE BOUNDARIES, both expressed in X = A_cap/A_arm = (1.5/r)^2 with A_cap = 6.8883 mm^2 measured from the mesh.\n\n(1) HEAD DETACHMENT (outcome `missing`). Boundary X* in (25.00, 36.00), i.e. r* in (0.25, 0.30) mm for this head. Evidence by rung: X=1.5625 r=1.20 -> 0/4 lost; X=2.778 r=0.90 -> 0/14; X=4.592 r=0.70 -> 0/8; X=9.00 r=0.50 -> 3/20 (V22, V32, BX50 - anomalous, see below); X=25.00 r=0.30 -> 0/11; X=36.00 r=0.25 -> 4/4 lost. Orientation does not enter: at every radius the vertical, +Y-inclined and +X-inclined cells give the same head-loss verdict, except the r=0.50 vertical pair. Span does not enter either: at r=0.30 no head was lost at any span from 6 to 24 mm, and at r=0.25 the only span tested (24 mm) lost 4/4.\n\nMATCH TO THE AREA LAW: yes, within one ladder step, and this is a genuine third-geometry reproduction. Plate 5 (cones) gave [25.00, 25.34]; plate 6 (cylinders) gave (19.91, 30.48); H2 (16-gon prisms with a bicone head, spans 6-24 mm, terminal heights 5.7-26.8 mm) gives (25.00, 36.00). All three intervals intersect at (25.00, 25.34]. H2's lower edge is not merely consistent - it is the same number, 25.00, and H2 says the specimens there SURVIVED, which is compatible with plate 5 only because plate 5's 25.00 datum (TB09) was itself flagged as a boundary inversion. The area law is confirmed in location; it is not sharpened, because the H2 ladder steps 25.00 -> 36.00 in one jump (1.44x) with nothing in between.\n\nWHAT THE AREA LAW DOES NOT PREDICT: the three head losses at X = 9.00 (V22, V32, BX50). At 9.00 the area law says survive by a factor of ~2.8 on ratio, and the same-plate r=0.30 rung at X=25.00 kept every head. These three are the only outcomes on the plate that no monotone law reaches.\n\n(2) PERMANENT SET (outcome `permanently_bent`). Confined entirely to r <= 0.30. 0/45 specimens at r >= 0.50 bent; 6-7 of 11 at r=0.30 bent; the r=0.25 columns bent as well ('present though bent'). Within r=0.30 the split is perfectly ordered by measured head-top height, threshold in (11.24, 14.75) mm: intact at z_top 6.99 (Y11, X11), 8.75 (V11), 11.24 (Y21, X21); bent at 14.75 (V21), 15.48 (Y31, X31), 19.72 (Y41, X41), 26.75 (V41). It is NOT cleanly ordered by free span - V21 bent at span 12 while X21 and Y21 are intact at span 12 - so a single span threshold cannot fit the data while a single height threshold can. Expressed for engineering use without committing to a mechanism: at r=0.30 a vertical member survived 6 mm of free span and took permanent set at 12 mm; a 45-degree member survived 12 mm and took permanent set at 18 mm.\n\nMODE ORDERING is monotone in section with no inversions: r >= 0.50 intact -> r = 0.30 bent, head retained -> r = 0.25 bent AND head lost. That is a single load axis acting on a shrinking cross-section, and it is why conclusion 2 (below) holds for 73 of 76 IDs.\n\nONE MECHANISM? Yes for 73 of 76. The S1 vertical bends (V21, V31, V41), the S2/S3 inclined bends (Y31, Y41, X31, X41), and the CM head losses all sit on one consistent picture: an area-law junction failure above X ~ 25-36, plus a bending/permanent-set mode that switches on at r <= 0.30 once the terminal is above ~13 mm. The inclined pattern differs from the vertical pattern by exactly one span rung, in the direction predicted by BOTH candidate mechanisms (lower terminal height, and sqrt(2) more cured area per layer at 45 degrees). NO for V22, V32 and BX50, which require a separate cause - a localised process event, a scoring/labelling error, or an unmodelled variance source inside the design-allowable band.",
+    "edge_confound": "DISCOUNTING T01: JUSTIFIED, high confidence. The reported failure is of the assembly scaffold (two left-most edge support pillars plus the outer guard pillar), not of the tile-support interface the cell exists to measure, and the roof came down as a consequence. T02 carries the identical 0.2 mm nominal contact radius and survived. The tile is also not a load-ladder cell at all: I measured it as a 12.0 x 8.0 mm slab with its ~96 mm^2 down-facing underside at z = 10.70 and its top at z = 13.50, supported by an uncharacterised number of pillars - so its X is neither computable from the manifest nor comparable to the ladder. Score it under a new `scaffold_failed` code and exclude it from every physics reading.\n\nDISCOUNTING BX50: NOT justified on the evidence as it stands; recommend scoring it as a specimen failure with a written, argued, attributable exclusion note rather than a silent drop. The failure mode reported ('head not attached to support') is a specimen outcome, not a scaffold outcome; the S4 outer guard mast failure is a separate, adjacent event. The plate-edge hypothesis is refuted as an X-axis effect by the edge analysis already on record: V11, Y11, X11 and X12 all sit at exactly x = -90.0, the same distance from the -X limit as T01 and closer than BX50, and all four are present_intact. What BX50 shares with T01 is strip_order 1 - outermost member of a rear assembly, adjacent to the most cantilevered tall feature on the plate - which is a scaffold-design correlate, not a specimen-physics one. plate-06-results.md section 6 is the governing precedent: an override of a pre-registered scoring rule is admissible only because it is written down, argued and attributable.\n\nWHAT BY50's SURVIVAL IMPLIES - and this is the decisive new fact: BX50 and BY50 are geometrically IDENTICAL in the printed mesh. I measured both from home-support-calibration-HOME-CAL-S4-BRACED-model.stl: head rings 4.4086 mm^2 at d=2.400 (z=18.25), 0.7653 at d=1.000 (z=19.50), 6.8883 at d=3.000 (z=20.75); shaft 32 triangles, 0.7653 mm^2 at both z=0 and z=19.5. Identical to four decimal places, identical triangle counts, and the manifest gives angle_from_vertical_deg = 0.0 for every S4 specimen so neither leans. The `orientation` label is built into the mesh only for the BRACED cells - I confirmed BX51's brace lens extends in Y while BY51's extends in X - and has NO geometric expression for the brace=none cells that carry the anomaly.\n\nConsequences: (a) BX50 vs BY50 is not an orientation contrast and must never be reported as one; it is a 1-vs-1 positional replicate of the same part. (b) The S4 design intended to cross orientation x radius x brace, but the orientation factor was not built for a third of the cells - that is a generator/manifest defect to file. (c) Since the two parts are the same part, the only remaining explanations for one losing its head at X = 9.00 while the other did not are plate position, local scaffold state, or run-to-run scatter. With n = 1 the pair establishes exactly one thing, and it is the safety-relevant thing: at X = 9.00, inside the engine's X_ALLOWED = 12 envelope, the outcome on this printer is NOT deterministic. That unmodelled variance, not the edge, is what the next plate has to bound.\n\nSTRUCTURAL CONFOUNDS THAT CANNOT BE BROKEN ON THIS PLATE: Y position is constant within each strip, so any Y effect is perfectly aliased with 'which assembly'; free span is perfectly aliased with terminal height because all 76 bases sit at z = 1.50; and strip_order 1 is aliased with proximity to the outermost guard mast in every strip.",
+    "control_gate": "GATE TEXT (protocol, 'Validity, results package, and limitations'): a run 'cannot support a safe policy unless all four CS controls survive and at least one CM control demonstrates intended marginal sensitivity.'\n\nLITERAL VERDICT: BOTH CLAUSES SATISFIED. CS1-CS4 all present_intact (4/4). CM1-CM4 all failed, so at least one demonstrated sensitivity. On a literal reading the gate passes.\n\nWHAT THE CM FAILURE ACTUALLY SAYS ABOUT THE DESIGN POINT - and it is not what the label claims. r = 0.25 gives X = 36.00, which sits ABOVE plate 5's [25.00, 25.34] and above the upper edge of plate 6's (19.91, 30.48). CM was therefore not 'deliberately marginal' - it was a predicted-to-fail POSITIVE control, functionally the same class as plate 6's ZS/ZL/PB, and it behaved exactly as the pre-existing area law says it must. The failure was also entirely as physically described by the owner: the columns self-supported (they printed and survived their own weight and drag) and failed only once the head's larger per-layer area arrived - i.e. the load event is the CAP area, not the column, which is a direct, independent confirmation of the area law's premise on a plate designed for something else.\n\nWHY THE GATE IS NEVERTHELESS NEARLY EMPTY OF INFORMATION:\n1. SATURATED. 4/4 failed rather than a mix, so the CM side bounds nothing from below. It proves sensitivity exists; it cannot say where sensitivity starts.\n2. NON-DISCRIMINATING. CM at X = 36 with a 96:1 slenderness ratio fails under the area law, under any slenderness/bending law, under the z > 9 mm artifact, and under simple non-formation. plate-06-results.md section 3 already ruled on exactly this pattern for PB: a control that fails under every candidate model 'discriminates none of them - it establishes only that the scorer did not tick a bare plinth.'\n3. WRONG Z BAND. Both CS and CM sit at head-top z = 26.75 mm, the tallest band on the plate. They validate only the four vertical span-24 cells. They say nothing about the 12 specimens whose critical layer is below 9 mm, nothing about the 45-degree ladder (tops out at 19.72), nothing about the braced strip (20.75) and nothing about the tiles (10.70-13.50). plate-06-results.md section 5 finding 7 rule 2 exists precisely to stop this: 'Never place a validity control in a different z band than the specimens it validates.' H2 repeats the mistake in milder form.\n4. UNDATED. No wash-basket or vat census was performed, so formally the CM heads are 'absent at scoring', not 'lost in print'. Plate 6's empty basket is what licensed its in-print reading; H2 has no such licence.\n\nDID FAILING AT PRINT SATISFY THE GATE OR MOOT IT? Both, in different phases. It SATISFIED the print-phase clause (sensitivity demonstrated). It MOOTED the gate's operational purpose, because CM was also the pre-registered first coupon of the loading phase ('Validate the fixture first with one deliberately marginal/strong control pair: CM1, then CS1') - CM was consumed at print, so no marginal control ever reaches the fixture and the fixture's sensitivity to a marginal coupon cannot be demonstrated as pre-registered.\n\nNET RULING: the gate passing does NOT license a safe policy here, because three independent conditions each block it on their own: (a) one plate is one replicate and the manifest/README require three independently prepared plates before promoting any exact tested cell; (b) the run is descriptive-only - no resin product/lot, no slicer profile export, no film photograph, no tank temperature, so the protocol's own 'visibly damaged film / non-production resin or profile' exclusion cannot even be evaluated; (c) the printed file's SHA-256 does not match the preregistered digest. The gate's only real yield is one clean fact: at fixed span, height, head, catcher and carrier, changing ONLY the shaft radius from 1.20 to 0.25 mm flips the plate from 4/4 survive to 4/4 head loss. That bounds X* in (1.56, 36.00) from the controls alone, and combined with the r=0.30 ladder rung, (25.00, 36.00).\n\nDESIGN FIX FOR THE NEXT PLATE: put CM at a genuinely marginal ratio. To bracket X* in (25, 36) the rungs want X = 27 / 30 / 33, i.e. r = 0.2887 / 0.2739 / 0.2611 mm, with the existing r = 0.30 (X = 25.00) retained as the known-survivor edge and r = 0.25 (X = 36.00) retained as the must-fail positive control. And place a CS/CM pair in EVERY z band the plate scores, not only the tallest.",
+    "loading_phase_plan": "CAN THE LOADING PHASE PROCEED? Not as pre-registered, and not at all until the fixture assembly question (handled separately) is resolved. But the coupon inventory is not the blocker people may assume: 15 of the 20 detachable coupons survived intact.\n\nSURVIVING DETACHABLE INVENTORY (manifest detachable_for_loading = true): CS1, CS2, CS3, CS4 (r=1.20, 24 mm span, use the receiver marked 24 at x=64); BX51, BX52, BX90, BX91, BX92, BY50, BY51, BY52, BY90, BY91, BY92 (all 18 mm span, use the receiver marked 18 at x=58; r=0.50 for BX51/BX52/BY50/BY51/BY52 and r=0.90 for the BX9x/BY9x). LOST: CM1-CM4 (no head at all - CM3 has 'only the very beginnings of a head', so none can be seated in a receiver or take a load at the terminal crossbar) and BX50. The protocol forbids substituting a non-detachable specimen, so V/Y/X/T IDs are all ineligible.\n\nWHY CM's LOSS MATTERS: the pre-registered order is 'Validate the fixture first with one deliberately marginal/strong control pair: CM1, then CS1.' CM1's job was to prove the rig can register a failure before a good coupon is risked. With CM gone, the surviving coupons span a 55x range in bending section modulus (pi r^3 / 4: CS r=1.20 gives 1.357 mm^3; BX/BY r=0.50 gives 0.0245 mm^3), and the weakest of them survived a print event far harsher than the schedule's first rung (20 g input = 0.049 N at the specimen), so a first-load failure is unlikely on ANY surviving coupon - which is exactly the sensitivity the CM pair was there to prove.\n\nRECOMMENDED SUBSTITUTION, in order of preference:\n1. BEST - print a small sacrificial CM-geometry batch purely as fixture-validation dummies, kept SHORT (base z 1.5, free span 6 mm) so their heads form in the well-behaved z band below 9 mm where 12/12 specimens survived on this plate. That gives a genuinely marginal, guaranteed-to-form coupon whose r = 0.25 puts it at X = 36 in print but which is deliberately weak in bending for the lever. This preserves the pre-registered logic (marginal first, strong second) at the cost of one small print.\n2. ACCEPTABLE - substitute BX51 (r = 0.50, 18 mm, brace=single) as the marginal proxy and record the substitution and its reason explicitly. Do NOT use BY50 for this: BY50 is the surviving half of the BX50/BY50 anomaly pair and is the single most evidentially valuable part on the plate. Photograph, caliper and archive BY50 before anything else touches it, and do not consume it in the fixture.\n3. FALLBACK if neither is possible - run CS1 first at the 20 g rung only, purely to prove the load path, seating and non-preload, then step to an r=0.50 coupon. Record that the run has NO marginal control in the loading phase and that the fixture's failure-detection sensitivity is therefore UNDEMONSTRATED.\n\nMANDATORY BOOKKEEPING WHATEVER IS CHOSEN:\n- Record 'CM1 not_attempted - specimen missing at print' on data sheet D, not a blank; a blank is not a pass.\n- The pre-registered marginal/strong PAIRING cannot be executed, so the loading phase is descriptive for the coupons that exist and cannot fulfil its own validity design. State that explicitly in the report.\n- Geometry-matched pairing is still available and should be used: BX51 vs BY51, BX52 vs BY52, BX91 vs BY91, BX92 vs BY92, and CS1/CS2/CS3/CS4 against each other as a 4-way repeatability check at one geometry - that CS quartet is the only genuine n=4 replicate the plate offers and is worth spending on measurement repeatability rather than on failure hunting.\n- Measure a_m and a_s on the individual cured fixture and calculate with the measured ratio; the 4:1 is nominal printed geometry only.\n- The cycles characterise one cured coupon and are not print replicates.\n\nBEFORE ANY OF THIS: do the wash-basket and vat/film census, and the retained-parts forensic pass described in the questions. Those are recoverable now and become unrecoverable the moment coupons are cut and loaded.",
+    "next_print_recommendation": "CHANGE NO ENGINE CONSTANT. Not X_ALLOWED, not brace_free_span_mm, not max_unbraced_shaft_r_mm, not peel_pressure_pa, not tensile_green_mpa, not modulus_green_gpa. Four independent blocks: one plate is one replicate (manifest limitation: 'Three independent plates are required before promoting an exact tested cell'); the run is descriptive-only for lack of resin lot / profile export / film photo / tank temperature; the printed file's digest does not match the preregistration; and every cell carrying new information is either an unreplicated bracket edge or inside a confound. What the run legitimately does is RAISE CONFIDENCE in the existing clamp without moving it (X* reproduced on a third geometry at (25.00, 36.00), leaving X_ALLOWED = 12 with 2.08x margin to the binding lower edge, versus plate 6's 1.66x) and FLAG one hazard (three head losses at X = 9.00, inside the allowable).\n\nFILE THESE GENERATOR DEFECTS NOW - they need no replication:\n1. S2 open-cradle guard stands are anchored to the build plate instead of the assembly base and broke during removal, bending Y31 and Y41. File against plate.rs add_open_cage_components: open-cradle masts must anchor to the assembly base, never to the build plate. If accepted, S2 carries zero print-attributable failures.\n2. The outermost guard mast of a rear assembly is the least-supported tall feature on the plate and failed in two places (T01's mast at world x = -96.2, the outermost tall structure anywhere on the plate; and the S4 mast adjacent to BX50, which failed about halfway up). Thicken or double-anchor it, and add a frangible/isolating detail so a mast failure cannot cascade into a specimen.\n3. S4's `orientation` factor is declared in the manifest but not built in the mesh for brace=none cells - BX50 and BY50 are geometrically identical. Either build the factor (rotate the head or lean the shaft) or delete the label.\n4. Add a `scaffold_failed` code to the manifest print_outcomes vocabulary, and a `_uncertain` qualifier so X41's '??' survives without being promoted to a clean permanently_bent.\n5. Review the head as a bicone with an unsupported single-layer down-facing flange of diameter 2r+1.4 mm at z_terminal-1.25 (2.79 mm^2 at r=0.30, 3.64 mm^2 at r=0.50, hanging off a 0.28-0.79 mm^2 shaft). Plates 5 and 6 both reached full cap area through a flare specifically to avoid a single-layer step. Either flare it or state why the step is wanted.\n\nNEXT PRINT: a MODIFIED plate, not a straight replicate. In priority order, and the first two are the ones that matter:\nA. BREAK THE SPAN/HEIGHT ALIAS. All 76 bases currently sit at z = 1.50, so free span and terminal height are perfectly aliased. Put the same (r, span) cell on stilts at 2-3 different base heights. The single decisive cell: r = 0.30, free span 6 mm, VERTICAL, base z raised to ~13.5 so its head top lands at ~20.75. The height model predicts permanent set; the per-layer-section model predicts intact (span 6 is below the vertical bend threshold). One factor, one prediction each, and it also tests plate 6's 'nothing above z ~ 9 mm is interpretable' rule directly.\nB. REPLICATE THE ANOMALOUS CELL. r = 0.50, 18 mm free span, unbraced, vertical - the BX50/BY50 geometry - at n >= 6, at mirrored plate positions so strip_order 1 lands at +X for half the copies and mid-carrier for the rest. This is the cell that threatens X_ALLOWED and it currently rests on 1 vs 1. Add the same for r = 0.50 at 12 and 24 mm vertical spans so the V22/V32/V42 non-monotonicity is either reproduced or retired.\nC. TIGHTEN X*. Add rungs between the current 25.00 and 36.00: r = 0.2887 / 0.2739 / 0.2611 (X = 27 / 30 / 33), keeping r = 0.30 as the known survivor and r = 0.25 as the must-fail positive control.\nD. CONTROLS IN EVERY Z BAND. A CS/CM pair at each scored terminal-height band, not only at the tallest, per plate 6 finding 7 rule 2.\nE. GUARD-MAST REDESIGN as per defect 2, plus mirrored strip order so strip_order 1 is not always at -X.\nF. FULL PREREGISTRATION: resin product and lot, slicer version and profile export hash, film state photograph, tank temperature, build-plate photograph, and the exact digest of the file actually sent to the printer. Without these the next plate is descriptive-only too and the whole exercise repeats.\nG. Fixed top / +X / +Y whole-plate photographs BEFORE anything is removed, and a wash-basket and vat/film census before scoring. Plate 6's entire in-print reading rests on that one observation.\n\nTHEN three independently prepared copies of that modified plate before promoting any cell into a measured engine constant. If only one plate can be printed, do A and B; C and D are cheap to add to the same build and should ride along.",
+    "cannot_conclude": [
+      "NOTHING can be promoted into a measured engine constant. One plate is one replicate; the manifest and README both require three independently prepared plates, and this run is additionally descriptive-only (no resin product/lot, no slicer version or profile export, no release-film photograph or inspection, no tank temperature) so the protocol's own 'visibly damaged film / non-production resin or profile makes the run descriptive only' exclusion cannot even be evaluated.",
+      "NO H2 failure can be dated to print rather than to handling. No wash-basket or vat/film census was performed. Plate 6 states explicitly that its empty basket 'is what licenses every failure was an in-print failure everywhere in this document'; H2 has no equivalent licence, so even the 4/4 CM result is formally 'head absent at scoring', not 'head lost in print'.",
+      "Free span cannot be separated from terminal height. All 76 bases sit at z = 1.50, so span and height above the plate are perfectly aliased within every strip. The 45-degree strips give partial leverage but confound lean with height simultaneously.",
+      "The two candidate mechanisms for the r=0.30 permanent-set boundary - a terminal-height effect with a threshold at z ~ 11-15 mm, versus a per-layer-section effect from the sqrt(2) larger cured area of a 45-degree shaft - cannot be separated. Both fit all 11 r=0.30 outcomes with one parameter and both predict the observed one-rung offset between vertical and inclined.",
+      "No orientation or peel-axis conclusion is available. The S4 orientation factor is not built in the mesh for the brace=none cells (BX50 and BY50 are geometrically identical), and S2 versus S3 differ in strip, plate position and lean direction at once. Plate 6 finding 3 already found no orientation effect with zero variance.",
+      "No brace-efficacy conclusion is available. 11 of 12 S4 cells survived, n = 1 per (radius x brace x label) cell, and the only failure is an unbraced cell whose geometrically identical unbraced twin survived. Zero measured variance attributable to bracing.",
+      "No Y-position conclusion is available. Y is constant within each strip, so every Y observation is perfectly aliased with 'which assembly'. The project record already says front-to-back Y sensitivity is <= 1 rung and should be randomised over, not measured.",
+      "No magnitude can be attached to any 'permanently_bent' score. No caliper readings were taken, so no bend can be compared to the protocol's 0.10 mm unresolved threshold or its 1.0 mm permanent-set stop criterion, and no deflection constant (max_deflection_mm, shaft_drag_force_n, modulus_green_gpa) can be fitted.",
+      "No removal/scar conclusion is available from T01-T08. Removal time, tile fracture, support fracture, largest remnant height, largest scar width and touch-up time were all unrecorded, and the tiles' support-pillar count and contact geometry were not characterised, so the tiles' own X ratio is not computable.",
+      "The failure LOCATION and mode cannot be determined for any specimen. Break-surface height and appearance (glassy/brittle vs fibrous/torn), bend direction in project axes, and where each detached head was recovered are all unrecorded. Without these, a print-time fracture cannot be distinguished from a handling fracture on any individual ID.",
+      "X* cannot be sharpened beyond (25.00, 36.00). The radius ladder steps 0.30 -> 0.25 in one jump, so the bracket is one ladder step wide (1.44x in X) and each edge rests on a single radius value.",
+      "Wet-resin stiffness cannot be separated from printer peel load (manifest limitation, and plate 6 finding 6: X is a phenomenological index, never a force model - never recombine peel_pressure_pa and tensile_green_mpa to re-derive it).",
+      "Whether the three head losses at X = 9.00 (V22, V32, BX50) represent real unmodelled variance inside the design-allowable band, a localised process event, or a scoring/labelling error cannot be decided from this plate. All three readings remain open and they have materially different engine consequences.",
+      "The digest-level deviation (printed H2-exact-grounded-full-plate.chitubox, sha256 a33b2e10..., versus the preregistered home-support-calibration-plate.chitubox, sha256 807bc648...) cannot be classified by me as benign or as a hard protocol violation - the geometry delta is 9.5e-7 mm, four orders below the 0.1 mm practical threshold, but the exclusion 'No auto-support, auto-repair, rescale, or layout change after preregistration' is written at the digest level and that is an owner ruling."
+    ],
+    "questions": [
+      "The wash-basket and vat/film census is the single most valuable recoverable observation and it gates every in-print claim in this analysis. Was it done, and if not can it still be done? Specifically: are the detached heads of V22, V32, BX50 and CM1/CM2/CM4 still in their debris cradles, loose in the vat, on the film, or in the wash basket? A head in its own cradle implies a print-time fracture; a head in the wash basket implies post-print handling. Plate 6 states its empty basket is what licenses its entire in-print reading - without an equivalent, none of H2's failures can be dated.",
+      "V22 and V32 (r=0.50, spans 12 and 18) lost heads while V42 (r=0.50, span 24) is intact and the whole r=0.30 rung at 2.78x the load ratio kept every head. Before this is reported as unmodelled variance inside X_ALLOWED, can you re-examine the retained S1 parts and confirm the IDs were not transposed - specifically that the intact 24 mm r=0.50 specimen really is the one at x = +66 and not the one at x = +18 or x = -30?",
+      "I measured BX50 and BY50 as geometrically IDENTICAL in the printed mesh (same head rings 4.4086 / 0.7653 / 6.8883 mm^2, same 32-triangle shaft at 0.7653 mm^2, angle_from_vertical 0.0 for both). The manifest's `orientation` factor is built only for the braced cells. Was S4's orientation factor intended to have a geometric expression for brace=none cells, and should I file the omission as a generator defect? If yes, this also means BX50/BY50 must never be reported as an orientation contrast.",
+      "The specimen head as built is a bicone whose lower cone presents a flat unsupported down-facing 16-gon of diameter 2r+1.4 mm at z_terminal - 1.25 (2.79 mm^2 at r=0.30, 3.64 mm^2 at r=0.50, hanging off a 0.28-0.79 mm^2 shaft) - a genuine single-layer step, where plates 5 and 6 deliberately reached full cap area through a 0.20 mm/side/layer flare. Was that step intended, or is it a generator defect? It is an alternative failure initiator I cannot rule out and it changes what A_cap means.",
+      "CM was labelled `deliberately_marginal` but r = 0.25 puts it at X = 36.00, above both prior plates' brackets - it is a must-fail positive control, not a marginal one. Was r=0.25 chosen knowing where it sits relative to X_STAR_CONE and X_STAR_CYLINDER? If not, the next plate's CM should move to r = 0.2739-0.2887 (X = 30-27) and r = 0.25 should be relabelled as the positive control.",
+      "X41 is scored '??' (slight bend AND glued to its guard posts, possible post-removal wet-resin contact that cured in place). Treated as censored, the ProjectPositiveX r=0.30 bend boundary rests on X31 alone; treated as bent, it fits the height model cleanly; treated as intact, the height model gains one inversion. Which do you want? Note that under my height reading X41 (z_top 19.72) is predicted bent, so scoring it bent is the self-consistent choice - but I do not want to score to a model.",
+      "Should the S2 guard-stand grounding be filed as a generator defect against plate.rs add_open_cage_components (open-cradle masts must anchor to the assembly base, never to the build plate), and should S2 then be reported as carrying zero print-attributable failures? That changes the r=0.30 bend evidence from 7 specimens to 5.",
+      "The decisive next experiment for the mechanism question is one cell: r = 0.30, free span 6 mm, VERTICAL, base raised on a ~13.5 mm stilt so the head top lands near z = 20.75. The terminal-height model predicts permanent set; the per-layer-section model predicts intact. Do you want that cell specified for the next plate, or do you want the current single-replicate result reported as inconclusive and left alone?",
+      "Do you want the run classified as a screening run whose cells can never be promoted - so its only outputs are (a) the X* reproduction at (25.00, 36.00), (b) the r=0.30 bend boundary as a two-mechanism open question, and (c) the generator defects to fix - and explicitly NOT any safe-support policy? I have written it that way and want it confirmed.",
+      "For the retained parts, please confirm you can still capture, for every non-intact ID: break-surface height in mm from the base datum plus which of base-fillet / mid-shaft / head-junction; break-surface appearance (flat and glassy = brittle/print-time, versus fibrous, whitened or torn = ductile/handling); bend direction as a project-axis vector with residual tip offset by caliper to 0.1 mm (a bend toward -Y would corroborate the tilt-peel model); the residual bend of the CM columns themselves; and photographs of T01's and BX50's failed guard masts showing fracture height relative to the mast base. Also confirm whether the fixed top / +X / +Y whole-plate photographs were taken before anything was removed - if they exist they can still settle T01 and BX50.",
+      "I could not determine the number or contact geometry of the support pillars under the removal tiles from the S5 mesh, so the tiles' own X ratio is not computable and T01 cannot be assessed against the area law at all. Do you have the tile support parameters (pillar count and pitch), or should the T-series be reported as uncharacterised for load purposes?"
+    ]
+  },
+  "challenger": {
+    "verdicts": [
+      {
+        "conclusion_n": 1,
+        "verdict": "weakened",
+        "reasoning": "CORE ARITHMETIC CONFIRMED INDEPENDENTLY. I re-measured the meshes myself (script /private/tmp/claude-501/-Users-craig-code-hughescr-dnd-campaigns/d0490c5c-5036-418a-aec2-ba31ad38a4b6/scratchpad/chal-prof.ts). Top ring is a 16-gon of circumradius 1.5000 (d=3.0000, hull area 6.8883, hull_n=16) on CS1 (r=1.20), CM1 (r=0.25), V22/V42 (r=0.50), V44 (r=0.90), BX50, BY50. Shaft sections measured: 0.1913 (r=0.25), 0.7654 (r=0.50), 2.4798 (r=0.90), 4.4085 (r=1.20) = 3.0615 r^2 in every case. A_cap/A_arm = 6.8883/(3.0615 r^2) = 2.2500/r^2 confirmed. Ladder X values 36.00/25.00/9.00/5.325/4.592/2.778/1.5625 all check out.\n\nTHREE DEFECTS IN THE STATEMENT. (a) 'every specimen head is the same 16-gon' is false in detail: the head is a THREE-ring solid (z_term-1.25 lower disc, z_term waist = shaft, z_term+1.25 top cap). The lower-disc radius follows min(r+0.7, 1.45), NOT the proposer's stated '2r+1.4'. Measured: CM1 0.95, BX50/BY50 1.20, V44 1.45 (not 1.60), CS1 1.45 (not 1.90). The proposer generalised from two thin rungs; the rule fails for r >= 0.75. This is lucky rather than harmless: had the rule really been 2r+1.4, the r=0.90 head's maximum section would be 7.837 mm^2 and the CS controls' 11.05 mm^2, i.e. A_cap would NOT be constant and X_CS would be 2.507 not 1.5625. The conclusion is right for the wrong reason and the stated evidence does not support it.\n\n(b) 'directly comparable to plate 5 and plate 6 without any modelling assumption' is refuted by the record it cites. plate-06-results.md §5 finding 2: the mono bracket is 'conditional on the 4.00 mm arm length, so it is NOT a general length-independent constant (§7's length bound is what is available instead).' H2's arms are 6-24 mm, i.e. 1.5x to 6x plate 6's. Cross-plate comparison therefore REQUIRES the length-independence assumption plate 6 explicitly denies.\n\n(c) H2's head is not the plate-5/plate-6 load geometry. Plates 5/6 put a cap directly on an arm; H2 interposes a wide flat disc BELOW a waist that is exactly A_arm. Which layer's area counts is a modelling choice (see missed finding on the alternative convention). 'Without any modelling assumption' is not sustainable."
+      },
+      {
+        "conclusion_n": 2,
+        "verdict": "weakened",
+        "reasoning": "THE CENSUS IS NUMERICALLY WRONG. Counted directly from the manifest CSV (awk on column 6): r=0.250 -> 4, r=0.300 -> 12, r=0.500 -> 18, r=0.650 -> 8, r=0.700 -> 12, r=0.900 -> 18, r=1.200 -> 4 (sum 76). The proposer reports '0/14' at r=0.90 (actual n=18), '0/8' at r=0.70 (actual 12), '3/20' at r=0.50 (actual 18), '0/11' at r=0.30 (actual 12 - the enumeration lists twelve IDs while the denominator says eleven). The r=0.65 rung (8 removal tiles, X = 5.325) is omitted from the ladder entirely even though conclusion 1 places it on the ladder; with T01 excluded it is 0/7, with T01 included 1/8. The ladder's qualitative shape survives; its stated evidence does not.\n\nTHE 'REPRODUCTION' IS OBTAINED BY DELETING THE COUNTEREXAMPLES. Three specimens at X = 9.00 lost heads. The area law says they must survive by ~2.8x on ratio. A boundary of (25.00, 36.00) exists only after those three are set aside as anomalous - which is a conclusion (no. 5), not a datum. Stating 'the area law therefore reproduces on a third, independent geometry' at HIGH confidence, when 3 of 18 specimens 2.8x inside the claimed safe side failed, overstates. The honest form is: head loss on H2 is NOT a monotone function of X; conditional on excluding V22/V32/BX50, the surviving ladder is monotone with a gap between 25.00 and 36.00.\n\nFurther: 'free spans 6-24 mm' is offered as evidence of independence from plate 6, but it is simultaneously the reason the comparison needs plate 6's disallowed length-independence assumption (see conclusion 1)."
+      },
+      {
+        "conclusion_n": 3,
+        "verdict": "refuted",
+        "reasoning": "THE INTERSECTION IS THE EXACT OPERATION THE RECORD FORBIDS. plate-06-results.md §5 finding 2, verbatim: 'The two remain separately named constants (X_STAR_CONE, X_STAR_CYLINDER) because they were measured on different geometries at very different precision, and merging them would launder that difference away.' Intersecting [25.00, 25.34] (cones, A_tip from a nominal cone tip diameter - and plate 5 finding 3 records that the failing section was NOT the tip disc), (19.91, 30.48) (cylinders, n=1 at each edge, conditional on 4.00 mm arms) and (25.00, 36.00) (16-gon prisms, 6-24 mm arms, and only after deleting three counterexamples) is a merge across three geometries, three arm-length regimes and three precisions.\n\nTHE RESULT IS SPURIOUS PRECISION. The output interval is 1.4% wide and is pinned entirely by TB09, the single plate-5 datum that plate 5 itself flagged as a boundary INVERSION - i.e. the least trustworthy point in the whole corpus is doing all the work. H2's own contribution to the lower edge is 'survived at exactly 25.00', which CONTRADICTS plate 5's 25.00 datum rather than confirming it; the proposer resolves the contradiction by invoking the inversion, then keeps the inverted point as the bracket edge.\n\nThe closing clause ('nothing in H2 argues for moving the engine's phenomenological clamp') is correct and survives. The intersection that precedes it should be struck."
+      },
+      {
+        "conclusion_n": 4,
+        "verdict": "weakened",
+        "reasoning": "COUNT ERROR: 'No specimen at r>=0.50 is recorded as bent anywhere on the plate (0/45)'. From the CSV, r >= 0.50 is 18+8+12+18+4 = 60 specimens (52 excluding the 8 tiles). Neither is 45.\n\nATTRIBUTION: the ordering is presented as a single load axis acting on a shrinking section, but 3 of the 7 r=0.30 bends are not print-attributable on the owner's own account - Y31 and Y41 ('S2 guard stands were attached directly to the build plate rather than to the assembly base and broke during removal; the heads are fully formed and intact, so the owner believes the bending happened during plate removal') and X41 (scored '??', slight bend AND glued to its guard posts, suspected post-removal wet-resin contact). Strip that out and the r=0.30 bend evidence is V21, V31, V41, X31 - a clean vertical ladder plus one inclined point. The mode ordering is still ordered, but 'exactly what a single load axis acting on a shrinking section predicts' is a claim about print physics resting on a set that is ~43% handling-contaminated.\n\nThe r=0.25 end is also weaker than stated: 'present though bent' on CM1/CM2/CM4 is a bend observed AFTER the head departed, so it cannot be ordered against bends observed with the head still attached without assuming when each event happened - and no wash-basket census exists to date either event (conclusion 16)."
+      },
+      {
+        "conclusion_n": 5,
+        "verdict": "weakened",
+        "reasoning": "THE ANOMALY IS REAL AND I STRENGTHENED IT. I compared the built cells of V12/V22/V32/V42 (S1, all r=0.50) with chal-env.ts: identical cradle/guard cluster footprints to 0.01 mm (dx=3.25 dy=+/-1.40, 3.01/+/-2.00, -3.38/+/-1.37, -3.21/+/-2.00, 3.62/+/-1.37, -3.75/+/-1.40, 3.25/+/-2.60, -3.38/+/-2.63, 3.79/+/-2.00, -3.99/+/-2.00, 3.62/+/-2.63, -3.75/+/-2.60), differing only in mast top height, which tracks the specimen (z=[0,8.00], [0,14.00], [0,20.00], [0,26.00] for spans 6/12/18/24 = terminal_z + 0.5). Head profiles of V22 and V42 are identical modulo z-offset. So there is genuinely no geometric explanation, and the non-monotonicity is not a build artefact of the cell.\n\nTHREE OVERSTATEMENTS. (a) 'each has a same-cell sibling that survived' is false for BX50: its cell is NOT identical to BY50's - the cradle and guard structure is rotated 90 degrees (see conclusion 6), and the owner reports the S4 outer guard mast adjacent to BX50 failed halfway up. BX50 does not belong in the same evidential class as V22/V32.\n(b) 'This is the single safety-relevant result of the run' presupposes an in-print reading. With no wash-basket/vat census and no break-surface forensics (the proposer's own conclusion 16), 'head absent at scoring' is equally consistent with two handling losses. Calling it THE safety result while conceding elsewhere that it cannot be dated is internally inconsistent.\n(c) 'INSIDE the engine's own X_ALLOWED = 12 envelope' is correct as arithmetic (9.00 < 12.0, X_ALLOWED verified at plate-06-results.md §5 finding 2) but the hazard framing is not robust to the area convention: under the first-step convention the same specimens sit at X_step = 5.76 and the boundary itself lands at 11.1-14.4, i.e. the anomaly moves but so does the clamp."
+      },
+      {
+        "conclusion_n": 6,
+        "verdict": "refuted",
+        "reasoning": "REFUTED BY DIRECT MEASUREMENT. The specimen BODIES are indeed identical - I confirmed triangle-for-triangle at half-width 2 mm (chal-cmp.ts, after normalising -0.0000 to 0.0000): 128 triangles each, exact match, rings 4.4085 / 0.7654 / 6.8883 at z 18.25 / 19.50 / 20.75, shaft 0.7654 at z=0. (Note the proposer's area-based evidence could not have detected a rotation anyway: a 16-gon is invariant under 90 degrees, since 90 = 4 x 22.5.)\n\nBUT THE CELLS ARE NOT IDENTICAL, AND THE ORIENTATION FACTOR IS BUILT. At half-width 5 mm the two differ in 416 of 544 triangles. Census (chal-env.ts): BX50's cradle/guard features sit at (dx, dy) = (+/-1.40, 3.25), (+/-2.00, 3.01), (+/-1.37, -3.38), (3.96, 0.00), (4.22, +/-0.78), (5.00, 0.00), (5.00, +/-1.04), (6.04, 0.00); BY50's sit at (3.25, +/-1.40), (3.01, +/-2.00), (-3.38, +/-1.37), (0.00, 3.96), (+/-0.78, 4.22), (0.00, 5.00), (+/-1.04, 5.00), (0.00, 6.04). Every BY50 feature is a BX50 feature with x and y swapped. The whole debris cradle and guard set is rotated to the ProjectPositiveX / ProjectPositiveY label. S1's Vertical cells use the BY-style (y-swapped) layout, so the generator is applying the factor systematically, not accidentally.\n\nCONSEQUENCES. 'The manifest's orientation factor has no geometric expression at all for the brace=none cells of S4' is false. Generator defect 3 in next_print_recommendation ('Either build the factor or delete the label') and the corresponding question would be a FALSE bug report against working code - the highest-cost error in the submission. The downstream inference (BX50 vs BY50 is not a specimen-orientation test) survives, because the specimen body is identical and README declares the cradle non-load-bearing - but it now rests on a different argument, and cradle/guard orientation is a FOURTH confound added to the pair, not one removed."
+      },
+      {
+        "conclusion_n": 7,
+        "verdict": "weakened",
+        "reasoning": "THE ALIAS IS REAL AND VERIFIED. All 76 base_z_mm = 1.500 (CSV column 12, single distinct value). Terminal z values verified (5.743 / 7.500 / 9.985 / 12.750 / 13.500 / 14.228 / 18.471 / 19.500 / 25.500) and head top = terminal_z + 1.25 confirmed against the STL bounding boxes (S1 max z 26.750, S2/S3A/S3B 19.721, S4 20.750, S5 26.750). The height ordering is real: recomputed as height above base, intact <= 9.735 mm (Y11/X11 5.493, V11 7.25, Y21/X21 9.735), bent >= 13.25 mm (V21 13.25, Y31/X31 13.978, Y41/X41 18.221, V31 19.25, V41 25.25) - no inversion.\n\nBUT THE COUNT IS WRONG AND ONE SPECIMEN IS MISSING FROM THE FIT. 'All 11 r=0.30 specimens' - there are 12 (CSV: r=0.300 count 12). V31 (vertical, span 18, bent, z_top 20.75) is absent from the enumeration. It happens to fit, so the model survives, but a fit presented as 'PERFECT' that silently omits a data point is not verifiable as written.\n\n'DECISIVELY REFUTES SPAN/SLENDERNESS' IS WRONG. It refutes a single RAW-SPAN threshold only. Base bending moment M = F_lateral x h, where h = L cos(theta), fits all 12 outcomes with one parameter, is ordinary cantilever mechanics, and is the same family as the engine's own sizing law. Within each orientation the span threshold is also clean (vertical: intact 6, bent >= 12; inclined: intact <= 12, bent >= 18) - it is only the cross-orientation pooling that fails, and cos(45) = 0.707 is exactly the factor that reconciles it. Slenderness is not refuted; it is reparameterised."
+      },
+      {
+        "conclusion_n": 8,
+        "verdict": "weakened",
+        "reasoning": "THE MECHANISM PAIR IS INCOMPLETE. A third single-parameter mechanism fits every r=0.30 outcome and is not on the list: base bending moment M = F x h for a lateral in-print force, h = L cos(theta) = height above base. It is standard cantilever mechanics, has nothing to do with plate 6's z-band artefact, and is the mechanism the engine's own placement.py sizing encodes. It is fully aliased with mechanism A on this plate because all bases sit at z=1.500.\n\nTHIS BREAKS THE 'DECISIVE' EXPERIMENT. The proposed stilt cell (r=0.30, span 6, vertical, base raised to ~13.5 mm) is claimed to separate A from B. Under mechanism C the moment arm is unchanged by a stilt, so C predicts INTACT - the same prediction as B. The experiment therefore separates {A} from {B, C} only, and cannot answer the question the proposer says it answers. A cell that does separate B from C is one that varies angle at FIXED height above base (e.g. r=0.30 at 45 degrees with span 8.49 mm, h = 6.0 mm, against V11 at span 6, h = 6.0).\n\nTHE p-VALUE IS CIRCULAR. The 12 specimens with peak-area layer below 9 mm are EXACTLY the 12 span-6 specimens (V11-V14 at z_top 8.75, Y11-Y14 and X11-X14 at 6.99). The set is defined by the shortest span, lowest moment and stiffest configuration on the plate. P(0 failures in 12) = 0.75^12 = 0.032 is therefore a test of 'do short stubby members survive', not of a z band, and it is computed against a base rate that includes the very failures the load ladder predicts. The 12/12 counts and the 42/56 base rate are arithmetically correct (I verified: 68 non-tile specimens, 14 failed or bent above 9 mm), but the inference is not available."
+      },
+      {
+        "conclusion_n": 9,
+        "verdict": "refuted",
+        "reasoning": "CATEGORY ERROR ON BOTH SIDES OF THE COMPARISON. The engine's tan(theta) term lives in _shaft_r_for_L (placement.py:130-153), which physics_load_sizing.md §1b classifies verbatim as 'a stiffness/serviceability limit, not a strength limit'; the F_eff term feeds a 0.15 mm visual-ribbing deflection budget. The plate observation being compared to it is permanent SET - a yield event, and one the proposer's own conclusion 11 concedes uses a different criterion. The engine's head-detachment path (tip_radius_mm, placement.py:113-122) has NO angle term at all, and H2 lost no head at r=0.30 in any orientation, so H2 contributes zero observations on the quantity the tan(theta) term actually governs.\n\nTHE OBSERVATION IS EXPLAINED BEFORE ANGLE ENTERS. At 45 degrees the member reaches 0.707 L in height, so V21 (h = 12 mm) versus X21/Y21 (h = 8.49 mm) is a height/moment contrast, not an angle-strength contrast. The plate contains no cell that varies angle at fixed height, so no angle-dependent sign can be extracted at all.\n\nplate-06-results.md §5 finding 3 already resolved the engine-facing question by measurement ('no orientation term in sizing or placement'), and this conclusion offers nothing that would reopen it. Reporting 'the plate shows the opposite sign to the engine's term' invites a change to a constant on evidence that does not bear on it."
+      },
+      {
+        "conclusion_n": 10,
+        "verdict": "upheld",
+        "reasoning": "ARITHMETIC AND CITATIONS VERIFIED. physics_load_sizing.md §1a rows confirm peel_pressure_pa 3000.0 (config.py:23), tensile_green_mpa 10.0 (config.py:29), tip_safety_factor 8.0 (config.py:34); §1b confirms tip_radius_mm = sqrt(F.SF/(pi.sigma)) with F = carried_area_m2 . peel_pressure_pa (placement.py:113-122). A_carried/A_tip = sigma/(P.SF) = 10e6/(3000 x 8) = 416.67. plate-06-results.md §5 finding 6 verified verbatim, including 'Use the ratio; never recombine peel_pressure_pa and tensile_green_mpa to re-derive X' and the 4.8 MPa / 1.24 kPa ~ 3900 route.\n\nTWO QUALIFICATIONS, NEITHER FATAL. (a) 'H2 INDEPENDENTLY reconfirms' is too strong: the 416.7 figure is computed entirely from engine constants and contains no H2 data; H2's contribution is only the boundary observation, which is the thing in dispute in conclusions 2 and 3. It is a re-run of plate 6's argument with a second pair of constants, plus one more geometry - real, but not independent in the sense claimed. (b) The engine's tension law assumes a circular section (pi r^2) while the plate builds 16-gons (3.0615 r^2, 2.5% smaller), so every X realised on this plate is 2.5% above its circular-section nominal. Immaterial at a 12x-17x discrepancy; worth a footnote if X is ever quoted to three figures."
+      },
+      {
+        "conclusion_n": 11,
+        "verdict": "refuted",
+        "reasoning": "ARITHMETIC ERROR OF 2.92x, DEMONSTRABLE FROM THE PROPOSER'S OWN FORWARD NUMBERS. The law is delta = 4FL^3/(3.E.pi.r^4) (physics_load_sizing.md §1b, placement.py:130-168), so L_max = (3.E.pi.delta.r^4/(4F))^(1/3). With r = 0.30 mm, E = 500 MPa, delta = 0.15 mm, F = 0.01 N: numerator 3 x 500 x pi x 0.15 x 0.0081 = 5.7256, divided by 4F = 0.04 gives 143.14 mm^3, cube root 5.231 mm. The proposer reports 1.79 mm - which is exactly 5.7256^(1/3) = 1.789, i.e. the /(4F) divisor was dropped. Their own forward figures prove it: they compute delta = 0.23 mm at L = 6 mm, only 1.5x the 0.15 mm budget, so L_max must sit just under 6 mm and cannot be 1.79 mm (at 1.79 mm the model gives delta = 0.0060 mm).\n\nCORRECTED PICTURE (full ladder, verified): r = 0.25 -> 4.10 mm; 0.30 -> 5.23; 0.50 -> 10.34; 0.70 -> 16.19; 0.90 -> 22.63; 1.20 -> 33.22. So r=0.30 clean at 6 mm is 1.15x the engine limit (not 3.4x) and bent at 12 mm is 2.29x (not 6.7x). The engine's serviceability limit sits just BELOW the observed permanent-set onset rather than comfortably below it, and the model is not uniformly conservative: r=0.50 survived 24 mm against a 10.34 mm limit (2.3x) while r=0.90 survived 24 mm against 22.63 mm (1.06x). The conclusion's direction ('no recalibration licensed') survives; every number in it does not, and the corrected numbers are materially less reassuring than the ones reported."
+      },
+      {
+        "conclusion_n": 12,
+        "verdict": "weakened",
+        "reasoning": "THE '22/22' DOES NOT EXIST. From the CSV, r=0.70 has 12 specimens and r=0.90 has 18 (30 combined); the unbraced r=0.7/0.9 cells at 24 mm free span in all three orientations are 6 (V43, V44, Y43, Y44, X43, X44), and the r=0.9 braced-strip cells at 18 mm are 6 (BX90-92, BY90-92). No grouping on this plate yields 22.\n\n'SUPPORTED' IS THE WRONG WORD FOR brace_free_span_mm. Unbraced survival at 24 mm free span provides no support for a brace trigger at 18 mm; it fails to contradict it while showing the trigger is conservative for r >= 0.70. With the corrected deflection numbers (conclusion 11) the engine's own law gives max_unbraced_len = 16.19 mm at r=0.70 and 22.63 mm at r=0.90 - both exceeded intact - so the actionable statement is that the constant is conservative at the fat end, which is the opposite of 'supported'. Nor is max_unbraced_shaft_r_mm = 0.9 tested: it is a cap on radius, and surviving AT 0.9 says nothing about the cap.\n\nThe bracing-efficacy half is upheld: 3/4 unbraced intact versus 8/8 braced intact at n=1 per (radius x brace x label) cell carries essentially no information, and the one failure's twin survived."
+      },
+      {
+        "conclusion_n": 13,
+        "verdict": "upheld",
+        "reasoning": "VERIFIED AGAINST PRIMARY SOURCES. T01 and T02 share contact_radius_mm = 0.200 (CSV rows 62-63; depths 0.400 and 0.800), so contact geometry does not separate them. The four x = -90.000 survivors are confirmed in the CSV: V11 (y -51), Y11 (y -37), X11 (y -9), X12 (y +5), all present_intact, all as close to the -X limit as T01 and closer than BX50 (x = -85). The plate-06 §6 standing rule is quoted accurately: 'the override is admissible only because it is written down, argued, and attributable. A future plate must not repeat the pattern.'\n\nONE CORRECTION THAT CUTS THE PROPOSER'S WAY. The case for treating BX50 as scaffold-contaminated is STRONGER than allowed: BX50's cell is not a clean replicate of BY50's (its cradle and guard set is rotated 90 degrees - conclusion 6), and the owner records the S4 outer guard mast adjacent to BX50 failing about halfway up. The proposer's 'score it as a failure with a written, argued, attributable exclusion note' is still the right disposition, but the accompanying claim that its only distinguishing feature is strip_order should be dropped."
+      },
+      {
+        "conclusion_n": 14,
+        "verdict": "weakened",
+        "reasoning": "THE AREA-LAW ARITHMETIC IS RIGHT (X_CM = 2.25/0.0625 = 36.00, above both prior brackets) AND THE PLATE-6 PARALLEL IS QUOTED ACCURATELY. But 'mislabelled' presumes 'deliberately marginal' meant marginal with respect to X*, and that presumption is untested.\n\nTHE LADDER IS BUILT AROUND ENGINE CONSTANTS, NOT AROUND X*. From physics_load_sizing.md §1a: min_shaft_r_mm = 0.3 (config.py:61) is exactly the ladder floor; max_unbraced_shaft_r_mm = 0.9 (config.py:60) is exactly the ladder ceiling; brace_free_span_mm = 18.0 (config.py:225-237) is exactly a span rung; tip_r_max_mm = 1.0 (config.py:40) sits just below the CS control at r = 1.20. On that reading CM at r = 0.25 is one step BELOW the engine's own minimum shaft radius - a coherent design of 'marginal relative to policy', and arguably the more useful control for an engine-calibration plate. The proposer never checked the ladder against config values, so the mislabelling charge is not established, and the proposed redesign (CM at r = 0.2739-0.2887) would abandon the policy-referenced design point in favour of an X*-referenced one without stating the trade.\n\nThe substantive point - that a control failing under every candidate model discriminates none of them - stands, and the plate-6 §3 PB precedent is quoted correctly."
+      },
+      {
+        "conclusion_n": 15,
+        "verdict": "upheld",
+        "reasoning": "VERIFIED. CSV: CS1-CS4 and CM1-CM4 all have terminal_z_mm = 25.500 at y = 49.000, base_z = 1.500; I measured the CS1 and CM1 head-top ring at z = 26.7500 directly in the S5 STL, matching only V41-V44 (terminal_z 25.500). The distinct terminal_z set on the plate is {5.743, 7.500, 9.985, 12.750, 13.500, 14.228, 18.471, 19.500, 25.500}, so the controls occupy one of nine bands and the tallest. plate-06-results.md §5 finding 7 rule 2 is quoted verbatim: 'Never place a validity control in a different z band than the specimens it validates.'\n\nThe milder-form framing is right: plate 6's failure was a control in the SAME anomalous band as its specimens (which is what let A6 self-void cleanly); H2's is a control in a band that only 4 of 76 specimens share. Both are covered by the rule; H2's exposure is that the controls certify nothing about the 12 sub-9 mm cells, the 45-degree ladder (tops at 19.721, confirmed from the S2/S3 STL bounding boxes), the braced strip (20.750) or the tiles (terminal_z 12.750)."
+      },
+      {
+        "conclusion_n": 16,
+        "verdict": "upheld",
+        "reasoning": "VERIFIED VERBATIM ON BOTH SIDES. plate-06-results.md §1 provenance table: 'the wash basket was empty. Owner, 2026-07-31: \"The wash basket is empty - everything that failed, failed in printing not in the wash.\" Every failure below is an in-print failure.' §7 adds 'Post-print handling - eliminated. The wash basket was empty, so every ...'. The H2 README limitation is verbatim: 'Any such fracture is a failed specimen; inspect both wash basket and vat for detached material before scoring, matching the recovered Plate-6 handling practice.' The owner's report records no such inspection.\n\nTHE PROPOSER UNDER-APPLIES ITS OWN CONCLUSION. If no failure can be dated to print, then conclusion 2's ladder, conclusion 4's mode ordering and conclusion 5's 'single safety-relevant result' are all statements about specimens absent or bent AT SCORING TIME. Each of those is asserted at HIGH confidence in print-physics language. The gap between conclusion 16 and conclusions 2/4/5 should be closed explicitly in the report rather than left as a limitation paragraph."
+      },
+      {
+        "conclusion_n": 17,
+        "verdict": "upheld",
+        "reasoning": "CONFIRMED INDEPENDENTLY AND STRENGTHENED, WITH ONE CORRECTION. I profiled complete columns: CM1 has vertex z-levels at 0.0000 (0.1913), 24.2500 (2.7630), 25.5000 (0.1913), 26.7500 (6.8883) and nothing between - 17 vertices per level, 16 on the hull plus a centre vertex, i.e. each level is a flat fan-triangulated 16-gon face. So the lower ring is a genuine FLAT down-facing disc, not a taper: at z = z_term - 1.25 the section jumps from A_arm to the disc in one layer. Measured step ratios: r=0.25 14.4x (0.1913 -> 2.7630), r=0.30 11.1x, r=0.50 5.8x (0.7654 -> 4.4085), r=0.90 2.6x (2.4798 -> 6.4367), r=1.20 1.46x (4.4085 -> 6.4367).\n\nCORRECTION: the stated rule 'diameter 2r+1.4' is wrong for r >= 0.75. Measured lower-ring radii are min(r + 0.7, 1.45): V44 (r=0.90) 1.4500 not 1.6000; CS1 (r=1.20) 1.4500 not 1.9000. The 1.45 cap is what preserves A_cap = 6.8883 as the true maximum section on every rung (see conclusion 1).\n\nThe plate-06 §2 contrast is quoted correctly, and the upper flare rate is right in magnitude: (1.5 - r)/1.25 mm per mm gives 0.040-0.050 mm per side per 0.050 mm layer, against plate 6's 0.20. So H2's upper flare is four to five times GENTLER while its lower face is a true single-layer step - the opposite arrangement to the plates it is being compared with."
+      }
+    ],
+    "join_spot_check": "CLEAN. I checked 45 manifest CSV rows by line number against the joined data (/private/tmp/plinth-home-loading-fixture-inspection/home-support-calibration-manifest.csv), covering EVERY non-intact ID plus 32 controls and survivors. All 14 non-intact IDs verified field-by-field: V21 (line 6, S1, order 5, span 12.000, r 0.300, x -42, y -51, base_z 1.500, term_z 13.500, detachable false); V22 (7, span 12.000, r 0.500, x -30); V31 (10, span 18.000, r 0.300, x 6); V32 (11, span 18.000, r 0.500, x 18); V41 (14, span 24.000, r 0.300, x 54); Y31 (26, S2, 45.0 deg, ProjectPositiveY, r 0.300, x 6, y -37, term 6/-24.272/14.228); Y41 (30, r 0.300, x 54, term 14.228->18.471); X31 (42, S3A, r 0.300, x -28.544, y -9); X41 (46, S3A, r 0.300, x 14.912, y -9, term_z 18.471); BX50 (50, S4, order 1, Braced, span 18.000, r 0.500, angle 0.0, ProjectPositiveX, brace None, x -85, y 28, detachable true); T01 (62, RemovalTile, span 10.000, r 0.650, x -90, y 49, contact_radius 0.200, contact_depth 0.400, detachable false); CM1 (71, ValidityControl, r 0.250, x 29, deliberately_marginal, detachable true); CM2 (73, x 51); CM3 (75, x 73); CM4 (77, x 95). Controls verified: CS1 (70, r 1.200, x 18, must_survive), CS2 (72, x 40), CS3 (74, x 62), CS4 (76, x 84). Survivor spot-checks verified: V12, V13, V14, V23, V24, V33, V34, V42, V43, V44, Y11, Y12, Y13, Y14, Y21, Y22, Y23, Y24, Y32, Y33, Y34, Y42, Y43, Y44, X11, X12, X13, X14, X21, X23, X24, X32, X33, X34, X43, X44, BX51, BX52, BX90, BX91, BX92, BY50, BY51, BY52, BY90, BY91, BY92, T02, T03, T08. ZERO discrepancies in id, strip_id, strip_order, span_mm, radius_mm, angle, orientation, brace, base_x/y/z, terminal_x/y/z, detachable, contact_radius/depth or control_expectation.\n\nAGGREGATES INDEPENDENTLY RECOMPUTED FROM THE CSV, AND THE PROPOSER'S DIFFER. Radius census (awk -F, on column 6): 0.250 -> 4, 0.300 -> 12, 0.500 -> 18, 0.650 -> 8, 0.700 -> 12, 0.900 -> 18, 1.200 -> 4; total 76. The proposer's conclusion-2 denominators (14 at r=0.90, 8 at r=0.70, 20 at r=0.50, 11 at r=0.30) and conclusion-4's '0/45 at r>=0.50' (actual 60, or 52 excluding tiles) and conclusion-12's '22/22' do not match. base_z_mm has exactly one distinct value, 1.500, across all 76 rows (conclusion 7's alias premise confirmed). terminal_z_mm has nine distinct values: 5.743, 7.500, 9.985, 12.750, 13.500, 14.228, 18.471, 19.500, 25.500. Orientation x angle: Vertical/0.0 -> 32, ProjectPositiveX/45.0 -> 16, ProjectPositiveY/45.0 -> 16, ProjectPositiveX/0.0 -> 6, ProjectPositiveY/0.0 -> 6 (confirms every S4 specimen is vertical, as conclusion 6 claims).\n\nONE STRUCTURAL CONFOUND THE JOIN EXPOSES AND NEITHER DOCUMENT FLAGS: in the ProjectPositiveX family, radius is aliased with strip. S3A (y = -9) carries r = 0.300 and 0.700 only (X11, X13, X21, X23, X31, X33, X41, X43); S3B (y = +5) carries r = 0.500 and 0.900 only (X12, X14, X22, X24, X32, X34, X42, X44). Every X-inclined radius comparison therefore crosses a strip boundary, and BOTH X-inclined bends (X31, X41) are in S3A.",
+    "missed_findings": [
+      "ARITHMETIC ERROR IN THE DEFLECTION COMPARISON (conclusion 11), with the corrected numbers. max_unbraced_len_mm = (3.E.pi.delta.r^4/(4F))^(1/3), not the undivided form. Correct ladder at E=500 MPa, delta=0.15 mm, F=0.01 N: r=0.25 -> 4.102 mm; 0.30 -> 5.231; 0.50 -> 10.337; 0.70 -> 16.189; 0.90 -> 22.633; 1.20 -> 33.215. The proposer's 1.79 mm at r=0.30 is 5.7256^(1/3), i.e. the /(4F) divisor was dropped, and it contradicts their own forward calculation (delta = 0.23 mm at L = 6 mm is only 1.5x the 0.15 mm budget). Corrected engine-vs-plate margins at r=0.30: 1.15x at the surviving span, 2.29x at the bending span - not 3.4x and 6.7x. This inverts the tone of the finding: the engine's serviceability limit sits just below the observed permanent-set onset.",
+      "H2 REFUTES PLATE 6'S OWN DEGENERATE ALTERNATIVE - the single most valuable new physics content on the plate, and it is absent from the submission. plate-06-results.md §5 finding 1 caveat 4 states that on plate 6 the ratio form is algebraically degenerate with absolute arm area: 'all 17 B6 outcomes are fit equally well by \"sum of arm areas >= ~1.0 mm^2\" (dead: 0.143 PB, 0.499 M1, 0.984 M2 mm^2; alive: 0.997-2.992 mm^2). The ratio form rests on plate 5's cap-area spread, not on plate 6.' H2 has a single arm per head, so the comparison is direct - and it kills the absolute-area model: 12/12 specimens at r=0.30 (A_arm = 0.2755 mm^2, measured) carried a 6.8883 mm^2 head intact, and 15 of 18 at r=0.50 (0.7654 mm^2) did too. Both are far below the ~1.0 mm^2 absolute threshold that plate 6 could not exclude. Because H2's cap is 6.8883 mm^2 against plate 6's 30 mm^2, the two plates differ in cap area, which is exactly what makes the test work. The ratio law now rests on plate 5 AND H2 rather than on plate 5 alone. This is a genuine, quantitative, engine-facing gain that the proposer's 'raises confidence, changes nothing' framing entirely misses.",
+      "A THIRD MECHANISM FOR THE r=0.30 BEND, AND IT BREAKS THE PROPOSED DECISIVE EXPERIMENT. Base bending moment M = F_lateral x h, h = L cos(theta) = height above base, fits all 12 r=0.30 outcomes with one parameter (threshold h* in (9.735, 13.25) mm, recomputed as height above the z=1.500 base). It is ordinary cantilever mechanics, is the family the engine's own placement.py sizing encodes, and has nothing to do with plate 6's z-band artefact. It is aliased with mechanism A only because all 76 bases sit at z=1.500. Crucially, under mechanism C the stilt cell proposed as decisive (r=0.30, span 6, vertical, base raised ~13.5 mm) predicts INTACT - the same as mechanism B - so the experiment separates {A} from {B, C} and cannot decide the question as posed. The cell that separates B from C varies angle at fixed height: r=0.30 at 45 degrees with span 8.485 mm (h = 6.0 mm) against V11 (span 6, h = 6.0 mm). B predicts the inclined one survives more load; C predicts they behave identically.",
+      "THE PROTOCOL'S VALIDITY GATE IS MISREAD IN THE 'NET RULING'. home-support-calibration-p1-protocol.md §'Validity, results package, and limitations' (lines 194-200) reads: 'One currently printed plate is a valid screening run and must be reported. It cannot support a safe policy unless all four CS controls survive and at least one CM control demonstrates intended marginal sensitivity. ... Three independently prepared plates are required ONLY before promoting an exact tested cell into a measured engine constant.' The three-plate rule therefore gates PROMOTION TO A MEASURED CONSTANT, not safe-policy inference; the safe-policy gate is the control gate alone, and it passed. The proposer's blocker (a) conflates the two. Blocker (b) is also over-read: the fixed exclusion fires on a VISIBLY DAMAGED film or NON-PRODUCTION resin/profile, not on missing records; what actually failed is the report-package requirement (same section, bullet list) - a different defect with a different remedy. The conservative bottom line is unchanged, but the stated legal basis would not survive the owner's own reading of his protocol.",
+      "THE AREA CONVENTION IS A SAFETY-CRITICAL FREE PARAMETER AND THE PLATE CANNOT FIX IT. If the load-relevant area is the maximum head section (6.8883 mm^2, the proposer's choice), X = 2.25/r^2 and the head-loss bracket is (25.00, 36.00), leaving X_ALLOWED = 12.0 with 2.08x margin. If instead it is the first single-layer area jump - the flat down-facing disc the proposer itself identifies in conclusion 17 - then X_step = min(3.0615(r+0.7)^2, 6.4367)/(3.0615 r^2) and the same outcomes give 14.44 (r=0.25, all dead) versus 11.11 (r=0.30, all alive), i.e. X*_step in (11.11, 14.44), which BRACKETS X_ALLOWED = 12.0 with no margin at all. I am not asserting the second convention is right - peak stress is at the maximum section, so the first is the better default - but the proposer's headline recommendation ('change no engine constant, 2.08x margin') is not robust to a modelling choice its own conclusion 17 raises and then drops. Conclusion 17 has a live safety consequence and no consequence is drawn from it.",
+      "CRADLE MAST HEIGHTS TRACK THE SPECIMEN, WHICH BEARS ON THE CONTAINMENT AND HANDLING READINGS. Measured in the S1 STL: cradle/guard clusters around V12/V22/V32/V42 run z = [0.00, 8.00], [0.00, 14.00], [0.00, 20.00], [0.00, 26.00] for spans 6/12/18/24 - i.e. terminal_z + 0.5, which is 0.75 mm BELOW the cap top at terminal_z + 1.25 in every cell, with nearest masts at radial 3.54 mm against a 1.5 mm cap radius. The README limitation says each open cradle 'mitigates, but cannot guarantee, containment of a prematurely fractured 3 mm terminal'. A cradle whose masts stop below the cap top is a specific, checkable reason a detached head may not be recovered in its own cradle - which matters directly to the wash-basket census the proposer (rightly) makes the gating question.",
+      "COUNT AND CENSUS ERRORS THROUGHOUT THE EVIDENCE FIELDS. Verified against the CSV: r=0.90 is n=18 (reported 14), r=0.70 is n=12 (reported 8), r=0.50 is n=18 (reported 20), r=0.30 is n=12 (reported 11, with twelve IDs enumerated), r>=0.50 is n=60 or 52 excluding tiles (reported 45), and conclusion 12's '22/22' matches no grouping on the plate. The entire r=0.65 rung (8 removal tiles at X = 5.325) is missing from the head-loss ladder in conclusion 2 and in the failure_boundary narrative, although conclusion 1 places it on the ladder; it should read 0/7 with T01 excluded or 1/8 with T01 included. None of these change the ladder's shape, but the failure_boundary section is the document's headline table and it is not currently reproducible from the manifest.",
+      "THE ENGINE-CONSTANT PROVENANCE OF THE LADDER ITSELF. The radius rungs are not arbitrary: min_shaft_r_mm = 0.3 (config.py:61) is the ladder floor, max_unbraced_shaft_r_mm = 0.9 (config.py:60) is the ladder ceiling, brace_free_span_mm = 18.0 (config.py:225-237) is a span rung, tip_r_min/max = 0.2/1.0 (config.py:39-40) brackets the tip band, and CS at r = 1.20 sits above tip_r_max while CM at r = 0.25 sits below min_shaft_r. The plate is a policy-boundary probe, not an X* ladder. This reframes conclusion 14 (CM may be 'marginal relative to engine policy', not mislabelled) and it means the next-plate redesign proposed in item C would convert an engine-referenced design into an X*-referenced one - a trade that should be made explicitly, not silently.",
+      "THE 16-GON VERSUS CIRCLE MISMATCH BETWEEN ENGINE AND PLATE. The engine's tension and deflection laws assume circular sections (pi r^2, I = pi r^4/4); the plate builds 16-gons (area 3.0615 r^2, 2.5% low; I is ~3% low). Every X realised on this plate is 2.5% above its circular-section nominal, and every deflection is ~3% larger than the engine's model. Negligible at present precision, but it is a systematic bias in the direction of the plate being slightly weaker than the engine thinks, and it should be stated once rather than discovered later."
+    ],
+    "questions": [
+      "WHICH AREA CONVENTION DOES X MEAN ON H2? The head has three distinct sections: the flat down-facing disc at z_term-1.25 (min(r+0.7, 1.45) circumradius), the waist at z_term (= A_arm exactly), and the top cap at z_term+1.25 (6.8883 mm^2 on every rung). Under the maximum-section convention the head-loss bracket is X* in (25.00, 36.00) and X_ALLOWED = 12 keeps 2.08x margin. Under the first-single-layer-step convention it is X*_step in (11.11, 14.44), which brackets X_ALLOWED = 12 with no margin. This one choice flips the run from 'confirms the clamp' to 'the clamp may be inside the failure band'. Which do you want reported as primary, and do you want the other reported as a sensitivity?",
+      "SHOULD GENERATOR DEFECT 3 BE WITHDRAWN? I measured the S4 mesh directly: BX50 and BY50 are triangle-for-triangle identical as SPECIMENS (128 triangles each within 2 mm of centre), but their debris cradles and guard masts are NOT - BY50's cluster footprint is BX50's with x and y swapped ((+/-1.40, 3.25) -> (3.25, +/-1.40); (3.96, 0) -> (0, 3.96); (5.00, 0) -> (0, 5.00); (6.04, 0) -> (0, 6.04)). The generator IS building the `orientation` factor for brace=none cells, in the cradle. Filing 'orientation not built, either build it or delete the label' would be a false bug report against working code. Do you agree it should be withdrawn, and replaced with the (still true) statement that the specimen body is 90-degree symmetric so no orientation label can act on it?",
+      "DOES PLATE 6'S 'NEVER MERGE THE CONSTANTS' RULE FORBID THE THREE-PLATE INTERSECTION? plate-06-results.md §5 finding 2 says X_STAR_CONE and X_STAR_CYLINDER 'remain separately named constants ... because they were measured on different geometries at very different precision, and merging them would launder that difference away', and that the cylinder bracket is 'conditional on the 4.00 mm arm length ... not a general length-independent constant'. H2's arms are 6-24 mm. Do you want a third separately named constant (X_STAR_PRISM, bracket (25.00, 36.00), conditional on 6-24 mm arms and the 6.8883 mm^2 bicone head), or do you rule that intersecting the three is admissible? I have written it as forbidden.",
+      "HOW SHOULD THE THREE HEAD LOSSES AT X = 9.00 BE CLASSIFIED GIVEN THAT BX50 IS NOT A CLEAN CASE? I verified that V12/V22/V32/V42 are geometrically identical cells (identical cradle footprints, mast height scaling only with span), so V22 and V32 are a genuine unexplained pair. BX50 is different: its cradle is rotated 90 degrees relative to BY50's and its adjacent outer guard mast failed. Do you want the anomaly reported as a 2-specimen S1 result with BX50 listed separately as scaffold-contaminated, rather than as a 3-specimen hazard as the proposer has it?",
+      "IS THE RUN'S BLOCKING STATUS THE ONE THE PROTOCOL ACTUALLY WRITES? Your protocol makes three-plate replication a precondition for 'promoting an exact tested cell into a measured engine constant', NOT for inferring a safe policy - the safe-policy gate is the CS/CM control gate alone, and it passed. And the 'descriptive only' exclusion fires on a visibly damaged film or non-production resin/profile, not on missing records; what actually failed is the report-package requirement. The conservative outcome is the same either way, but do you want the report to say 'controls passed, safe-policy gate satisfied, promotion to a measured constant blocked by the one-replicate rule and by an incomplete report package', rather than the proposer's 'gate passing does not license a safe policy'?",
+      "DO YOU WANT THE CORRECTED DEFLECTION NUMBERS RE-RUN BEFORE ANYTHING IS SAID ABOUT ENGINE CONSERVATISM? The submission's 1.79 mm limit at r=0.30 is arithmetically wrong (the /(4F) divisor was dropped); the correct value is 5.231 mm, and the full corrected ladder is 4.10 / 5.23 / 10.34 / 16.19 / 22.63 / 33.22 mm for r = 0.25 / 0.30 / 0.50 / 0.70 / 0.90 / 1.20. That changes 'conservative by 3.4x to 6.7x' into 'conservative by 1.15x to 2.29x' at r=0.30, and at r=0.90 the plate survived 24 mm against a 22.63 mm limit (1.06x). Should the deflection section be rewritten around the corrected figures before it goes anywhere near a constants review?",
+      "SHOULD THE X-INCLINED RADIUS/STRIP CONFOUND BE STATED? S3A (y = -9) carries only r = 0.300 and 0.700; S3B (y = +5) carries only r = 0.500 and 0.900. Every ProjectPositiveX radius comparison therefore crosses a strip boundary, and both X-inclined bends (X31, X41) are in S3A - the same strip. Neither the proposer's edge analysis nor its confound list mentions this. Do you want it added to the structural-confound list alongside the span/height alias?",
+      "CAN THE PLATE-6 ABSOLUTE-AREA REFUTATION BE PROMOTED AS THIS RUN'S HEADLINE RESULT? Plate 6 recorded that its own data were fit equally well by 'sum of arm areas >= ~1.0 mm^2' and that the ratio form rested on plate 5 alone. H2 kills the absolute-area model: 12/12 specimens with a 0.2755 mm^2 arm carried a 6.8883 mm^2 head intact. That is a real, new, engine-facing result that costs nothing to claim and does not depend on the disputed boundary location. Do you want it written up as finding 1 of the H2 report?"
+    ]
+  }
+}
