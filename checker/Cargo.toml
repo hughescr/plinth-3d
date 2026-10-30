@@ -1,0 +1,55 @@
+# The independent checker: a SEPARATE workspace with its own lockfile, toolchain file and
+# build folder. It has no plinth dependencies (design dev-loop.md section 4.4).
+[workspace]
+resolver = "3"
+members = ["."]
+
+[package]
+name = "plinth-check"
+description = "Independent checker for .chitubox files: H1-H7 and H9 verdicts with uncertainty"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[[bin]]
+name = "plinth-check"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+float_cmp = "deny"
+too_many_lines = "deny"
+
+# Same profile settings as the main workspace.
+[profile.dev]
+opt-level = 2
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+incremental = true
+codegen-units = 256
+debug-assertions = true
+overflow-checks = true
+lto = false
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+
+[profile.dev.build-override]
+opt-level = 0
+debug = false
+
+[profile.release]
+opt-level = 3
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+codegen-units = 16
+incremental = false
+lto = false
+overflow-checks = true

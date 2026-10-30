@@ -1,0 +1,8 @@
+[build]
+jobs = 8 # scripts/t overrides with CARGO_BUILD_JOBS
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=apple-m3"] # explicit, not "native": same code on any future Mac
+
+[env]
+RUST_BACKTRACE = "1"

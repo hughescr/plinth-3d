@@ -1,0 +1,14 @@
+too-many-arguments-threshold = 6
+too-many-lines-threshold = 120
+
+# Only the CLI's argument module may read the environment (no hidden settings).
+disallowed-methods = [
+    { path = "std::env::var", reason = "hidden settings: only the CLI argument module reads the environment" },
+    { path = "std::env::var_os", reason = "hidden settings: only the CLI argument module reads the environment" },
+]
+
+# Iteration order must not change output (NFR-2).
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "use BTreeMap, a sorted Vec or an index map" },
+    { path = "std::collections::HashSet", reason = "use BTreeSet or a sorted Vec" },
+]

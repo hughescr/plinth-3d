@@ -1,0 +1,15 @@
+[package]
+name = "plinth-support"
+description = "The support generator: construction types, contacts, routing, raft, load model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Doctests stay on here only: this crate holds the compile-fail proofs (design section 7.4).
+
+[dependencies]
+plinth-geom.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,12 @@
+too-many-arguments-threshold = 6
+too-many-lines-threshold = 120
+
+disallowed-methods = [
+    { path = "std::env::var", reason = "hidden settings: the checker takes paths and flags only" },
+    { path = "std::env::var_os", reason = "hidden settings: the checker takes paths and flags only" },
+]
+
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "use BTreeMap, a sorted Vec or an index map" },
+    { path = "std::collections::HashSet", reason = "use BTreeSet or a sorted Vec" },
+]

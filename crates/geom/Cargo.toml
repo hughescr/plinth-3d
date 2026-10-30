@@ -1,0 +1,23 @@
+[package]
+name = "plinth-geom"
+description = "Mesh core: structure-of-arrays mesh, STL reader, batched geometry queries"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+doctest = false
+
+# Not `lints.workspace = true`: cargo cannot extend the workspace table. Keep this table
+# identical to the workspace table. `unsafe_code` is `forbid` because there is no
+# `geom::simd` module yet; when it is added, scope its exception to that one module only.
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+float_cmp = "deny"
+too_many_lines = "deny"

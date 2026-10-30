@@ -1,0 +1,13 @@
+[package]
+name = "plinth-chitubox"
+description = ".chitubox and .cfgx read, write and round trip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true

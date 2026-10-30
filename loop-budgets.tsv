@@ -1,0 +1,12 @@
+level	command	budget_s	target_s	source
+Lnoop	scripts/t Lnoop	2	-	orchestrator starting value
+L0	scripts/t L0 <crate>	5	2	orchestrator starting value
+L1	scripts/t L1 <crate>	15	5	PRD
+L1d	scripts/t L1d <crate>	15	6	PRD
+L2	scripts/t L2	60	30	orchestrator starting value
+L3	scripts/t L3	90	30	PRD
+L4	scripts/t L4	300	-	orchestrator starting value
+L5	scripts/t L5	1800	-	orchestrator starting value
+Cold	scripts/gate --clean	180	-	orchestrator starting value
+Pre-commit	.githooks/pre-commit	5	-	orchestrator starting value
+Gate	scripts/gate	180	-	orchestrator starting value

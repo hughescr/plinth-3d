@@ -1,0 +1,23 @@
+[package]
+name = "plinth-cli"
+description = "The plinth command line: flags, thread pool, per-model run, checker hand-off, report"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+doctest = false
+
+[[bin]]
+name = "plinth"
+path = "src/main.rs"
+
+[dependencies]
+plinth-geom.workspace = true
+plinth-support.workspace = true
+plinth-emit.workspace = true
+plinth-chitubox.workspace = true
+
+[lints]
+workspace = true
