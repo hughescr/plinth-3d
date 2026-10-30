@@ -1,0 +1,36 @@
+# The loop runner: a SEPARATE workspace with its own lockfile and build folder, and no
+# dependency on any plinth crate or any registry crate (design dev-loop.md section 3.2).
+[workspace]
+resolver = "3"
+members = ["."]
+
+[package]
+name = "devloop"
+description = "Loop runner for plinth: t, loop-bench, slot, setup"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[[bin]]
+name = "devloop"
+path = "src/main.rs"
+
+[lints.rust]
+# The only unsafe code is the libc declarations in src/sys.rs (kill, flock, signal, getloadavg).
+unsafe_code = "deny"
+unused_must_use = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+float_cmp = "deny"
+too_many_lines = "deny"
+
+[profile.release]
+opt-level = 2
+debug = false
+incremental = false
+codegen-units = 16
+lto = false
+panic = "abort"

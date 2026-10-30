@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Shim: build the Rust loop runner (tools/devloop) if it is missing or stale, then run it.
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"; dl="$root/tools/devloop"; bin="$dl/target/release/devloop"
+if [ ! -x "$bin" ] || [ -n "$(find "$dl/src" "$dl/Cargo.toml" -newer "$bin" -print -quit)" ]; then
+  (cd "$dl" && cargo build --release --locked --quiet) || { echo "SETUP ERROR: cannot build tools/devloop" >&2; exit 4; }
+fi
+exec "$bin" --root "$root" "$@"

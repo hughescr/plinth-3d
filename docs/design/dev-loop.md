@@ -21,7 +21,7 @@ Proposal A built a throwaway prototype and measured it (section 2). Proposal B m
 |---|---|---|---|---|
 | `dev` opt level | 2 | 1 | **2** | Measured: opt 1 costs the same compile time as opt 2 and its code runs 2.4x slower. |
 | Checker location | Crate in the main workspace, with a dependency check | Own workspace and lockfile, run as a separate program | **Own workspace, separate program** | PRD §10 says the checker lives outside the generator's code base; a process boundary also makes in-memory hand-off impossible. |
-| Loop tooling | Bash + jq scripts, ≤ 400 lines | Small Rust runner in its own workspace | **Bash + jq, ≤ 400 lines** | Nothing to compile or maintain; GNU `timeout` already kills the whole process group. Rewrite in Rust only if the 400-line cap is reached. |
+| Loop tooling | Bash + jq scripts, ≤ 400 lines | Small Rust runner in its own workspace | **Small Rust runner `tools/devloop` (own workspace, std only, binary `devloop`) behind thin bash shims** | The bash version reached 511 lines, over its own 400-line cap, so the design's fallback applied. The runner owns process-group killing, timeouts, lock-wait detection, zero-tests detection and budget enforcement, with fast unit tests. The 400-line cap now applies to the bash shims only. |
 | sccache | Not used | Used as `RUSTC_WRAPPER` | **Not used** | Measured: 0 hits across worktree paths, and workspace crates cannot be cached at all. |
 | Construction types | Module inside `plinth-support` | Separate `plinth-construction` crate | **Module, split later by size trigger** | Module privacy seals the types equally well; an extra crate adds a rebuild step to every edit. |
 | Pose, hollow, routing | New crates when their stage starts | Modules first | **Modules first; split by the measured size trigger** | Split on evidence, not on schedule. |
@@ -128,7 +128,7 @@ The budgets live in a committed file, `loop-budgets.tsv`, with columns `level, c
 
 What it does:
 
-- Dispatches by level. Every level has its own deadline and expected evidence. For Lnoop and L0–L3 it sends TERM after 115 s and KILL after a further 5 s (`timeout --kill-after=5 115`), a nominal 120 s process-group bound. GNU `timeout` runs the command in its own process group and signals the whole group. Longer levels use their declared deadlines and the background protocol.
+- Dispatches by level. Every level has its own deadline and expected evidence. For Lnoop and L0–L3 the runner sends TERM after 115 s and KILL after a further 5 s, a nominal 120 s process-group bound. The runner starts the command as the leader of its own process group and signals the whole group; there is no dependency on GNU `timeout`. Longer levels use their declared deadlines and the background protocol.
 - The supervisor handles interruption, reaps the command and confirms its recorded process group is gone. A project-wide `pgrep` match is not proof that this command's children are gone.
 - Applies the slot's thread allocation (section 5.6).
 - Prints at most the last 40 lines of a failure, then one verdict line. Example: `L1 plinth-support 3.4 s / budget 15 s / target 5 s / load 4.1 / PASS`.
@@ -199,7 +199,11 @@ plinth-3d/
   .config/nextest.toml
   clippy.toml  rustfmt.toml  loop-budgets.tsv  limits.toml
   .githooks/          pre-commit, pre-push
-  scripts/            setup, t, loop-bench, gate, slot, check-independence (bash + jq; ≤ 400 lines in total)
+  scripts/            thin bash shims (≤ 10 lines each, ≤ 400 lines in total): devloop (builds the runner if
+                      stale, then runs it), setup, t, loop-bench, slot; later gate, check-independence
+  tools/devloop/      SEPARATE workspace: the loop runner, binary `devloop` (subcommands t, loop-bench, slot,
+                      setup; later gate, check-independence). std only, no plinth crate, own Cargo.lock,
+                      clippy.toml and target/. Its unit tests run in L0 scale time.
   crates/
     geom/        plinth-geom        mesh core
     chitubox/    plinth-chitubox    .chitubox and .cfgx read, write, round trip (FR-41 deliverable)
@@ -614,13 +618,13 @@ Dependency licence and advisory checks (`cargo-deny`) run only when a dependency
 
 Each step ends with a measured check. A miss stops the step.
 
-**Tools.** Already present: hyperfine, cargo-sweep, cargo-nextest 0.9.150, jq, GNU `timeout`, rustfmt, clippy. The crates `proptest`, `lexopt` and a JSON crate need one network fetch. Later, only if needed: `cargo-deny`, `cargo-machete`, `cargo-llvm-lines`, `samply`. Do **not** install lld, mold, PGO tools, Python environments or build-folder seeding tools.
+**Tools.** Already present: hyperfine, cargo-sweep, cargo-nextest 0.9.150, jq, rustfmt, clippy. The crates `proptest`, `lexopt` and a JSON crate need one network fetch. Later, only if needed: `cargo-deny`, `cargo-machete`, `cargo-llvm-lines`, `samply`. Do **not** install lld, mold, PGO tools, Python environments or build-folder seeding tools.
 
 | Step | Build | Check (budget) |
 |---|---|---|
 | 1 | Root files: `Cargo.toml` with profiles and lints, `rust-toolchain.toml`, `.cargo/config.toml`, `.gitignore`, `loop-budgets.tsv`, `limits.toml`, `scripts/setup`. The 6 main crates and the `checker/` workspace, empty, each with `loop_canary.rs` | Cold build + tests of both workspaces ≤ 60 s at -j 8, fetch timed separately. Lnoop: ≤ 2 s and 0 `Compiling` lines. Apple linker in use. |
 | 2 | `scripts/slot`; worktrees s1, s2, s3, bench in `plinth-slots/`, checked out at committed `develop` (or a branch from it), never at an untracked copy | s1 and s2 build at once with **no** wait on a slot's build-directory lock (no `LOCK WAIT`). Waits on Cargo's shared package-cache lock are acceptable in any state: they are counted, timed and reported, and fail only if the total in one command exceeds 2 s. A slot switched to a new branch rebuilds incrementally in ≤ 10 s, not cold. Changing the thread allocation causes 0 rebuilds. L1 at -j 2 measured. Compute concurrency and process/thread counts measured with two and three slots (section 5.6). |
-| 3 | `scripts/t`, `scripts/loop-bench`, `.config/nextest.toml`; install nextest | All currently implemented levels pass with real evidence. At this step, validate Lnoop, L0 and L1 plus wrapper failure handling. L2 is enabled as its suites arrive; L3 is enabled only when step 7 provides the real transport path. An unavailable level exits with a setup error and is never logged as a pass. **Sabotage:** a 20 s sleep in a unit test: nextest kills it, `scripts/t L1` exits nonzero. A 130 s sleep in a non-test child process (so nextest does not kill it first): the supervisor stops it at the 120 s bound, reports a timeout, and its recorded process group is gone. A test filter that selects 0 tests: fails. A held Cargo lock: reported promptly as LOCK WAIT. Remove all four. |
+| 3 | `tools/devloop` (Rust runner: `t`, `loop-bench`, `slot`, `setup`; unit tests, clippy and fmt clean) behind the bash shims `scripts/t`, `scripts/loop-bench`, `scripts/slot`, `scripts/setup`; `.config/nextest.toml`; install nextest | All currently implemented levels pass with real evidence. At this step, validate Lnoop, L0 and L1 plus wrapper failure handling. L2 is enabled as its suites arrive; L3 is enabled only when step 7 provides the real transport path. An unavailable level exits with a setup error and is never logged as a pass. **Sabotage:** a 20 s sleep in a unit test: nextest kills it, `scripts/t L1` exits nonzero. A 130 s sleep in a non-test child process (so nextest does not kill it first): the supervisor stops it at the 120 s bound, reports a timeout, and its recorded process group is gone. A test filter that selects 0 tests: fails. A held Cargo lock: reported promptly as LOCK WAIT. Remove all four. |
 | 4 | `plinth-chitubox` reader and writer from the native samples. The old `chitubox_io` may be reused only choice by choice: it targeted v1.3.0, the samples are v1.4.0, and its lift, raft and support guesses need native proof | T1 on every native file: parse, byte-for-byte rewrite, sample-pair field changes, malformed-input properties. L1 for chitubox ≤ 5 s. L2 ≤ 30 s. |
 | 5 | `plinth-check` skeleton in `checker/`: own reader, own STL reader, `dump`, JSON report with every rule "unverified" until built; `scripts/check-independence` | Readers-agree test passes on native files. **Sabotage:** a path dependency on `plinth-geom` in the checker makes the independence check and pre-commit fail. L1 for the checker ≤ 5 s. |
 | 6 | `plinth-geom`: STL read, structure-of-arrays mesh, bounds, Morton reorder, first batched query (closest point), batch counters | T0 + T0p (batch equals scalar reference; same output at 1 thread and the slot's allocation; at 3 and 8 in the bench epoch). L1d (geom edit → support tests) ≤ 6 s. |
@@ -637,7 +641,7 @@ Each step ends with a measured check. A miss stops the step.
 - Split a crate when the size trigger fires (section 3.3).
 - Toolchain and profile changes go through main, then a bench run.
 - At most 3 writing slots.
-- Loop tooling stays ≤ 400 lines in total. Growing past that is a stop-and-review signal.
+- The bash shims stay ≤ 400 lines in total (≤ 10 lines each). Logic belongs in `tools/devloop`, which keeps its own unit tests and stays clippy and fmt clean. Growing a shim past its cap is a stop-and-review signal.
 
 ---
 

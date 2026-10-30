@@ -1,0 +1,9 @@
+# The runner reads the environment (thread allocations, overrides), so the plinth-wide
+# env ban in ../../clippy.toml does not apply here. This file stops clippy from looking higher up.
+too-many-arguments-threshold = 6
+too-many-lines-threshold = 120
+
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "use BTreeMap or a sorted Vec" },
+    { path = "std::collections::HashSet", reason = "use BTreeSet or a sorted Vec" },
+]

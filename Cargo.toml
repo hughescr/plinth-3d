@@ -2,8 +2,8 @@
 resolver = "3"
 members = ["crates/*"]
 # The checker is a separate program with its own workspace, lockfile and build folder
-# (design dev-loop.md section 4.4).
-exclude = ["checker"]
+# (design dev-loop.md section 4.4). tools/devloop is the loop runner's own workspace.
+exclude = ["checker", "tools/devloop"]
 
 [workspace.package]
 version = "0.0.0"

@@ -1,3 +1,4 @@
 .DS_Store
 /target/
 /checker/target/
+/tools/devloop/target/
