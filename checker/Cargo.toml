@@ -12,6 +12,11 @@ edition = "2024"
 rust-version = "1.97"
 publish = false
 
+[lib]
+name = "plinth_check"
+path = "src/lib.rs"
+doctest = false
+
 [[bin]]
 name = "plinth-check"
 path = "src/main.rs"
