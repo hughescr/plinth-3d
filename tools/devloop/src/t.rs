@@ -22,6 +22,7 @@ pub enum Level {
     L0,
     L1,
     L1d,
+    L2,
 }
 
 impl Level {
@@ -29,7 +30,7 @@ impl Level {
         match self {
             Self::Noop => Kind::Noop,
             Self::L0 => Kind::Check,
-            Self::L1 | Self::L1d => Kind::Test,
+            Self::L1 | Self::L1d | Self::L2 => Kind::Test,
         }
     }
 }
@@ -40,7 +41,8 @@ fn parse_level(s: &str) -> Result<Level, String> {
         "L0" => Ok(Level::L0),
         "L1" => Ok(Level::L1),
         "L1d" => Ok(Level::L1d),
-        "L2" | "L3" | "L4" | "L5" => Err(format!(
+        "L2" => Ok(Level::L2),
+        "L3" | "L4" | "L5" => Err(format!(
             "level {s} is not available yet (its suites arrive in later steps)"
         )),
         _ => Err(format!("unknown level: {s}")),
@@ -69,6 +71,16 @@ pub fn build_command(
     if level == Level::Noop {
         let sh = "cargo build --locked && cd checker && cargo build --locked";
         return (vec![s("sh"), s("-c"), s(sh)], root.to_path_buf(), s("-"));
+    }
+    if level == Level::L2 {
+        // Both workspaces, then the explicit doctest run (nextest skips doctests). The
+        // independence check joins this chain when its script arrives.
+        let sh = format!(
+            "cargo nextest run --workspace --locked && cargo test --doc -p plinth-support --locked \
+             && cd checker && cargo nextest run --config-file '{}/.config/nextest.toml' --locked",
+            root.display()
+        );
+        return (vec![s("sh"), s("-c"), sh], root.to_path_buf(), s("all"));
     }
     let pkg = package_of(crate_arg);
     let is_checker = pkg == "plinth-check";
@@ -197,10 +209,10 @@ pub fn prepare(root: &Path, args: &[String]) -> Result<Plan, Exit> {
     let alloc = allocation(root).map_err(setup)?;
     let level = parse_level(&level_name).map_err(setup)?;
     let crate_arg = args.get(1).cloned().unwrap_or_default();
-    if level != Level::Noop && crate_arg.is_empty() {
+    if !matches!(level, Level::Noop | Level::L2) && crate_arg.is_empty() {
         return Err(setup(format!("{level_name} needs a crate")));
     }
-    if matches!(level, Level::L1 | Level::L1d) && !proc::has_tool("cargo-nextest") {
+    if matches!(level, Level::L1 | Level::L1d | Level::L2) && !proc::has_tool("cargo-nextest") {
         return Err(setup(
             "cargo-nextest is not installed (cargo install cargo-nextest --locked)",
         ));
@@ -450,6 +462,18 @@ mod tests {
     }
 
     #[test]
+    fn l2_runs_both_workspaces_and_the_doctests() {
+        let (cmd, cwd, label) = build_command(Path::new("/r"), Level::L2, "", &[]);
+        let sh = &cmd[2];
+        assert!(sh.starts_with("cargo nextest run --workspace --locked"));
+        assert!(sh.contains("cargo test --doc -p plinth-support"));
+        assert!(
+            sh.contains("cd checker && cargo nextest run --config-file '/r/.config/nextest.toml'")
+        );
+        assert_eq!((cwd, label.as_str()), (PathBuf::from("/r"), "all"));
+    }
+
+    #[test]
     fn lnoop_builds_both_workspaces() {
         let (cmd, cwd, label) = build_command(Path::new("/r"), Level::Noop, "", &[]);
         assert!(cmd[2].contains("cargo build --locked && cd checker && cargo build --locked"));
@@ -458,11 +482,12 @@ mod tests {
 
     #[test]
     fn later_levels_are_setup_errors_never_passes() {
-        for l in ["L2", "L3", "L4", "L5"] {
+        for l in ["L3", "L4", "L5"] {
             assert!(parse_level(l).unwrap_err().contains("not available yet"));
         }
         assert!(parse_level("L9").is_err());
         assert_eq!(parse_level("L1d"), Ok(Level::L1d));
+        assert_eq!(parse_level("L2"), Ok(Level::L2));
     }
 
     #[test]

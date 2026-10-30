@@ -1,6 +1,15 @@
-# Proposed tilted Round bases (stage 1)
+# Approved tilted Round bases (stage 1)
 
-**PROPOSED - awaiting owner confirmation of the angle.** Nothing here is approved. Approved copies go in `fixtures/round/approved/` after the owner confirms (PRD FR-11a; dev-loop design section 9 and step 10).
+**APPROVED by the owner 2026-10-30 (65°).** These are the approved copies named in PRD FR-11a and dev-loop design section 9 and step 10.
+
+## Approval record
+
+- **Date:** 2026-10-30
+- **Approved by:** Craig, the owner
+- **Angle:** 65 degrees from flat (the rotation is given under "Rotation" below)
+- **Owner's words:** "The tilted STL round bases look plausible, angles look OK."
+- **Scope:** the three `.keepup.stl` files and the nine pictures in `pictures/`, as they are in this folder. These are the pictures he approved, so they were not re-rendered. The labels on the PNGs still read PROPOSED. That label predates the approval and is left as it is.
+- **Not explicitly covered:** his words are about the look and the angle. They do not confirm which side is the underside; see Doubts below.
 
 ## What these files are
 
