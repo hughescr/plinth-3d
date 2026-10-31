@@ -6,9 +6,20 @@ use plinth_chitubox::{Deviation, parse};
 #[test]
 fn native_all_files_round_trip_byte_for_byte() {
     let files = native_files();
-    // 7 older files and the 8 v1.4.0 samples. (`cylinder-cube-sphere.ctp` is another
-    // format, tested below, and the `.cfgx` is a profile export.)
-    assert_eq!(files.len(), 15, "expected 7 older files and 8 samples");
+    // 7 older files, the 8 v1.4.0 samples and the ChituBox re-save of a plinth-written
+    // file. (`cylinder-cube-sphere.ctp` is another format, tested below, and the `.cfgx`
+    // is a profile export. The plinth-written file is not native.)
+    assert_eq!(
+        files.len(),
+        16,
+        "expected 7 older files, 8 samples and 1 re-save"
+    );
+    assert!(
+        files
+            .iter()
+            .all(|p| p.file_name().is_some_and(|n| n != crate::common::PLINTH_WRITTEN)),
+        "the plinth-written file must not be in the native set"
+    );
     let mut supported_models = 0;
     for path in &files {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
@@ -76,4 +87,36 @@ fn native_empty_file_and_header_constants() {
     assert_eq!(pv.pixels.len(), 2103 * 1580);
     assert_eq!(p.models[0].mesh.len(), 2996);
     assert_eq!(p.models[0].name, "Round 25.stl");
+}
+
+/// Load test 2026-10-30: the plinth-written Round 50 transport file and its ChituBox
+/// v1.4.0 re-save differ only in the preview image and the offsets that follow it.
+/// The plinth-written file is read here only for this comparison; it is not native.
+#[test]
+fn load_test_resave_changed_only_the_preview() {
+    let dir = crate::common::load_test_dir();
+    let ours_bytes = std::fs::read(dir.join(crate::common::PLINTH_WRITTEN)).unwrap();
+    let saved_bytes = std::fs::read(dir.join("Round 50 resaved.keepup.chitubox")).unwrap();
+    let ours = parse(&ours_bytes).unwrap();
+    let saved = parse(&saved_bytes).unwrap();
+    // Name, translate, every vertex and every triangle are unchanged, and there are no supports.
+    assert_eq!(ours.models, saved.models);
+    assert_eq!(saved.models.len(), 1);
+    assert_eq!(saved.models[0].mesh.len(), 6014);
+    assert!(saved.models[0].supports.is_none());
+    assert_eq!(ours.header_f16, saved.header_f16);
+    // The mesh bytes, the last 216,504 bytes of each file, are identical.
+    let tail = 6014 * 36;
+    assert_eq!(
+        ours_bytes[ours_bytes.len() - tail..],
+        saved_bytes[saved_bytes.len() - tail..]
+    );
+    // The preview is the only typed difference: ours is one flat colour, ChituBox's is a render.
+    let (po, ps) = (ours.preview.unwrap(), saved.preview.unwrap());
+    assert_eq!((po.width, po.height), (800, 600));
+    assert_eq!((ps.width, ps.height), (1298, 1140));
+    assert!(po.pixels.iter().all(|&p| p == po.pixels[0]));
+    assert!(ps.pixels.iter().any(|&p| p != ps.pixels[0]));
+    // The saved file is longer by exactly the preview data and nothing else.
+    assert_eq!(saved_bytes.len() - ours_bytes.len(), 92_080 - 472);
 }

@@ -11,7 +11,8 @@ This document says how ChituBox v1.4.0 stores a project in a `.chitubox` file. I
 - Every section has a marker:
   - **Verified from samples**: measured from the bytes of the samples and checked by the second decoder.
   - **Inferred**: fits all the samples, but the bytes do not prove it.
-- **Nobody opened a written or edited file in ChituBox.** "Verified" means "this is what ChituBox wrote". It does not mean "ChituBox needs this" or "ChituBox will accept this". Only a load test in ChituBox can show what ChituBox requires.
+- One more ChituBox-written file, a re-save of a plinth-written file, is in `test-data/chitubox-native/load-test-2026-10-30/` (section 18). It is the 16th native file. Counts in sections 1 to 16 stay over the 15 files above.
+- Only one kind of file has been opened in ChituBox: plinth-written, model-only files with no supports (section 18). "Verified" still means "this is what ChituBox wrote". It does not mean "ChituBox needs this". For anything with supports, only a load test in ChituBox can show what ChituBox requires.
 
 Conventions:
 
@@ -107,10 +108,12 @@ What the image shows:
 - In `05` it shows both plates' models in one image.
 - A small change to the scene (01 → 02) changed 98 pixels. The image is rendered again on each save.
 
+Load test 2026-10-30 (section 18): ChituBox opened and sliced plinth files whose preview is one flat colour (800 × 600, nothing of the scene in it), and on save it replaced that preview with its own render (1298 × 1140).
+
 Not known:
 
-- Whether ChituBox reads the preview on load, regenerates it, or needs it to match the scene.
-- Whether ChituBox accepts an empty or wrong-sized preview. The old project recorded that ChituBox refused a project with an empty preview (2026-08-03). Nobody checked that again with v1.4.0.
+- Whether ChituBox reads the preview on load at all. It did not need a correct one.
+- Whether ChituBox accepts an empty preview (no preview data). The old project recorded that ChituBox refused a project with an empty preview (2026-08-03). Nobody checked that again with v1.4.0.
 
 ## 4. Model table
 
@@ -575,7 +578,7 @@ Ordered by what they unblock. Each needs a load test in ChituBox or a new owner 
 
 1. Does ChituBox accept a file whose attr array length is not equal to the record count? (Blocks any writer shortcut that keeps the front block.)
 2. Does ChituBox read the record mesh blobs, or rebuild them from the record fields? (A file with one radius field changed and the blob unchanged would tell.)
-3. Does ChituBox accept a written preview, an empty preview, or a stale one?
+3. Does ChituBox accept an empty preview (zero bytes of preview data, `f12 = 0`)? (Answered for a written, flat-colour, wrong-scene preview: it opens and slices, and ChituBox re-renders the preview on save. Section 18.)
 4. Is translate Z "lowest point above plate" or "centre offset from seated position"?
 5. Does ChituBox accept a file with a supported and an unsupported model together? What is the unsupported model's descriptor?
 6. Does ChituBox need a particular record order, bridge order or bridge tree?
@@ -588,7 +591,7 @@ Ordered by what they unblock. Each needs a load test in ChituBox or a new owner 
 13. What triggers leg taper, flare omission, brace placement and X-pair spacing?
 14. Is the name capacity 256 bytes? What happens to a long name?
 15. Are pad size 2.2, raft thickness 0.2, the 0.6 mm flare shift and the 0.8 mm default mat fixed, or driven by a raft setting not varied in the samples?
-16. Does ChituBox rebuild the front block from the support state on save, so that a writer may also rebuild it freely?
+16. Does ChituBox rebuild the front block from the support state on save, so that a writer may also rebuild it freely? (Answered for an unsupported model only: the re-save has the same all-zero descriptor at the new offset, so the block is rebuilt or copied with the same result. Nothing is known for supported models. Section 18.)
 
 ## 16. Review of the old chitubox_io reader/writer
 
@@ -642,7 +645,7 @@ The first output of the new writer must still go through the owner's ChituBox lo
 
 ## 17. How `plinth-chitubox` reads and writes this format
 
-**Verified by tests on the 15 `.chitubox` files in `test-data/chitubox-native/`.** Every one parses and writes back byte for byte. This says nothing about what ChituBox accepts (section 0).
+**Verified by tests on the 16 ChituBox-written `.chitubox` files in `test-data/chitubox-native/`** (the 15 of section 0 and the load-test re-save). Every one parses and writes back byte for byte. The plinth-written file in the load-test folder is not in this set. This says nothing about what ChituBox accepts (section 0).
 
 Typed data: `Project { header_f16, preview, models }`. A `Model` holds name, translate, mesh and optional `Supports { presets, attrs, unreferenced_blob, records }`. No offset, count or length is stored. The writer rebuilds all of them (sections 13 and 9).
 
@@ -663,3 +666,58 @@ Two points where the reader differs from a plain reading of sections 8 and 9, so
 `Project::deviations()` lists both cases. It is empty for every file except `morel_mudskipper_supports`. A writer that builds a project from nothing leaves it empty.
 
 The writer refuses before it writes a byte: a name of 256 bytes or more or with a NUL, a non-finite float, a preview whose pixel count is not `w × h` or has bit 5 set in a pixel, and any size or offset that does not fit 32 bits. It does not check that the attr array has one entry per record, that preset ids in attrs exist, or any other meaning (sections 8.3, 10, 13). Those are the caller's job until a load test shows what ChituBox needs.
+
+## 18. Load test 2026-10-30
+
+**Verified** for the facts below. Guesses are marked **Guess**.
+
+### 18.1 Record (H8 style)
+
+- Application: ChituBox v1.4.0 (the owner's install; no other build string recorded).
+- Date: 2026-10-30. Reported by the owner.
+- What was tested: six plinth-written Round files. All are model-only "transport" files: the approved 65°-tilted copy, lifted 5 mm, no supports. The owner opened all six in ChituBox and sliced all six. All opened and sliced fine. The names and hashes of the other four files are not in this checkout.
+- What was recorded for two files (`test-data/chitubox-native/load-test-2026-10-30/`):
+  - `Round 50.keepup.chitubox`, written by plinth, 218,132 B, SHA-256 `d6ef89c07cd98007d1c91c916f305eabcddede7151f8c3a6c01337d685efbb83`. Opened and sliced.
+  - `Round 50 resaved.keepup.chitubox`, written by ChituBox when the owner saved the file above again, 309,740 B, SHA-256 `257578c0ae822e4bfea2bb2b322b94acf9a06a915a97ebf024db52fa2b67a4d6`.
+- What this is not: an H8 pass for a printable file. These files have no supports, so nothing here shows ChituBox accepting supports that plinth wrote. It shows only that the container, the preview, the model record and the mesh that plinth writes are accepted.
+
+### 18.2 What ChituBox changed in the re-save
+
+Compared byte by byte, and with the reader and the checker's `dump`. The only differences are the preview and the offsets that follow it.
+
+| Part | Plinth-written | ChituBox re-save | Same? |
+|---|---|---|---|
+| Magic, model count, `f12` (420), `f16` (412) | as in section 2 | same | yes |
+| Preview size | 800 × 600, 472 B, one colour (`0x0841`, the background word) | 1298 × 1140, 92,080 B, 45 colours, a render of the scene (the round plate seen from an oblique camera, with the three small hollow bosses) | **no** |
+| Preview header: data_off (452), padding | 452, zero | same | yes |
+| Header `off8`, `off20` | 924, 1604 | 92,532, 93,212 | no, but both are `452 + data_len` and `off8 + 680`, as section 2 says |
+| Model record: name | `Round 50.keepup [transport, not a print candidate]` | same, byte for byte | yes |
+| Model record: translate | (0, 1.3747296, 5) | same bits | yes |
+| Model record: +268 (support index) and +276 (mesh size) | 0, 216,504 | same | yes |
+| Model record: +272 (mesh offset) | 1628 | 93,236 | no, follows from the preview size |
+| Model record: bytes 280..679 | zero | zero | yes |
+| Front block | one all-zero 24-byte descriptor | same bytes, at the new offset | yes |
+| Mesh | 6014 triangles, 216,504 B | the same 216,504 bytes, identical | yes |
+| Anything after the mesh | nothing | nothing (no footer, no trailer) | yes |
+
+Facts that follow:
+
+- The file grew by 92,080 − 472 = 91,608 B, which is exactly the preview. Nothing else was added.
+- Vertex order, triangle order, triangle count and vertex values are unchanged. ChituBox did not re-centre the mesh and did not change translate X, Y or Z. The 65° tilt and the 5 mm lift survived a load and a save.
+- Section 14 says only the first vertex of a triangle can change on save. In this re-save none did. **Guess:** plinth already wrote the form ChituBox writes, so nothing needed to change.
+- ChituBox did not add presets, an attr array, a support index, a group header or a trailer, because the model has no supports. This test says nothing about those parts.
+- The re-saved preview is canonical (greedy runs, longest 4095): the reader accepts it and rewrites it byte for byte, as for every other native file. Both files have no anomalies in the checker's `dump`.
+
+### 18.3 What plinth's writer should do
+
+- **Preview: change nothing for acceptance.** ChituBox opens and slices a flat, wrong-scene preview. The writer does not need to render a scene preview for the file to load. A real preview is for the owner's file browser and nothing else is known to depend on it. **Guess:** the 800 × 600 solid image is safe for model-only files. Whether an empty preview (`f12 = 0`, no data) is safe is still open (section 15, Q3). Keep the non-empty solid preview, because the old project saw an empty one refused (2026-08-03).
+- **Preview size: do not copy.** 1298 × 1140 matches nothing in the file. The samples show sizes from 650 × 1945 to 3154 × 2250. **Guess:** ChituBox sizes it from the 3D view window at save time.
+- **Header, offsets, model record, front block, mesh: nothing to change.** Plinth's output already equals ChituBox's, byte for byte, apart from the preview and the offsets that depend on it. This covers the model name with brackets, the name length, translate with a nonzero Y, and Z = 5.
+- **Translate Y of 1.3747296:** both files carry it, and ChituBox kept it. Plinth's choice of Y is accepted. It does not answer section 15 Q4 or Q12 (what Z and Y mean).
+- **Supports: no evidence.** Plinth's supported output still needs its own load test (sections 15, Q1, Q2, Q5, Q6).
+
+### 18.4 Questions this answers
+
+- Q3 (preview): partly. A written, flat, wrong-scene preview opens and slices. ChituBox renders a new preview on each save. Empty preview still open.
+- Q16 (front block rebuilt on save): partly. For an unsupported model the re-saved front block equals the input. Whether ChituBox rebuilds it from state or copies it is not known, and nothing is known for supported models.
+- Section 3 "whether ChituBox needs the preview to match the scene": no, it does not (for opening and slicing).
