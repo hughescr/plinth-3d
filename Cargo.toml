@@ -18,6 +18,9 @@ plinth-support = { path = "crates/support" }
 plinth-emit = { path = "crates/emit" }
 plinth-cli = { path = "crates/cli" }
 proptest = { version = "1.12.0", default-features = true }
+lexopt = "0.3.1"
+# Safe getrusage wrapper, used only by plinth-cli's mem module (unsafe_code stays forbid).
+nix = { version = "0.31.3", default-features = false, features = ["resource"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

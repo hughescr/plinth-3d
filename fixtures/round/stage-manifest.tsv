@@ -1,0 +1,13 @@
+# Stage manifest (design dev-loop.md section 3 and 6): what L3 expects of each Round base at the
+# current stage. Columns are tab-separated; "-" means none.
+#
+# Stage "transport" (step 7): the original STL is lifted and written alone, with no supports. It
+# is a transport test, not a print candidate. The checker has no rule measurement built yet, so it
+# must report every rule H1 to H9 as unverified and the overall answer as unverified. Never "pass".
+# When a rule gets its measurement, this file changes in the same commit; the runner never infers
+# applicability from whichever checks happen to exist.
+#
+# model	input (under fixtures/round/)	mode	verdict	pass	violation	unverified	not_applicable
+Round 25	original/Round 25.stl	transport	unverified	-	-	H1,H2,H3,H4,H5,H6,H7,H8,H9	-
+Round 50	original/Round 50.stl	transport	unverified	-	-	H1,H2,H3,H4,H5,H6,H7,H8,H9	-
+Round 100	original/Round 100.stl	transport	unverified	-	-	H1,H2,H3,H4,H5,H6,H7,H8,H9	-
