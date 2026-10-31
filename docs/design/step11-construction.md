@@ -277,7 +277,7 @@ Search resolution is a search setting, not a spacing law. The owner's 4 / 6 / 8 
 ### 5.7 Columns, bracing, bases, raft
 
 - **Columns:** vertical rods from the joint to the base. A vertical drop from a 65° underside moves away from it (the gap grows 0.423 mm per mm of drop). r_col = max(r_j, √(load / 12 / 3.0615), 0.25). 0.25 mm is the pillar radius of his Light and Ultralight profiles **[O]**.
-- **Bracing** (his Light profile **[O]**; P12 unmeasured): a column with more than 4.0 mm free length gets 45° X-pairs to the nearest column within 15 mm. Brace radius 0.25. Nodes at least 4.0 mm apart, the first at least 4.0 mm above the raft. Each brace starts on a column already printed (H3).
+- **Bracing** (his Light profile **[O]**; P12 unmeasured): a column with more than 4.0 mm free length gets 45° X-pairs to the nearest column that is at least 4.0 mm away (plan distance) and within 15 mm. Columns closer than 4.0 mm to each other are allowed (they keep the 0.32 mm member gap) and are not braced to each other; each still needs its own brace partner, or the planner reports the column as unbraced (located warning). Brace radius 0.25. Nodes at least 4.0 mm apart, the first at least 4.0 mm above the raft. Each brace starts on a column already printed (H3). (Ruling 2026-10-31: the earlier "nearest column" wording made the §5.6 added contacts 1.0–2.5 mm from a long-column contact unroutable.)
 - **Joints:** rod ends reach the joint ball centre; the joint ball radius ≥ the rod end radius. No tangent or thin-lens joins.
 - **Bases:** flare from r_col to 1.1 mm over 1.0 mm (P17 **[O]**, native). Column end 0.002 mm below the flare top; flare bottom 0.002 mm below the raft top (native overlap **[M]**).
 - **Raft:** connected style only **[O]**. A pad 2.2 mm across × 0.2 mm thick at each base; bridges 2.2 mm wide × 0.2 mm thick along the minimum spanning tree of pad centres (native rule). Native records with attr `0x1e00` and the real raft Z. Check that the solid union is one piece; a bridge list is not proof. Pads may overlap; supports may merge near the plate (FR-27). Never the default mat or hex mat.
@@ -563,7 +563,7 @@ Step 12 then generates the supported Round 25 with zero violated or unverified a
 
 **For the owner:**
 
-1. **The post-output ChituBox sample** (PRD §12): at step 12, he opens, saves and slices a plinth-written file so we learn which solid ChituBox slices. Required before printing (PRD §8.1).
+1. **The post-output ChituBox sample** (PRD §12): at step 12, he opens, saves and slices a plinth-written file so we learn which solid ChituBox slices. Required before printing (PRD §8.1). The checker's hard-limit verdicts are measured on the written canonical support triangles only (ruling 2026-10-31, gpt-astra accepted with conditions), so this test must discriminate: a differential pair (one project with native supports, one with the same triangles as an ordinary mesh at identical coordinates), including an oblique tapered start and a sphere/contact boundary placed at layer and pixel phases where the true-circle and polygon predictions differ visibly. Compare decoded layer masks, not screenshots, before and after a native resave; record files, hashes, ChituBox version and slicing profile. The earlier load test (format spec §18) covered model-only files, so supported files are still untested.
 
 **For the orchestrator (decide from results, no owner input needed):**
 

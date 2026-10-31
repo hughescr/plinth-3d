@@ -391,8 +391,70 @@ fn native_dump_record_lines_equal_the_reader_records() {
     assert!(total > 100, "only {total} records compared");
 }
 
+/// The status of every rule of a check report, by id, from the report text.
+fn statuses(out: &str) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    let mut id = None;
+    for line in out.lines().map(str::trim) {
+        if let Some(v) = line.strip_prefix("\"id\": \"") {
+            id = Some(v.trim_end_matches("\",").to_owned());
+        } else if let Some(v) = line.strip_prefix("\"status\": \"")
+            && let Some(i) = id.take()
+        {
+            map.insert(i, v.trim_end_matches("\",").to_owned());
+        }
+    }
+    map
+}
+
 #[test]
-fn native_check_report_marks_every_rule_unverified() {
+fn native_check_report_on_a_lifted_model_only_file() {
+    // Sample 02: the Round 25 base raised by hand to 5.0 mm, no supports. Nothing that needs
+    // supports may pass; the lift, the fidelity and the closed-solid proof can.
+    let args = [
+        "check",
+        "--chitubox",
+        "../test-data/chitubox-native/samples/02-round25-lifted.chitubox",
+        "--stl",
+        "../fixtures/round/original/Round 25.stl",
+        "--limits",
+        "../limits.toml",
+    ];
+    let (code, out, err) = run(&args);
+    assert_eq!(code, 2, "unverified exit code; stderr: {err}");
+    let st = statuses(&out);
+    let want = [
+        ("H1", "not_applicable"),
+        ("H2", "not_applicable"),
+        ("H3", "unverified"),
+        ("H4", "pass"),
+        ("H5", "not_applicable"),
+        ("H6", "not_applicable"),
+        ("H7", "pass"),
+        ("H8", "unverified"),
+        ("H9", "not_applicable"),
+    ];
+    for (id, s) in want {
+        assert_eq!(st.get(id).map(String::as_str), Some(s), "{id}: {out}");
+    }
+    assert!(
+        out.contains("\"verdict\": \"unverified\"") && out.contains("\"h1_patch_area_mm2\": 0.5"),
+        "{out}"
+    );
+    assert!(
+        out.contains("\"sha256\"") && out.contains("\"anomalies\": []"),
+        "{out}"
+    );
+    // Not accepted, not ready for review: the lifted model has nothing under it.
+    assert!(out.contains("\"ready_for_owner_review\": false"), "{out}");
+    assert!(
+        out.contains("H5: not applicable — emitted model has 0 enclosed cavities and 0 drain bores; topology verified."),
+        "{out}"
+    );
+}
+
+#[test]
+fn native_check_report_on_the_unlifted_plain_file_is_an_h4_violation() {
     let args = [
         "check",
         "--chitubox",
@@ -402,32 +464,16 @@ fn native_check_report_marks_every_rule_unverified() {
         "--limits",
         "../limits.toml",
     ];
-    let (code, out, err) = run(&args);
-    assert_eq!(code, 2, "unverified exit code; stderr: {err}");
-    for id in ["H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"] {
-        assert!(
-            out.contains(&format!("\"id\": \"{id}\"")),
-            "{id} missing: {out}"
-        );
-    }
-    assert_eq!(
-        out.matches("\"status\": \"unverified\"").count(),
-        9,
-        "{out}"
-    );
-    assert!(
-        !out.contains("\"status\": \"pass\"") && !out.contains("\"status\": \"violation\""),
-        "{out}"
-    );
-    assert!(
-        out.contains("\"verdict\": \"unverified\"") && out.contains("\"h1_patch_area_mm2\": 0.5"),
-        "{out}"
-    );
-    assert!(
-        out.contains("\"sha256\"") && out.contains("\"anomalies\": []"),
-        "{out}"
-    );
-    // A file that is not a .chitubox file fails, with the rules still unverified, never passed.
+    let (code, out, _) = run(&args);
+    assert_eq!(code, 1, "{out}");
+    let st = statuses(&out);
+    assert_eq!(st.get("H4").map(String::as_str), Some("violation"), "{out}");
+    assert_eq!(st.get("H7").map(String::as_str), Some("pass"), "{out}");
+    assert!(out.contains("\"rule\": \"H4\""), "{out}");
+}
+
+#[test]
+fn native_check_report_on_a_file_that_is_not_chitubox_fails_and_passes_nothing() {
     let bad = [
         "check",
         "--chitubox",
@@ -442,4 +488,527 @@ fn native_check_report_marks_every_rule_unverified() {
         "{out}"
     );
     assert!(!out.contains("\"status\": \"pass\""), "{out}");
+}
+
+// ---- the measurements on ChituBox's own supports ------------------------------------------
+
+use plinth_check::limits::{self, Limits};
+use plinth_check::parts::{Geom, Part, Role};
+use plinth_check::patch::{self, Rep};
+use plinth_check::scene::Scene;
+use plinth_check::v3::{V, add, cross, dot, f, frame, mul, sub, unit};
+
+/// The five samples whose support records the design validates against, and how many
+/// supported models each holds.
+const SUPPORTED_SAMPLES: [(&str, usize); 5] = [
+    ("03-round25-supports", 1),
+    ("04-round25-supports-raft-connected", 1),
+    ("04-round25-supports-raft-hex", 1),
+    ("05-two-plates", 2),
+    ("07-round25-on-edge-braced", 1),
+];
+
+fn limits_from_file() -> Limits {
+    let text = std::fs::read_to_string("../limits.toml").expect("../limits.toml");
+    limits::parse(&text).expect("limits parse")
+}
+
+fn sample_scene(sample: &str, model: usize) -> Scene {
+    let p = PathBuf::from(format!(
+        "../test-data/chitubox-native/samples/{sample}.chitubox"
+    ));
+    let (bytes, file) = load(&p);
+    Scene::build(&limits_from_file(), 1, &file, &bytes, model).expect("scene")
+}
+
+#[test]
+fn native_every_support_record_of_the_samples_is_the_canonical_mesh_but_the_hex_mat() {
+    // The canonical-mesh validation (`canon`): the checker rebuilds the native mesh of every
+    // record from its fields alone and requires the written vertices within 2 units in the
+    // last place per coordinate, with the native topology.
+    let (mut records, mut invalid, mut tip_balls) = (0usize, Vec::new(), 0usize);
+    let mut worst: std::collections::BTreeMap<&'static str, (usize, f64)> =
+        std::collections::BTreeMap::new();
+    for (sample, models) in SUPPORTED_SAMPLES {
+        for m in 0..models {
+            let scene = sample_scene(sample, m);
+            for p in &scene.parts {
+                records += 1;
+                tip_balls += usize::from(p.role == Role::TipBall);
+                if let Some(why) = &p.invalid {
+                    invalid.push(format!(
+                        "{sample} model {m} record {} ({}, {:?} to {:?}, {:?}): {why}",
+                        p.rec,
+                        p.role.name(),
+                        p.start,
+                        p.end,
+                        p.geom
+                    ));
+                } else {
+                    let e = worst.entry(p.role.name()).or_insert((0, 0.0));
+                    e.0 += 1;
+                    e.1 = e.1.max(p.canon_ulps);
+                }
+            }
+        }
+    }
+    println!("records {records}, tip balls {tip_balls}, invalid {invalid:?}");
+    let passed: usize = worst.values().map(|e| e.0).sum();
+    println!(
+        "canonical mesh: {passed} of {records} records pass; per kind (count, worst ULP): {worst:?}"
+    );
+    assert_eq!(passed, 653, "all but the hex raft mat pass: {worst:?}");
+    for (kind, (_, ulps)) in &worst {
+        assert!(*ulps <= plinth_check::canon::ULPS, "{kind}: {ulps} ULP");
+    }
+    assert_eq!(tip_balls, 97, "the design counts 97 native tip balls");
+    assert_eq!(invalid.len(), 1, "{invalid:?}");
+    assert!(
+        invalid[0].contains("04-round25-supports-raft-hex"),
+        "{invalid:?}"
+    );
+    assert!(invalid[0].contains("not closed"), "{invalid:?}");
+}
+
+#[test]
+fn native_unverified_hex_raft_mat_is_refused_by_the_checker() {
+    let scene = sample_scene("04-round25-supports-raft-hex", 0);
+    let hex: Vec<&Part> = scene.parts.iter().filter(|p| p.invalid.is_some()).collect();
+    assert_eq!(hex.len(), 1);
+    assert_eq!(hex[0].role, Role::Raft);
+    println!(
+        "PLINTH-UNVERIFIED: hex raft mat: {}",
+        hex[0].invalid.as_deref().unwrap_or("")
+    );
+    // Every rule that needs the mat says unverified; none passes on a guess.
+    let rules = plinth_check::measure::run_scene(&scene, None);
+    for id in ["H1", "H2", "H3", "H9"] {
+        let r = rules.iter().find(|r| r.id == id).expect("rule");
+        assert_ne!(r.status.name(), "pass", "{id}: {}", r.reason);
+    }
+}
+
+// The oracle. It is exact up to f64 rounding (about 1e-12 mm2), so the checker's interval is
+// compared with it with no tolerance added: there is no oracle error to enclose beyond
+// rounding. The analytic patch is the area of a disc cut by a triangle, by the closed form
+// (circular sectors for the parts of each triangle edge outside the disc, triangles for the
+// parts inside). The mesh patch is the area of a convex mesh section (the hull of the points
+// where the mesh edges cross the plane) cut by the triangle (Sutherland-Hodgman). Neither
+// shares code with the measurement, which clips each triangle by half-spaces.
+
+type P2 = [f64; 2];
+
+/// Signed area of (disc of radius `r` about the origin) intersected with the triangle
+/// `(origin, a, b)`.
+fn disc_wedge(a: P2, b: P2, r: f64) -> f64 {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let (qa, qb, qc) = (
+        d[0] * d[0] + d[1] * d[1],
+        2.0 * (a[0] * d[0] + a[1] * d[1]),
+        a[0] * a[0] + a[1] * a[1] - r * r,
+    );
+    let mut ts = vec![0.0];
+    let disc = qb * qb - 4.0 * qa * qc;
+    if qa > 0.0 && disc > 0.0 {
+        let s = disc.sqrt();
+        for t in [(-qb - s) / (2.0 * qa), (-qb + s) / (2.0 * qa)] {
+            if t > 0.0 && t < 1.0 {
+                ts.push(t);
+            }
+        }
+    }
+    ts.push(1.0);
+    ts.windows(2)
+        .map(|w| {
+            let at = |t: f64| [a[0] + d[0] * t, a[1] + d[1] * t];
+            let (p, q, m) = (at(w[0]), at(w[1]), at(0.5 * (w[0] + w[1])));
+            let cr = p[0] * q[1] - p[1] * q[0];
+            if m[0].hypot(m[1]) <= r {
+                0.5 * cr
+            } else {
+                0.5 * r * r * cr.atan2(p[0] * q[0] + p[1] * q[1])
+            }
+        })
+        .sum()
+}
+
+fn ccw(mut poly: Vec<P2>) -> Vec<P2> {
+    let a: f64 = (0..poly.len())
+        .map(|i| {
+            let (p, q) = (poly[i], poly[(i + 1) % poly.len()]);
+            p[0] * q[1] - q[0] * p[1]
+        })
+        .sum();
+    if a < 0.0 {
+        poly.reverse();
+    }
+    poly
+}
+
+fn area2(poly: &[P2]) -> f64 {
+    0.5 * (0..poly.len())
+        .map(|i| {
+            let (p, q) = (poly[i], poly[(i + 1) % poly.len()]);
+            p[0] * q[1] - q[0] * p[1]
+        })
+        .sum::<f64>()
+}
+
+/// Convex hull by the monotone chain.
+fn hull(points: &[P2]) -> Vec<P2> {
+    let mut p = points.to_vec();
+    p.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    p.dedup();
+    let cr = |o: P2, a: P2, b: P2| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    let mut h: Vec<P2> = Vec::new();
+    for pass in 0..2 {
+        let start = h.len();
+        let seq: Vec<P2> = if pass == 0 {
+            p.clone()
+        } else {
+            p.iter().rev().copied().collect()
+        };
+        for q in seq {
+            while h.len() >= start + 2 && cr(h[h.len() - 2], h[h.len() - 1], q) <= 0.0 {
+                h.pop();
+            }
+            h.push(q);
+        }
+        h.pop();
+    }
+    h
+}
+
+/// A convex subject polygon cut by a convex counter-clockwise clip polygon.
+fn clip_convex(subject: Vec<P2>, clip: &[P2]) -> Vec<P2> {
+    let mut out = subject;
+    for i in 0..clip.len() {
+        let (a, b) = (clip[i], clip[(i + 1) % clip.len()]);
+        let side = |p: P2| (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+        let input = std::mem::take(&mut out);
+        for j in 0..input.len() {
+            let (p, q) = (input[j], input[(j + 1) % input.len()]);
+            let (sp, sq) = (side(p), side(q));
+            if sp >= 0.0 {
+                out.push(p);
+            }
+            if (sp > 0.0 && sq < 0.0) || (sp < 0.0 && sq > 0.0) {
+                let t = sp / (sp - sq);
+                out.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]);
+            }
+        }
+        if out.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+/// The exact patch area of a ball on the model, summed over the model triangles it reaches.
+fn oracle_area(scene: &Scene, part: &Part, mesh: bool) -> f64 {
+    let Geom::Ball { c, r } = part.geom else {
+        panic!("a ball")
+    };
+    let mut total = 0.0;
+    for ti in scene.model_near(&part.bbox.inflated(1e-6)) {
+        let t = &scene.model[ti as usize];
+        let n = unit(cross(sub(t[1], t[0]), sub(t[2], t[0])));
+        let s = dot(n, sub(c, t[0]));
+        let (e1, e2) = frame(n);
+        // The plane's origin is the foot of the ball centre; 2D coordinates are along e1, e2.
+        let q = sub(c, mul(n, s));
+        let to2 = |p: V| [dot(sub(p, q), e1), dot(sub(p, q), e2)];
+        let tri2 = ccw(t.iter().map(|p| to2(*p)).collect());
+        if mesh {
+            let mut pts: Vec<P2> = Vec::new();
+            for mt in &part.tris {
+                for k in 0..3 {
+                    let (p, qq) = (mt[k], mt[(k + 1) % 3]);
+                    let (dp, dq) = (dot(n, sub(p, t[0])), dot(n, sub(qq, t[0])));
+                    if dp == 0.0 {
+                        pts.push(to2(p));
+                    }
+                    if (dp < 0.0 && dq > 0.0) || (dp > 0.0 && dq < 0.0) {
+                        let u = dp / (dp - dq);
+                        pts.push(to2(add(p, mul(sub(qq, p), u))));
+                    }
+                }
+            }
+            if pts.len() >= 3 {
+                total += area2(&clip_convex(hull(&pts), &tri2)).abs();
+            }
+        } else if s.abs() < r {
+            let rho = (r * r - s * s).sqrt();
+            total += (0..3)
+                .map(|i| disc_wedge(tri2[i], tri2[(i + 1) % 3], rho))
+                .sum::<f64>()
+                .abs();
+        }
+    }
+    total
+}
+
+/// The first sample alone: the representative the fast level runs. Every sample is
+/// `e2e_native_tip_ball_patches_enclose_a_fine_oracle_in_every_sample` (L2 only).
+#[test]
+fn native_tip_ball_patches_enclose_a_fine_oracle() {
+    let balls = tip_ball_oracle(&SUPPORTED_SAMPLES[..1]);
+    assert!(balls > 0, "the sample has tip balls");
+}
+
+#[test]
+fn e2e_native_tip_ball_patches_enclose_a_fine_oracle_in_every_sample() {
+    assert_eq!(tip_ball_oracle(&SUPPORTED_SAMPLES), 97);
+}
+
+/// Check every tip ball of the samples against the oracle; the number of balls checked.
+fn tip_ball_oracle(samples: &[(&str, usize)]) -> usize {
+    let mut worst_width = 0.0f64;
+    let (mut balls, mut max_err) = (0usize, 0.0f64);
+    let mut by_radius: std::collections::BTreeMap<String, (usize, f64)> =
+        std::collections::BTreeMap::new();
+    for &(sample, models) in samples {
+        for m in 0..models {
+            let full = sample_scene(sample, m);
+            let tips: Vec<Part> = full
+                .parts
+                .iter()
+                .filter(|p| p.role == Role::TipBall)
+                .cloned()
+                .collect();
+            let scene = Scene::from_parts(
+                &limits_from_file(),
+                full.model.clone(),
+                full.translate,
+                tips,
+            );
+            let out = patch::measure(&scene);
+            for rep_out in &out.reps {
+                for (pi, part) in scene.parts.iter().enumerate() {
+                    let chain = scene.chains.of_part[pi];
+                    let (lo, hi): (f64, f64) = rep_out
+                        .comps
+                        .iter()
+                        .filter(|c| c.chain == chain)
+                        .fold((0.0, 0.0), |(l, h), c| (l + c.lo, h + c.hi));
+                    let mesh = rep_out.rep == Rep::Mesh;
+                    // The oracle is exact to rounding (1e-9 mm2 allowed): no tolerance for
+                    // the oracle's own error is added to the checker's interval.
+                    let truth = oracle_area(&scene, part, mesh);
+                    let tol = 1e-9;
+                    assert!(
+                        lo - tol <= truth && truth <= hi + tol,
+                        "{sample} model {m} record {} ({}): [{lo}, {hi}] vs oracle {truth}",
+                        part.rec,
+                        rep_out.rep.name()
+                    );
+                    worst_width = worst_width.max(hi - lo);
+                    max_err = max_err.max((truth - 0.5 * (lo + hi)).abs());
+                    if !mesh {
+                        balls += 1;
+                        let key = format!(
+                            "r={:.2}",
+                            match part.geom {
+                                Geom::Ball { r, .. } => r,
+                                _ => 0.0,
+                            }
+                        );
+                        let e = by_radius.entry(key).or_insert((0, 0.0));
+                        e.0 += 1;
+                        e.1 = e.1.max(hi);
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "balls {balls}; widest interval {worst_width:.6} mm2; largest |oracle - midpoint| {max_err:.6} mm2; largest upper bound by tip radius {by_radius:?}"
+    );
+    assert!(worst_width <= 0.010, "interval width {worst_width}");
+    balls
+}
+
+/// The first 3 damaged files: the representative the fast level runs. All 12 are
+/// `e2e_native_random_byte_damage_over_twelve_files_never_panics_or_passes` (L2 only).
+#[test]
+fn native_random_byte_damage_never_panics_and_never_passes_a_broken_rule() {
+    byte_damage_sweep(3);
+}
+
+#[test]
+fn e2e_native_random_byte_damage_over_twelve_files_never_panics_or_passes() {
+    byte_damage_sweep(12);
+}
+
+fn byte_damage_sweep(files: usize) {
+    // Damage a small supported native file at random places (inside the mesh and support
+    // region, where the new measurements read) and run the full report in process. Any answer
+    // is acceptable except a panic; a damaged file must also never say `pass` for H8.
+    let p = Path::new("../test-data/chitubox-native/two-supports.chitubox");
+    let (bytes, f) = load(p);
+    let start = usize::try_from(f.models[0].mesh_off).expect("small");
+    let span = bytes.len() - start;
+    let limits = limits_from_file();
+    let mut state = 0x1234_5678_9abc_def0u64;
+    let mut next = move || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    let mut verdicts = [0usize; 3];
+    for _ in 0..files {
+        let mut damaged = bytes.clone();
+        for _ in 0..=(next() % 3) {
+            let at = start + usize::try_from(next()).unwrap_or(0) % span;
+            damaged[at] ^= u8::try_from(1 + next() % 255).unwrap_or(1);
+        }
+        let input = plinth_check::report::Input {
+            path: "damaged.chitubox".to_owned(),
+            data: Ok(damaged),
+        };
+        let r = plinth_check::report::build_with(&limits, &input, None, 1);
+        verdicts[match r.verdict {
+            plinth_check::report::Verdict::Pass => 0,
+            plinth_check::report::Verdict::Unverified => 1,
+            plinth_check::report::Verdict::Fail => 2,
+        }] += 1;
+        assert!(!r.json.render().is_empty());
+    }
+    println!(
+        "verdicts over {files} damaged files: pass {} unverified {} fail {}",
+        verdicts[0], verdicts[1], verdicts[2]
+    );
+    assert_eq!(verdicts[0], 0, "H8 is never a pass, so no file is a pass");
+}
+
+#[test]
+fn native_h7_pose_rotation_reproduces_chitubox_own_flip() {
+    // Sample 06 is sample 01 turned 180 degrees about X by ChituBox (format reference
+    // section 6.1): every triangle matches the original under that pose to under 1e-5 mm. Its
+    // translate Y is 0.3536 mm off the rotated centre (an unexplained ChituBox quirk, section
+    // 6.3), which H7 reports as a plan-view move, so the answer is a violation for that
+    // reason alone.
+    let h7_reason = |deg: &str| {
+        let (_, out, err) = run(&[
+            "check",
+            "--chitubox",
+            "../test-data/chitubox-native/samples/06-round25-flipped.chitubox",
+            "--stl",
+            "../fixtures/round/original/Round 25.stl",
+            "--limits",
+            "../limits.toml",
+            "--pose-rotate-x-deg",
+            deg,
+        ]);
+        assert!(!out.is_empty(), "{err}");
+        let at = out.find("\"id\": \"H7\"").expect("H7 in the report");
+        let reason = out[at..]
+            .lines()
+            .find(|l| l.contains("\"reason\""))
+            .expect("reason");
+        reason.to_owned()
+    };
+    let flipped = h7_reason("180");
+    assert!(
+        !flipped.contains("not in the input STL") && flipped.contains("translate X, Y"),
+        "{flipped}"
+    );
+    let unrotated = h7_reason("0");
+    assert!(unrotated.contains("not in the input STL"), "{unrotated}");
+}
+
+/// The thread allocation of this test run (set by `scripts/t`; 1 when absent).
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test-only read of the allocation scripts/t sets"
+)]
+fn allocation() -> usize {
+    std::env::var("NEXTEST_TEST_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(1)
+}
+
+#[test]
+fn threads_checker_report_is_identical_at_one_thread_and_the_allocation() {
+    let many = allocation().min(4);
+    let report = |threads: usize| {
+        let t = threads.to_string();
+        let (code, out, err) = run(&[
+            "check",
+            "--chitubox",
+            "../test-data/chitubox-native/samples/03-round25-supports.chitubox",
+            "--stl",
+            "../fixtures/round/original/Round 25.stl",
+            "--limits",
+            "../limits.toml",
+            "--threads",
+            &t,
+        ]);
+        assert_eq!(code, 1, "{err}");
+        out.replace(&format!("\"threads\": {threads}"), "\"threads\": N")
+    };
+    // The two runs are independent processes: run them side by side.
+    let (one, several) = std::thread::scope(|s| {
+        let a = s.spawn(|| report(1));
+        let b = report(many);
+        (a.join().expect("the one-thread run"), b)
+    });
+    assert_eq!(one, several, "the report differs at {many} threads");
+}
+
+#[test]
+fn native_h9_records_the_thin_native_arms_as_a_finding_not_a_limit_change() {
+    // Design section 12, point 4: ChituBox's own r 0.05 parts are 0.098 mm across flats.
+    let scene = sample_scene("03-round25-supports", 0);
+    let h9 = plinth_check::h9::measure(&scene);
+    assert_eq!(h9.status.name(), "violation", "{}", h9.reason);
+    let w = match h9.detail.get("thinnest_section_mm") {
+        Some(plinth_check::json::Json::Num(w)) => *w,
+        other => panic!("no thinnest section width: {other:?}"),
+    };
+    println!("thinnest native part: {w:.5} mm across flats");
+    assert!((0.0980..0.0982).contains(&w), "{w}");
+    // The joins of the native supports are measured too (and some of ChituBox's own are thin);
+    // the number is recorded, not pinned.
+    println!(
+        "thinnest native join: {:?}",
+        h9.detail.get("thinnest_join_mm")
+    );
+    let _ = f([0.0; 3]);
+}
+
+#[test]
+fn native_approved_round25_has_the_two_islands_of_the_design() {
+    // The approved Round 25 (65 degrees from flat), lifted 5 mm. Design section 0: island 1
+    // is model layer 0 (the lip edge, a point); island 2 is the central annular rib's lowest
+    // point at model layer 152. Both are listed from the closed mesh alone.
+    let bytes = std::fs::read("../fixtures/round/approved/Round 25.keepup.stl").expect("stl");
+    let stl = plinth_check::stl::parse(&bytes).expect("parse");
+    let model: Vec<[V; 3]> = stl
+        .coords
+        .chunks_exact(9)
+        .map(|t| {
+            let p = |i: usize| [f64::from(t[i]), f64::from(t[i + 1]), f64::from(t[i + 2])];
+            [p(0), p(3), p(6)]
+        })
+        .collect();
+    let scene = Scene::from_parts(&limits_from_file(), model, [0.0, 0.0, 5.0], Vec::new());
+    let births = plinth_check::islands::births(&scene, scene.plate_z()).expect("closed model");
+    let listed: Vec<(usize, bool)> = births
+        .iter()
+        .map(|b| (b.layer - 100, b.certainly_over_small_size()))
+        .collect();
+    println!("births (model layer, over the small size): {listed:?}");
+    assert!(
+        listed.iter().any(|(k, _)| *k == 0),
+        "island 1 (model layer 0): {listed:?}"
+    );
+    assert!(
+        listed.iter().any(|(k, _)| (150..=154).contains(k)),
+        "island 2 (model layer 152): {listed:?}"
+    );
 }
