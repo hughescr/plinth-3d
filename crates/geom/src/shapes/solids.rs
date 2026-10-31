@@ -4,8 +4,8 @@
 //! frustum end caps is a table read from the native files (ChituBox's own triangulator
 //! made it, and no formula for it is known).
 
+use super::Triangle;
 use super::math::{Quat, V3, add, div, length, sub, unit_ring};
-use plinth_chitubox::Triangle;
 
 /// Sides of a frustum.
 pub const FRUSTUM_SIDES: usize = 16;

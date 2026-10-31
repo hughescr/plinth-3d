@@ -5,7 +5,7 @@
 use crate::chitubox::{self, ChituFile};
 use crate::json::Json;
 use crate::limits::Limits;
-use crate::{layout, sha256, stl};
+use crate::{layout, sha256, status, stl};
 
 pub const REPORT_VERSION: u64 = 1;
 
@@ -268,7 +268,7 @@ pub fn build(limits: &Limits, chitubox: &Input, stl: Option<&Input>) -> Report {
     };
     let rules = rules_unverified(reason);
     let verdict = verdict(&rules, structure_ok);
-    let json = Json::obj([
+    let mut json = Json::obj([
         ("report_version", Json::Uint(REPORT_VERSION)),
         (
             "tool",
@@ -298,6 +298,15 @@ pub fn build(limits: &Limits, chitubox: &Input, stl: Option<&Input>) -> Report {
         ("summary", summary_json(&rules)),
         ("verdict", Json::str(verdict.name())),
     ]);
+    // Geometry acceptance apart from H8, and the rejection list (design section 7.5). The
+    // fields are additive: `verdict` and `rules` keep their meaning.
+    if let Json::Obj(pairs) = &mut json {
+        pairs.extend(
+            status::fields(&rules, structure_ok)
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v)),
+        );
+    }
     Report { json, verdict }
 }
 
@@ -351,6 +360,13 @@ mod tests {
         let text = r.json.render();
         assert!(text.contains("\"parse_error\""), "{text}");
         assert!(text.contains("\"unverified\": 9"), "{text}");
+        // The geometry / H8 split: an unreadable file is a geometry violation, H8 is
+        // pending, and nothing is ready for review or credible to print.
+        assert!(text.contains("\"acceptance\": \"violation\""), "{text}");
+        assert!(text.contains("\"state\": \"pending\""), "{text}");
+        assert!(text.contains("\"ready_for_owner_review\": false"), "{text}");
+        assert!(text.contains("\"credible_to_print\": false"), "{text}");
+        assert!(text.contains("\"rule\": \"STRUCTURE\""), "{text}");
         let missing = Input {
             path: "y".into(),
             data: Err("no such file".into()),

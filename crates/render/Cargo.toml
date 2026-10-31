@@ -1,0 +1,17 @@
+[package]
+name = "plinth-render"
+description = "Review pictures of the written file (lane B; empty until the report pictures are built)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+plinth-geom.workspace = true
+plinth-support.workspace = true
+
+[lints]
+workspace = true

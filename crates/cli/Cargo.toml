@@ -18,6 +18,7 @@ plinth-geom.workspace = true
 plinth-support.workspace = true
 plinth-emit.workspace = true
 plinth-chitubox.workspace = true
+plinth-render.workspace = true
 lexopt.workspace = true
 nix.workspace = true
 

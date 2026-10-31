@@ -13,4 +13,5 @@ pub mod limits;
 pub mod loop_canary;
 pub mod report;
 pub mod sha256;
+pub mod status;
 pub mod stl;

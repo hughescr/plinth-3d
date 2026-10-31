@@ -181,6 +181,20 @@ pub fn to_json(cfg: &Config, run: &Run) -> Json {
     ])
 }
 
+/// The FR-21 block of the report for one supported model (lane B; design
+/// `step11-construction.md` section 9). Step 0 stub: it states that nothing was computed, and
+/// `to_json` does not call it yet.
+#[must_use]
+pub fn fr21_json(data: &plinth_support::report_data::ReportData) -> Json {
+    Json::obj([
+        ("computed", Json::Bool(data.is_computed())),
+        (
+            "unverified",
+            data.unverified.as_ref().map_or(Json::Null, Json::str),
+        ),
+    ])
+}
+
 /// One progress line for a finished model, for standard error.
 #[must_use]
 pub fn progress_line(candidate: bool, m: &ModelRun) -> String {

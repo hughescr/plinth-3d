@@ -233,6 +233,7 @@ dependencies = [
  "plinth-chitubox",
  "plinth-emit",
  "plinth-geom",
+ "plinth-render",
  "plinth-support",
 ]
 
@@ -250,6 +251,14 @@ name = "plinth-geom"
 version = "0.0.0"
 dependencies = [
  "proptest",
+]
+
+[[package]]
+name = "plinth-render"
+version = "0.0.0"
+dependencies = [
+ "plinth-geom",
+ "plinth-support",
 ]
 
 [[package]]
