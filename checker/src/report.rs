@@ -1,11 +1,13 @@
-//! The checker's JSON report (versioned). Skeleton stage: the files are read and their
-//! structure is checked, and every hard-limit rule (H1 to H9) is reported "unverified" until
-//! its measurement is built. No rule can report "pass" yet.
+//! The checker's JSON report (versioned). The files are read and their structure is checked;
+//! when the structure is sound each hard-limit rule (H1 to H9) is measured by `measure`, and a
+//! rule that cannot be measured is "unverified", never "pass". H8 is always "unverified":
+//! it is an external record, not a measurement.
 
 use crate::chitubox::{self, ChituFile};
 use crate::json::Json;
 use crate::limits::Limits;
-use crate::{layout, sha256, status, stl};
+use crate::status::Located;
+use crate::{h7, layout, measure, sha256, status, stl};
 
 pub const REPORT_VERSION: u64 = 1;
 
@@ -29,12 +31,16 @@ impl Status {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RuleResult {
     pub id: &'static str,
     pub name: &'static str,
     pub status: Status,
     pub reason: String,
+    /// Places in the file that explain a violation or an unverified answer.
+    pub located: Vec<Located>,
+    /// The numbers behind the answer (`Json::Null` when there are none).
+    pub detail: Json,
 }
 
 /// The overall answer. `Fail` also covers a file the checker could not read.
@@ -66,7 +72,7 @@ impl Verdict {
     }
 }
 
-const RULES: [(&str, &str); 9] = [
+pub const RULES: [(&str, &str); 9] = [
     ("H1", "contact patch area"),
     ("H2", "no fused contacts"),
     ("H3", "print-order continuity"),
@@ -89,7 +95,14 @@ pub fn rules_unverified(reason_all: &str) -> Vec<RuleResult> {
             } else {
                 reason_all.to_owned()
             };
-            RuleResult { id, name, status: Status::Unverified, reason }
+            RuleResult {
+                id,
+                name,
+                status: Status::Unverified,
+                reason,
+                located: Vec::new(),
+                detail: Json::Null,
+            }
         })
         .collect()
 }
@@ -178,10 +191,19 @@ fn chitubox_pairs(f: &ChituFile, differences: &[String]) -> Vec<(&'static str, J
     ]
 }
 
-/// Read the .chitubox input. Returns its JSON and whether it was read with a clean structure.
-fn chitubox_input(input: &Input) -> (Json, bool) {
+/// The .chitubox input as read: its JSON, whether its structure is clean, and the parsed file
+/// when it is.
+struct ChituRead {
+    json: Json,
+    ok: bool,
+    file: Option<ChituFile>,
+}
+
+/// Read the .chitubox input.
+fn chitubox_input(input: &Input) -> ChituRead {
     let mut head = file_head(input);
     let mut ok = false;
+    let mut parsed = None;
     match input.data.as_ref().map(|d| (chitubox::parse(d), d)) {
         Ok((Ok(f), data)) => {
             let diff = layout::walk(data).map_or_else(
@@ -191,6 +213,7 @@ fn chitubox_input(input: &Input) -> (Json, bool) {
             ok = f.anomalies.is_empty() && f.tiles && diff.is_empty();
             head.push(("readable", Json::Bool(true)));
             head.extend(chitubox_pairs(&f, &diff));
+            parsed = ok.then_some(f);
         }
         Ok((Err(e), _)) => {
             head.push(("readable", Json::Bool(false)));
@@ -198,12 +221,18 @@ fn chitubox_input(input: &Input) -> (Json, bool) {
         }
         Err(_) => head.push(("readable", Json::Bool(false))),
     }
-    (Json::from_pairs(head), ok)
+    ChituRead {
+        json: Json::from_pairs(head),
+        ok,
+        file: parsed,
+    }
 }
 
-fn stl_input(input: &Input) -> (Json, bool) {
+/// The STL input as read: its JSON, whether it is readable, and the parsed mesh.
+fn stl_input(input: &Input) -> (Json, bool, Option<stl::Stl>) {
     let mut head = file_head(input);
     let mut ok = false;
+    let mut parsed = None;
     match input.data.as_ref().map(|d| stl::parse(d)) {
         Ok(Ok(m)) => {
             ok = true;
@@ -215,6 +244,7 @@ fn stl_input(input: &Input) -> (Json, bool) {
                 head.push(("bounds_max", f3(hi)));
             }
             head.push(("signed_volume_mm3", Json::Num(m.signed_volume())));
+            parsed = Some(m);
         }
         Ok(Err(e)) => {
             head.push(("readable", Json::Bool(false)));
@@ -222,7 +252,28 @@ fn stl_input(input: &Input) -> (Json, bool) {
         }
         Err(_) => head.push(("readable", Json::Bool(false))),
     }
-    (Json::from_pairs(head), ok)
+    (Json::from_pairs(head), ok, parsed)
+}
+
+fn located_json(l: &Located) -> Json {
+    let loc = &l.location;
+    Json::obj([
+        (
+            "record",
+            loc.record.map_or(Json::Null, |r| Json::Uint(u64::from(r))),
+        ),
+        (
+            "xyz",
+            loc.xyz.map_or(Json::Null, |p| {
+                Json::Arr(p.iter().map(|x| Json::Num(*x)).collect())
+            }),
+        ),
+        (
+            "layer",
+            loc.layer.map_or(Json::Null, |k| Json::Uint(u64::from(k))),
+        ),
+        ("reason", Json::str(&l.reason)),
+    ])
 }
 
 fn rules_json(rules: &[RuleResult]) -> Json {
@@ -230,12 +281,22 @@ fn rules_json(rules: &[RuleResult]) -> Json {
         rules
             .iter()
             .map(|r| {
-                Json::obj([
+                let mut pairs = vec![
                     ("id", Json::str(r.id)),
                     ("name", Json::str(r.name)),
                     ("status", Json::str(r.status.name())),
                     ("reason", Json::str(&r.reason)),
-                ])
+                ];
+                if !r.located.is_empty() {
+                    pairs.push((
+                        "located",
+                        Json::Arr(r.located.iter().map(located_json).collect()),
+                    ));
+                }
+                if r.detail != Json::Null {
+                    pairs.push(("detail", r.detail.clone()));
+                }
+                Json::from_pairs(pairs)
             })
             .collect(),
     )
@@ -255,18 +316,59 @@ fn summary_json(rules: &[RuleResult]) -> Json {
     ])
 }
 
-/// Build the report for one .chitubox file and, optionally, the STL it was made from.
+/// Build the report for one .chitubox file and, optionally, the STL it was made from, on one
+/// thread.
 #[must_use]
 pub fn build(limits: &Limits, chitubox: &Input, stl: Option<&Input>) -> Report {
-    let (chitubox_part, chitubox_ok) = chitubox_input(chitubox);
-    let stl_part = stl.map(stl_input);
-    let structure_ok = chitubox_ok && stl_part.as_ref().is_none_or(|(_, ok)| *ok);
-    let reason = if structure_ok {
-        "measurement not built yet"
-    } else {
-        "not decided: an input file is unreadable or does not match the format"
+    build_with(limits, chitubox, stl, 1)
+}
+
+/// Build the report with up to `threads` worker threads for the batched measurements.
+#[must_use]
+pub fn build_with(
+    limits: &Limits,
+    chitubox: &Input,
+    stl: Option<&Input>,
+    threads: usize,
+) -> Report {
+    build_posed(limits, chitubox, stl, threads, &h7::Pose::default())
+}
+
+/// Build the report with the input STL under the recorded `pose` (a rotation about X and, if
+/// the caller records one, the STL's SHA-256).
+#[must_use]
+pub fn build_posed(
+    limits: &Limits,
+    chitubox: &Input,
+    stl: Option<&Input>,
+    threads: usize,
+    pose: &h7::Pose,
+) -> Report {
+    let read = chitubox_input(chitubox);
+    let stl_read = stl.map(stl_input);
+    let structure_ok = read.ok && stl_read.as_ref().is_none_or(|(_, ok, _)| *ok);
+    let mut pose = pose.clone();
+    pose.actual_sha256 = stl
+        .and_then(|i| i.data.as_ref().ok())
+        .map(|d| sha256::hex(d));
+    let (rules, load_audit) = match (&read.file, chitubox.data.as_ref()) {
+        (Some(file), Ok(buf)) if structure_ok => measure::run_full(
+            limits,
+            threads,
+            file,
+            buf,
+            stl_read.as_ref().and_then(|(_, _, m)| m.as_ref()),
+            &pose,
+        ),
+        _ => (
+            rules_unverified(
+                "not decided: an input file is unreadable or does not match the format",
+            ),
+            Json::Null,
+        ),
     };
-    let rules = rules_unverified(reason);
+    let chitubox_part = read.json;
+    let stl_part = stl_read.map(|(j, ok, _)| (j, ok));
     let verdict = verdict(&rules, structure_ok);
     let mut json = Json::obj([
         ("report_version", Json::Uint(REPORT_VERSION)),
@@ -288,6 +390,13 @@ pub fn build(limits: &Limits, chitubox: &Input, stl: Option<&Input>) -> Report {
             ),
         ),
         (
+            "settings",
+            Json::obj([
+                ("layer_height_mm", Json::Num(crate::scene::LAYER_MM)),
+                ("threads", Json::Uint(crate::bytes::wide(threads))),
+            ]),
+        ),
+        (
             "inputs",
             Json::obj([
                 ("chitubox", chitubox_part),
@@ -301,6 +410,8 @@ pub fn build(limits: &Limits, chitubox: &Input, stl: Option<&Input>) -> Report {
     // Geometry acceptance apart from H8, and the rejection list (design section 7.5). The
     // fields are additive: `verdict` and `rules` keep their meaning.
     if let Json::Obj(pairs) = &mut json {
+        // The load audit is a report only: it feeds no rule and no verdict.
+        pairs.push(("load_audit".to_owned(), load_audit));
         pairs.extend(
             status::fields(&rules, structure_ok)
                 .into_iter()
