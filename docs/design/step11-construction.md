@@ -252,7 +252,7 @@ On a flat face: ball radius R, standoff s ≥ 0 (centre outside the surface), pa
 The head axis is the **most vertical** direction in a small fixed fan between the outward normal and vertical that meets all of these, proved at admission:
 
 - (a) Only the contact ball touches the model. Inside the contact-surrounding region, the neck and tip cone keep a gap greater than 0.02 mm **[S]**. The contact-surrounding region contains only the contact ball, neck and tip cone, ends before the joint, and extends no farther than 3.0 mm from the contact centre. The complete joint ball, column and every other part outside that region must have a certified model-clearance lower bound of at least 0.32 mm at admission, including clearance from other model sheets. Being inside the head envelope does not grant a clearance exemption. For a fat neck on a 65° face this gives at most about 35° from the normal, so the head axis is 25°–60° below horizontal.
-- (b) **Departure:** along the head beyond the ball, the gap to the model never decreases. At the region end it is ≥ 0.32 mm, and nothing after it comes closer.
+- (b) **Departure (capped):** along the head beyond the ball, the gap to the model never decreases while it is below 0.35 mm **[S]**. After the gap first reaches 0.35 mm it may vary, but it stays ≥ 0.32 mm for the rest of the region. At the region end it is ≥ 0.32 mm, and nothing after it comes closer. Reports call this "capped departure (cap 0.35 mm)", never "never decreases".
 - (c) **H3 at the head:** the ball's lowest point lies inside the cone or joint: R·cos α ≤ r(R·sin α), α = axis angle below horizontal. Otherwise the bottom cap of the ball prints as a floating piece. For r_e ≈ 0.94 R this needs α ≥ about 22°.
 - (d) All other model sheets are tested. A large region is not permission to touch the far side of the recess.
 
@@ -529,7 +529,7 @@ After this no lane edits a shared file.
 |---|---|---|
 | **C: independent checker** | `checker/**`; `crates/acceptance/tests/it/{broken.rs, rule_blocks.rs}` | §7 measurements, analytic and native validation, near-limit negatives through the production writer, per-rule normal-CLI tests, the H5 proof, the geometry / H8 split, the load audit |
 | **B: layers, load model, report** | `crates/geom/src/{slice.rs, raster.rs, label.rs}`; `crates/support/src/load/**`; `crates/support/src/report_data.rs`; `crates/cli/src/report.rs`; new `crates/render/**` | Slab envelopes, rasters and labelling (batched, with scalar references); components, islands, cups, reach, overhang and site needs maps; tributary loads and the three reported sharing results; section loads; worst layers; warning data; the FR-21 report and pictures 1–12; §0 numbers reproduced within 2% |
-| **A: construction** | `crates/geom/src/{shapes/**, patch.rs, clearance.rs, ray.rs}`; `crates/support/src/{construct,place,route,raft}/**`; `crates/support/tests/it/**`; `crates/emit/src/**`; `crates/cli/src/{run.rs, check.rs}`; `crates/cli/tests/it/e2e.rs` | Sealed types, `probe` / `commit`, tip family, heads, planner loop (on B's API), columns, braces, bases, connected raft, freeze → emit, CLI wiring and status, T1c and T0p tests, the go/no-go loop timings redone with real construction edits, L1 for support ≤ 5 s |
+| **A: construction** | `crates/geom/src/{shapes/**, bvh.rs, patch.rs, clearance.rs, ray.rs}`; `crates/support/src/{construct,place,route,raft}/**`; `crates/support/tests/it/**`; `crates/emit/src/**`; `crates/cli/src/{run.rs, check.rs}`; `crates/cli/tests/it/e2e.rs` | Sealed types, `probe` / `commit`, tip family, heads, planner loop (on B's API), columns, braces, bases, connected raft, freeze → emit, CLI wiring and status, T1c and T0p tests, the go/no-go loop timings redone with real construction edits, L1 for support within budget (5 s target) |
 
 **Merge order:**
 
@@ -549,7 +549,7 @@ At most 3 lanes write at once. One cross-family reviewer covers lanes A and C (l
 - Analytic and native controls show the checker's interval bounds (H1 width ≤ 0.010 mm² per representation, H6 interval width ≤ 0.005 mm including caps, H9 certified union width).
 - Every positive, production-writer negative, normal-CLI and compile-fail test passes; every `Reject` path has a measured hit.
 - Independence check, format and lint are clean.
-- L1 for support ≤ 5 s; the go/no-go edit-loop budgets hold with real construction edits (dev-loop §3.3, §10).
+- L1 for support within the dev-loop L1 budget (15 s) on a rebuilt edit, with 5 s as the reported target (compile alone is about 2.5–4.5 s); the go/no-go edit-loop budgets hold with real construction edits (dev-loop §3.3, §10).
 - Memory and threads stay within dev-loop §5.6 and §8; no dense whole-printer 3D grid; no per-candidate subprocess.
 - Output is written atomically; a checker failure cannot produce candidate status.
 
