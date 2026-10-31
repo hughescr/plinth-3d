@@ -907,21 +907,22 @@ fn peak_plan(img: &mut Image, r: Rect, c: &Ctx<'_>, ld: &LoadData) {
         );
     }
     for (i, cv) in ld.layout.contacts.iter().enumerate() {
-        let load: f64 = src
-            .iter()
-            .filter(|e| e.contact == Some(i as u32))
-            .map(|e| e.area)
-            .sum();
+        let Some([load, sec]) = ld.detail.groups.iter().find_map(|g| {
+            (g.layer == pk.layer)
+                .then(|| {
+                    g.active
+                        .iter()
+                        .position(|&id| id == i as u32)
+                        .and_then(|at| g.contact_sections_mm2.get(at).copied())
+                })
+                .flatten()
+        }) else {
+            continue;
+        };
         if load <= 0.0 {
             continue;
         }
         let (x, y) = to(cv.centre[0], cv.centre[1]);
-        let b = ld
-            .detail
-            .groups
-            .iter()
-            .find(|g| g.layer == pk.layer && g.active.contains(&(i as u32)));
-        let sec = b.map_or(0.0, |g| g.section_sum_mm2 / g.active.len() as f64);
         img.ring((x, y), 7.0, TEXT, 2.0);
         img.label(
             x as i32 + 9,

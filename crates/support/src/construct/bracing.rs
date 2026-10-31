@@ -112,7 +112,8 @@ mod tests {
     #[test]
     fn blocked_nearest_partner_tries_the_next_and_shares_node_heights() {
         let mut plan = builder(&plate());
-        let points = [[0., 0.], [4., 0.], [0., 6.], [2., 0.]];
+        // Keep the intermediate column clear of the near-tangent base band.
+        let points = [[0., 0.], [4.6, 0.], [0., 6.], [2.3, 0.]];
         let candidates: Vec<_> = points
             .iter()
             .enumerate()
@@ -149,7 +150,7 @@ mod tests {
             (*from == ids[a] && *to == ids[b]) || (*from == ids[b] && *to == ids[a]))
             })
         };
-        assert!(!pair(0, 1), "nearer pair crosses the column at x=2");
+        assert!(!pair(0, 1), "nearer pair crosses the column at x=2.3");
         assert!(pair(0, 2), "the next partner must be tried after collision");
         let mut out = Vec::new();
         plan.probe_members(&proposals, &mut out);

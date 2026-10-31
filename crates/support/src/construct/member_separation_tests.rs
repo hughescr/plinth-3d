@@ -91,7 +91,85 @@ fn dense_long_columns_are_allowed_and_reported_unbraced() {
         .unwrap();
     assert!(plan.brace_proposals().unwrap().is_empty());
     plan.raft_connected().unwrap();
-    assert_eq!(plan.freeze().unwrap().unbraced_columns(), &[0, 1]);
+    let frozen = plan.freeze().unwrap();
+    assert_eq!(frozen.unbraced_columns(), &[0, 1]);
+    assert_eq!(
+        frozen
+            .parts()
+            .iter()
+            .filter(|p| p.kind() == PartKind::RaftPad)
+            .count(),
+        2
+    );
+    assert_eq!(
+        frozen
+            .parts()
+            .iter()
+            .filter(|p| p.kind() == PartKind::RaftBridge)
+            .count(),
+        0,
+        "a certified pad overlap already connects this MST edge"
+    );
+}
+
+#[test]
+fn base_lenses_are_rejected_before_selection_and_atomic_commit() {
+    for (spacing, joins) in [
+        (1.9, true),
+        (2.09, false),
+        (2.17, false),
+        (2.2, false),
+        (2.3, true),
+    ] {
+        let mut plan = builder(&crate::construct::tests::plate());
+        let mut out = Vec::new();
+        plan.probe(&[candidate(0, 0.), candidate(1, spacing)], &mut out);
+        let quotes = QuoteBatch::from_results(out).unwrap();
+        let refs: Vec<_> = quotes.quotes.iter().collect();
+        let private = plan.probe_column_alternatives(&refs, &[0., 0.]);
+        let checks: Vec<_> = private.into_iter().map(Result::unwrap).collect();
+        assert_eq!(checks[0].compatible(&checks[1]), joins, "private {spacing}");
+        let ids = plan.commit(quotes).unwrap();
+        let mut plan = plan.into_routing();
+        let proposals: Vec<_> = ids
+            .iter()
+            .map(|&contact| MemberProposal::Column {
+                contact,
+                section: Section::new(0.25).unwrap(),
+            })
+            .collect();
+        for proposals in [proposals.clone(), proposals.into_iter().rev().collect()] {
+            let mut out = Vec::new();
+            plan.probe_members(&proposals, &mut out);
+            assert!(
+                out.iter().all(|r| r.is_ok() == joins),
+                "batch {spacing}: {out:?}"
+            );
+        }
+        let proposals: Vec<_> = ids
+            .into_iter()
+            .map(|contact| MemberProposal::Column {
+                contact,
+                section: Section::new(0.25).unwrap(),
+            })
+            .collect();
+        // Separate pure quotes must not bypass the redundant commit pair guard.
+        let mut member_quotes = Vec::new();
+        for proposal in proposals {
+            let mut out = Vec::new();
+            plan.probe_members(&[proposal], &mut out);
+            member_quotes.push(out.remove(0).unwrap());
+        }
+        let before = (plan.rev(), plan.members.len());
+        let result = plan.commit_members(MemberQuoteBatch {
+            quotes: member_quotes,
+        });
+        assert_eq!(result.is_ok(), joins, "commit {spacing}: {result:?}");
+        if !joins {
+            assert!(matches!(result, Err(Reject::NarrowJoin)));
+            assert_eq!(before, (plan.rev(), plan.members.len()));
+        }
+    }
 }
 
 #[test]

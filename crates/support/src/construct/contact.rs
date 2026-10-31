@@ -334,13 +334,13 @@ fn prepare(
             parts: vec![ball, cone, joint_ball],
         },
         // Canonicalise only the measurement spheres, never native geometry.
-        // f32 pole averaging at |coordinate| <= 101 moves the sphere centre by
-        // < 8e-6 mm. Two ENVELOPE radii enclose the original outer sphere; the
-        // inner radius loses the exact centre displacement and rounds DOWN to
-        // 1e-5 mm. These enclosures let fan/length variants share a patch query.
+        // Enclose the original outer sphere with its measured 3-D centre shift,
+        // not a per-axis rounding estimate. The inner radius loses its own exact
+        // displacement and rounds DOWN to 1e-5 mm. Fan/length variants still share
+        // a patch query without moving the native geometry.
         outer: Ball {
             centre: centre.map(f64::from),
-            radius: f64::from(c.ball_r) + 2.0 * ENVELOPE,
+            radius: (outer.radius + norm(sub(outer.centre, centre.map(f64::from)))).next_up(),
         },
         inner: Ball {
             centre: centre.map(f64::from),

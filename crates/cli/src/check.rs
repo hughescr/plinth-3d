@@ -68,8 +68,6 @@ pub struct Rule {
     pub status: String,
     /// The checker's reason.
     pub reason: String,
-    /// Explicit checker proof flag; absent or false is not an H5 exemption.
-    pub not_applicable_proved: bool,
 }
 
 /// What the checker said about one file.
@@ -163,7 +161,6 @@ impl Checked {
                     ("id", Json::str(&r.id)),
                     ("status", Json::str(&r.status)),
                     ("reason", Json::str(&r.reason)),
-                    ("not_applicable_proved", Json::Bool(r.not_applicable_proved)),
                 ])
             })
             .collect();
@@ -201,7 +198,6 @@ fn rule_of(j: &Json) -> Option<Rule> {
         id: j.get("id")?.as_str()?.to_owned(),
         status: j.get("status")?.as_str()?.to_owned(),
         reason: j.get("reason")?.as_str()?.to_owned(),
-        not_applicable_proved: j.get("not_applicable_proved") == Some(&Json::Bool(true)),
     })
 }
 

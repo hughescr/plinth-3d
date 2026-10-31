@@ -49,6 +49,7 @@
 //! }
 //! ```
 
+mod bases;
 mod contact;
 #[cfg(test)]
 mod local_tests;

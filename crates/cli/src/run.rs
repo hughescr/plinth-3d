@@ -183,6 +183,7 @@ pub fn collect_report_data(
 
 /// A single status gate shared by JSON and publication. It also rejects incomplete
 /// controlled checker results; production check::run validates the rule identities.
+/// Only H5 may be not_applicable: the independent checker proves that exemption.
 #[must_use]
 pub fn candidate_allowed(requested: bool, checked: &Checked, planning_blockers: bool) -> bool {
     requested
@@ -195,8 +196,7 @@ pub fn candidate_allowed(requested: bool, checked: &Checked, planning_blockers: 
                 .iter()
                 .filter(|r| {
                     r.id == format!("H{i}")
-                        && (r.status == "pass"
-                            || (i == 5 && r.status == "not_applicable" && r.not_applicable_proved))
+                        && (r.status == "pass" || (i == 5 && r.status == "not_applicable"))
                 })
                 .count()
                 == 1

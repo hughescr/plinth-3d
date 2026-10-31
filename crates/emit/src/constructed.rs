@@ -132,8 +132,8 @@ mod tests {
     #[test]
     fn frozen_plan_roundtrip_preserves_every_field_and_vertex_bit() {
         let mesh = Mesh::new(
-            vec![-20., 20., 20., -20.],
-            vec![-20., -20., 20., 20.],
+            vec![-8., 32., 32., -8.],
+            vec![-25., -25., 15., 15.],
             vec![0.; 4],
             vec![0, 2, 1, 0, 3, 2],
         )
@@ -185,6 +185,28 @@ mod tests {
         let bytes = expected.to_bytes().unwrap();
         let decoded = plinth_chitubox::parse(&bytes).unwrap();
         assert_eq!(decoded.to_bytes().unwrap(), bytes);
+        assert_eq!(
+            decoded.models[0].translate.map(f32::to_bits),
+            [12_f32, -5., 5.].map(f32::to_bits)
+        );
+        // Centred local vertices plus the written native translation preserve
+        // the STL's XY position, not a silently re-centred plate placement.
+        for (local, original) in decoded.models[0]
+            .mesh
+            .iter()
+            .zip(mesh.indices().chunks_exact(3))
+        {
+            for k in 0..3 {
+                assert_eq!(
+                    f64::from(local[k][0] + decoded.models[0].translate[0]).to_bits(),
+                    mesh.xs()[original[k] as usize].to_bits()
+                );
+                assert_eq!(
+                    f64::from(local[k][1] + decoded.models[0].translate[1]).to_bits(),
+                    mesh.ys()[original[k] as usize].to_bits()
+                );
+            }
+        }
         let records = &decoded.models[0].supports.as_ref().unwrap().records;
         for (record, part) in records.iter().zip(plan.parts()) {
             assert_eq!(record.mesh, part.mesh());

@@ -87,6 +87,7 @@ fn failed_size_search_keeps_the_contact_and_never_bans_its_site() {
         deadline: f64::INFINITY,
         load: 1200.,
         anchor: false,
+        grow: false,
         ring: None,
     };
     cache.select(
@@ -111,6 +112,85 @@ fn successful_private_column_resize_rechecks_before_replacement() {
     assert!(chosen[0].candidate.joint_r > old);
     assert!(chosen[0].column.radius() >= chosen[0].quote.contact().column_radius(4.));
     assert!(cache.blocked.is_empty());
+}
+
+fn seed_load(chosen: &[Chosen]) -> load::LoadDetail {
+    let stack = load::LayerStack {
+        layer_height_mm: 0.05,
+        layer_origin_mm: 6.0, // whole heads are printed by this controlled peel layer
+        layers: vec![load::LayerArea {
+            model_envelope: 20.0,
+            model_midplane: 20.0,
+            components: vec![load::ComponentSlice {
+                component: 0,
+                area: 20.0,
+                sources: vec![load::SourceElement {
+                    xyz: [0., 0., 6.025],
+                    area: 20.0,
+                }],
+            }],
+            ..load::LayerArea::default()
+        }],
+        components: vec![load::ComponentInfo::default()],
+        ..load::LayerStack::default()
+    };
+    let contacts: Vec<_> = chosen.iter().map(|c| c.quote.contact()).collect();
+    let layout = layout_from_contacts(
+        &contacts,
+        &vec![SiteClass::HiddenUnderside; contacts.len()],
+        &stack,
+        5.0,
+    );
+    load::analyse_full(&stack, &layout, &load::Extras::default())
+}
+
+#[test]
+fn overloaded_seed_grows_before_any_sharing_neighbour_despite_capped_column_envelope() {
+    let (builder, mut chosen) = fixture();
+    let old_radius = chosen[0].candidate.ball_r;
+    let before = seed_load(&chosen);
+    assert!(before.contacts[0].ratio > 12.0);
+    let mut cache = Cache {
+        next_id: 1,
+        ..Cache::default()
+    };
+    cache
+        .load_envelope
+        .insert(site_key(chosen[0].site.xyz), 1200.0);
+    let capped = cache.grow_tips(&builder, &mut chosen, &before);
+    assert_eq!(chosen.len(), 1, "growth never adds a neighbour");
+    assert!(chosen[0].candidate.ball_r > old_radius);
+    assert!(chosen[0].column.radius() < chosen[0].quote.contact().required_column_radius(1200.0));
+    assert!(
+        capped.is_empty(),
+        "a newly grown seed cannot request sharing neighbours this round"
+    );
+    let after = seed_load(&chosen);
+    let grid = plinth_geom::slice::LayerGrid {
+        origin: 6.0,
+        height: 0.05,
+        layers: 1,
+    };
+    assert!(
+        load_targets(&after, &chosen, 1.9, &capped, &grid, 5.0).is_empty(),
+        "the actual sharing-target path must not add neighbours in the growth round"
+    );
+    assert!(after.contacts[0].ratio < before.contacts[0].ratio);
+    assert!(
+        after.contacts[0].ratio > 12.0,
+        "remaining overload stays visible"
+    );
+    assert!(chosen[0].quote.contact().patch().upper() <= 0.48);
+    let capped = cache.grow_tips(&builder, &mut chosen, &after);
+    assert!(
+        capped.contains(&site_key(chosen[0].site.xyz)),
+        "only now can the capped seed request neighbours"
+    );
+    assert_eq!(
+        load_targets(&after, &chosen, 1.9, &capped, &grid, 5.0).len(),
+        16,
+        "a capped overload now exercises both eight-direction sharing rings"
+    );
 }
 
 #[test]
@@ -139,6 +219,7 @@ fn load_sharing_search_never_leaves_the_one_to_two_point_five_mm_ring() {
         deadline: 1.,
         load: 2.,
         anchor: false,
+        grow: false,
         ring: Some([0.; 3]),
     };
     let near = cache.near(target, None, &sites, 0., &[]);

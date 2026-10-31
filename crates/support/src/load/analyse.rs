@@ -95,6 +95,9 @@ pub struct GroupLoad {
     /// own area only: the support's own material is not in it. The values add up to
     /// `area_mm2`.
     pub loads_mm2: Vec<f64>,
+    /// [load including upstream support peel, section area] at each active
+    /// contact's worst section in THIS layer, same order as `active`.
+    pub contact_sections_mm2: Vec<[f64; 2]>,
     /// Sum of their limiting section areas, mm².
     pub section_sum_mm2: f64,
     /// Additive area ratio `A / sum B` (infinite when `sum B` is 0).
@@ -516,6 +519,7 @@ impl Pass<'_> {
                 area_mm2: cs.area,
                 active: Vec::new(),
                 loads_mm2: Vec::new(),
+                contact_sections_mm2: Vec::new(),
                 section_sum_mm2: 0.0,
                 x_group: f64::INFINITY,
                 utilisation: f64::INFINITY,
@@ -542,9 +546,11 @@ impl Pass<'_> {
             x_group,
             equal: cs.area / n as f64,
         };
-        for (a, &i) in list.iter().enumerate() {
-            self.contact_sections(lyr, i, split[a], lever.force[a], shares);
-        }
+        let contact_sections_mm2 = list
+            .iter()
+            .enumerate()
+            .map(|(a, &i)| self.contact_sections(lyr, i, split[a], lever.force[a], shares))
+            .collect();
         #[allow(clippy::cast_possible_truncation)]
         self.groups.push(GroupLoad {
             layer: k,
@@ -552,6 +558,7 @@ impl Pass<'_> {
             area_mm2: cs.area,
             active: list.iter().map(|&i| i as u32).collect(),
             loads_mm2: split.iter().map(|s| s[0]).collect(),
+            contact_sections_mm2,
             section_sum_mm2: bsum,
             x_group,
             utilisation: x_group / super::DESIGN_RATIO,
@@ -569,7 +576,7 @@ impl Pass<'_> {
         mine: [f64; 3],
         lever_force: f64,
         sh: Shares,
-    ) {
+    ) -> [f64; 2] {
         let Lyr { k, zb, zt } = lyr;
         let c = &self.ctx[i];
         let own: Vec<f64> = c
@@ -585,7 +592,7 @@ impl Pass<'_> {
             .sum();
         let patch_now = c.patch_printed(zt);
         let mut upstream = 0.0;
-        let mut worst: Option<(f64, usize, f64)> = None;
+        let mut worst: Option<(f64, f64, f64)> = None;
         for (j, p) in c.parts.iter().enumerate() {
             upstream += own[j];
             let extra = upstream
@@ -607,10 +614,12 @@ impl Pass<'_> {
             };
             self.acc[i][j].push(k, s, denom);
             if worst.is_none_or(|w| s.tributary > w.0) {
-                worst = Some((s.tributary, j, mine[0] + extra));
+                worst = Some((s.tributary, denom, mine[0] + extra));
             }
         }
-        let Some((r, _, load)) = worst else { return };
+        let Some((r, section, load)) = worst else {
+            return [0.0, 0.0];
+        };
         let cl = &mut self.contacts[i];
         if r > super::DESIGN_RATIO + 1e-9 {
             cl.layers_over += 1;
@@ -630,6 +639,7 @@ impl Pass<'_> {
             cl.tributary_xy = xy;
             cl.offset_mm = (xy[0] - c.centre[0]).hypot(xy[1] - c.centre[1]);
         }
+        [load, section]
     }
 
     fn finish(self) -> (LoadDetail, Collected) {

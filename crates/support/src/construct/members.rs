@@ -574,10 +574,10 @@ impl PlanBuilder<Routed> {
         self.rev += 1;
         Ok(ids)
     }
-    /// Build pads and deterministic MST bridges. Each nonzero bridge contains its
-    /// centreline and overlaps the pad at BOTH endpoints by positive volume. Thus
-    /// tree connectivity proves connectivity of the actual closed solids, not just
-    /// of a bridge list. All vertices keep the model clearance by a Z-separation proof.
+    /// Build pads and the necessary deterministic MST bridges. Each tree edge is
+    /// either a certified wide pad overlap or a bridge with a certified wide
+    /// overlap into both pads. Thus every tree edge has a solid material connection,
+    /// not merely an entry in a bridge list. Z separation proves model clearance.
     pub fn raft_connected(&mut self) -> Result<RaftId, Reject> {
         if self.raft || self.columns.len() != self.contacts.len() || self.columns.is_empty() {
             return Err(Reject::NotBuilt);
@@ -610,11 +610,17 @@ impl PlanBuilder<Routed> {
         }
         let mut parts: Vec<_> = centres.iter().map(|&c| NativePart::pad(c, top)).collect();
         for [a, b] in bridges {
-            parts.push(NativePart::bridge(
-                centres[a as usize],
-                centres[b as usize],
-                top,
-            ));
+            let a = centres[a as usize];
+            let b = centres[b as usize];
+            // Column admission already proves that touching pads have a common
+            // 0.104 mm ball. Such an MST edge is material-connected without a
+            // bridge; a redundant flat-ended box can make a thin incidental join
+            // with a third flare/pad. Keep bridges only across actual pad gaps.
+            if (f64::from(a[0]) - f64::from(b[0])).hypot(f64::from(a[1]) - f64::from(b[1]))
+                > 2.2 + 2.0 * ENVELOPE
+            {
+                parts.push(super::bases::bridge(a, b, top)?);
+            }
         }
         // Native f32 rounding must not collapse the overlap or thickness.
         if parts
@@ -623,6 +629,7 @@ impl PlanBuilder<Routed> {
         {
             return Err(Reject::NonFinite);
         }
+        super::bases::admit_bridges(&parts, &self.members)?;
         self.members.extend(parts);
         self.raft = true;
         self.rev += 1;
@@ -770,10 +777,14 @@ fn keep_member(
         return Err(Reject::UnknownShape);
     };
     for (k, part) in q.parts.iter().enumerate() {
-        if designated_join(q.role(k), role)
-            || matches!((q.role(k), role), (MemberRole::Flare, MemberRole::Flare))
-        {
-            continue; // Owner permits plate bases to merge, never heads.
+        if matches!((q.role(k), role), (MemberRole::Flare, MemberRole::Flare)) {
+            // Plate bases may merge only through a certified fat join. This same
+            // guard runs for private alternatives, public probe and atomic commit.
+            super::bases::compatible(part, other)?;
+            continue;
+        }
+        if designated_join(q.role(k), role) {
+            continue;
         }
         let PartFields::Frustum {
             start: a,

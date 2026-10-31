@@ -167,7 +167,9 @@ impl PosedModel {
         Ok(Self {
             mesh,
             triangles,
-            translate: [0.0, 0.0, limits.lift],
+            // Match the transport/native convention: local vertices are centred,
+            // while XY translation preserves the input STL's plate position.
+            translate: [centre[0] as f32, centre[1] as f32, limits.lift],
             keep: keep.clone(),
             orientation_valid,
             plate,
@@ -185,7 +187,7 @@ impl PosedModel {
     pub fn triangles(&self) -> &[Triangle] {
         &self.triangles
     }
-    /// Native translation (XY centred at zero; Z is lift).
+    /// Native translation (XY is the input bounding-box centre; Z is lift).
     pub fn translate(&self) -> [f32; 3] {
         self.translate
     }
@@ -277,6 +279,43 @@ impl Section {
 mod boundary_tests {
     use super::*;
     use crate::construct::{NativePart, PartKind};
+
+    #[test]
+    fn centred_native_mesh_preserves_the_input_xy_position() {
+        let input = Mesh::new(
+            vec![10., 14., 10.],
+            vec![-8., -8., -2.],
+            vec![2., 2., 6.],
+            vec![0, 1, 2],
+        )
+        .unwrap();
+        let limits = Limits::current().unwrap();
+        let keep = KeepUpRecord {
+            rotation_x_deg: 115.,
+            approved_sha256: "0".repeat(64),
+        };
+        let posed = PosedModel::new(&input, &keep, &limits).unwrap();
+        assert_eq!(
+            posed.translate().map(f32::to_bits),
+            [12_f32, -5., 5.].map(f32::to_bits)
+        );
+        for (written, original) in
+            posed.triangles()[0]
+                .iter()
+                .zip([[10., -8., 2.], [14., -8., 2.], [10., -2., 6.]])
+        {
+            for k in 0..2 {
+                assert_eq!(
+                    (written[k] + posed.translate()[k]).to_bits(),
+                    (original[k] as f32).to_bits()
+                );
+            }
+        }
+        assert_eq!(
+            (posed.mesh().bounds().min[2] - f64::from(posed.plate_z())).to_bits(),
+            5_f64.to_bits()
+        );
+    }
 
     #[test]
     fn section_and_native_frustum_protect_h9_build_reserve_independently() {

@@ -9,6 +9,17 @@ use crate::load::{self, LayoutView, ModelLayers, SiteClass};
 use std::collections::{BTreeMap, BTreeSet};
 
 type V3 = [f64; 3];
+const FANS: [f64; 8] = [35., 30., 25., 20., 15., 10., 5., 0.];
+const REACHES: [f32; 3] = [2.6, 2.8, 2.94];
+const MAX_NECK: f32 = 0.39; // Search maximum; the measured 0.48 mm² bound still admits each tip.
+fn geometry_key(c: &ContactCandidate) -> Vec<u32> {
+    c.site
+        .into_iter()
+        .chain(c.axis)
+        .chain([c.ball_r, c.standoff, c.neck, c.joint_r, c.head_len])
+        .map(f32::to_bits)
+        .collect()
+}
 fn d2(a: V3, b: V3) -> f64 {
     (0..3).map(|k| (a[k] - b[k]).powi(2)).sum()
 }
@@ -81,6 +92,7 @@ struct Target {
     deadline: f64,
     load: f64,
     anchor: bool,
+    grow: bool,
     ring: Option<V3>,
 }
 fn covered(t: Target, chosen: &[Chosen], reach: f64, shift: f64) -> bool {
@@ -109,6 +121,7 @@ fn needs_targets(
                 deadline: top - 0.000001,
                 load: 0.,
                 anchor: true,
+                grow: false,
                 ring: None,
             });
         }
@@ -133,6 +146,7 @@ fn needs_targets(
             deadline: p.xyz[2] + shift + 0.05,
             load: 3.0,
             anchor: false,
+            grow: false,
             ring: None,
         };
         if !covered(t, chosen, pitch, shift)
@@ -154,6 +168,7 @@ fn needs_targets(
                 deadline: p.xyz[2] + shift + 0.05,
                 load: 0.,
                 anchor: false,
+                grow: false,
                 ring: None,
             };
             if !covered(t, chosen, settings.coverage_reach_mm, shift)
@@ -176,6 +191,7 @@ fn needs_targets(
             deadline: layers.grid.z_top(r.layer),
             load: 0.,
             anchor: false,
+            grow: false,
             ring: None,
         };
         if !covered(t, chosen, 2.13, shift) {
@@ -188,7 +204,8 @@ fn load_targets(
     detail: &load::LoadDetail,
     chosen: &[Chosen],
     radius: f64,
-    layers: &ModelLayers,
+    capped: &BTreeSet<[u32; 3]>,
+    grid: &plinth_geom::slice::LayerGrid,
     shift: f64,
 ) -> Vec<Target> {
     let mut out = Vec::new();
@@ -196,14 +213,14 @@ fn load_targets(
         .contacts
         .iter()
         .zip(chosen)
-        .filter(|(c, _)| c.ratio > 12.0)
+        .filter(|(c, x)| c.ratio > 12.0 && capped.contains(&site_key(x.site.xyz)))
     {
         // Keep the early-layer neighbour search AND the largest-load region.
         // An early partial-patch overload must not pin all future additions to
         // the very first layer while a later strip still has one carrier.
         let first = c.first_over.unwrap_or(c.worst_layer);
         for layer in [first, c.worst_layer] {
-            let deadline = layers.grid.z_top(layer);
+            let deadline = grid.z_top(layer);
             let n = x.site.normal;
             let length = n[0].hypot(n[1]);
             let u = if length > 1e-8 {
@@ -234,6 +251,7 @@ fn load_targets(
                     deadline,
                     load: (c.load_mm2 * 0.5).clamp(0.25, 12.0),
                     anchor: false,
+                    grow: false,
                     ring: Some(x.site.xyz),
                 });
             }
@@ -250,6 +268,7 @@ struct Cache {
     blocked: BTreeSet<[u32; 3]>,
     load_envelope: BTreeMap<[u32; 3], f64>,
     pairs: BTreeMap<(CandId, CandId), bool>,
+    growth_searched: BTreeSet<[u32; 3]>,
 }
 impl Cache {
     fn near(
@@ -306,10 +325,12 @@ impl Cache {
         &mut self,
         builder: &PlanBuilder<Contacts>,
         tasks: &[(Target, Option<NeedPoint>)],
-        sites: &[NeedPoint],
-        shift: f64,
+        domain: (&[NeedPoint], f64),
         chosen: &[Chosen],
+        fallback: bool,
     ) -> Vec<Vec<NeedPoint>> {
+        let (sites, shift) = domain;
+        self.growth_searched.clear();
         let mut alternatives = Vec::new();
         let mut sampled = Vec::new();
         let mut sample_loads = Vec::new();
@@ -324,37 +345,53 @@ impl Cache {
             } else {
                 target.load.max(3.0)
             };
-            let proposed =
-                (((load / 12. / 2.85).sqrt() * 1000.0).ceil() / 1000.0).clamp(0.053, 0.39) as f32;
+            let proposed = (((load / 12. / 2.85).sqrt() * 1000.0).ceil() / 1000.0)
+                .clamp(0.053, f64::from(MAX_NECK)) as f32;
             for p in near {
+                // Growth gets the SAME complete fan x length domain as column
+                // sizing, before a single load-sharing neighbour is proposed.
+                // Never call a budget-skipped search a geometric cap.
+                let fans: &[f64] = if target.grow { &FANS } else { &[20., 0.] };
+                let reaches: &[f32] = if target.grow { &REACHES } else { &[2.6] };
+                let mut sizes = vec![proposed];
+                if target.grow && fallback {
+                    let current = chosen
+                        .iter()
+                        .find(|x| d2(x.site.xyz, p.xyz) < 1e-12)
+                        .expect("growth replaces an existing site")
+                        .candidate
+                        .neck;
+                    // Only after the requested enlargement fails, search an
+                    // intermediate size and the 0.001 mm step with the full fan.
+                    sizes = vec![(proposed + current) * 0.5, (current + 0.001).min(MAX_NECK)];
+                    sizes.sort_by(|a, b| b.total_cmp(a));
+                    sizes.dedup();
+                }
+                if alternatives.len() + fans.len() * reaches.len() * sizes.len() > 384 {
+                    continue;
+                }
                 let before = alternatives.len();
-                let neck = proposed;
-                {
-                    for fan in [20., 0.] {
-                        let cand = candidate(self.next_id, &p, neck, fan, load);
-                        let key = site_key(p.xyz)
-                            .into_iter()
-                            .chain(
-                                cand.axis
-                                    .into_iter()
-                                    .chain([
-                                        cand.ball_r,
-                                        cand.standoff,
-                                        cand.neck,
-                                        cand.joint_r,
-                                        cand.head_len,
-                                    ])
-                                    .map(f32::to_bits),
-                            )
-                            .collect();
-                        if alternatives.len() >= 384 || !self.seen.insert(key) {
-                            continue;
+                for neck in sizes {
+                    for &fan in fans {
+                        for &reach in reaches {
+                            // The load envelope sizes COLUMNS, not permission to grow
+                            // the tip. Start with the smallest joint for this tip;
+                            // size_columns can try a larger one after load replay.
+                            let joint_load = if target.grow { 0.0 } else { load };
+                            let mut cand = candidate(self.next_id, &p, neck, fan, joint_load);
+                            cand.head_len = (reach - cand.joint_r - cand.standoff).max(1.5);
+                            if !self.seen.insert(geometry_key(&cand)) {
+                                continue;
+                            }
+                            alternatives.push(cand);
+                            self.next_id += 1;
+                            sampled.push(p);
+                            sample_loads.push(load);
                         }
-                        alternatives.push(cand);
-                        self.next_id += 1;
-                        sampled.push(p);
-                        sample_loads.push(load);
                     }
+                }
+                if target.grow {
+                    self.growth_searched.insert(site_key(p.xyz));
                 }
                 if alternatives.len() > before {
                     task_sites.last_mut().expect("current target").push(p);
@@ -432,28 +469,15 @@ impl Cache {
             let radius = ((estimate / 12.0 / 3.0615).sqrt() as f32)
                 .next_up()
                 .max(0.25);
-            for fan in [35., 30., 25., 20., 15., 10., 5., 0.] {
-                for reach in [2.6, 2.8, 2.94] {
+            for fan in FANS {
+                for reach in REACHES {
                     let mut cand = c.candidate;
                     cand.id = CandId(self.next_id);
                     self.next_id += 1;
                     cand.joint_r = 1.04 * radius.max(1.5 * cand.neck);
                     cand.head_len = (reach - cand.joint_r - cand.standoff).max(1.5);
                     cand.axis = axis(c.site.normal, fan);
-                    let key = cand
-                        .site
-                        .into_iter()
-                        .chain(cand.axis)
-                        .chain([
-                            cand.ball_r,
-                            cand.standoff,
-                            cand.neck,
-                            cand.joint_r,
-                            cand.head_len,
-                        ])
-                        .map(f32::to_bits)
-                        .collect();
-                    if !self.seen.insert(key) {
+                    if !self.seen.insert(geometry_key(&cand)) {
                         continue;
                     }
                     candidates.push(cand);
@@ -515,6 +539,75 @@ impl Cache {
             }
         }
     }
+    /// Return only sites at the tip search limit, or whose full growth search
+    /// cannot select a larger certified tip. Newly grown tips get a load replay
+    /// and another round before any neighbours can be added for them.
+    fn grow_tips(
+        &mut self,
+        builder: &PlanBuilder<Contacts>,
+        chosen: &mut Vec<Chosen>,
+        detail: &load::LoadDetail,
+    ) -> BTreeSet<[u32; 3]> {
+        let loads = super::routing_loads(detail);
+        let mut capped = BTreeSet::new();
+        let mut tasks = Vec::new();
+        let mut before = Vec::new();
+        for ((x, c), load) in chosen.iter().zip(&detail.contacts).zip(loads) {
+            if c.ratio <= 12.0 {
+                continue;
+            }
+            let key = site_key(x.site.xyz);
+            if x.candidate.neck >= MAX_NECK {
+                capped.insert(key);
+                continue;
+            }
+            let envelope = self.load_envelope.entry(key).or_default();
+            *envelope = envelope.max(load);
+            // Include the layer-specific shortfall, not only the full-patch load.
+            let load = (*envelope)
+                .max(x.quote.full_capacity() * c.ratio / 12.0)
+                .max(12.0 * 2.85 * f64::from(x.candidate.neck + 0.001).powi(2));
+            tasks.push((
+                Target {
+                    xyz: x.site.xyz,
+                    deadline: f64::INFINITY,
+                    load,
+                    anchor: false,
+                    grow: true,
+                    ring: None,
+                },
+                Some(x.site),
+            ));
+            before.push((key, x.candidate.ball_r));
+        }
+        let near = self.measure(builder, &tasks, (&[], 0.0), chosen, false);
+        self.select(tasks.clone(), near, chosen);
+        let fallback: Vec<_> = tasks
+            .into_iter()
+            .filter(|(t, _)| {
+                let key = site_key(t.xyz);
+                self.growth_searched.contains(&key)
+                    && before.iter().any(|&(k, r)| {
+                        k == key
+                            && chosen
+                                .iter()
+                                .any(|x| site_key(x.site.xyz) == key && x.candidate.ball_r <= r)
+                    })
+            })
+            .collect();
+        let near = self.measure(builder, &fallback, (&[], 0.0), chosen, true);
+        self.select(fallback, near, chosen);
+        for (key, radius) in before {
+            if self.growth_searched.contains(&key)
+                && chosen
+                    .iter()
+                    .any(|x| site_key(x.site.xyz) == key && x.candidate.ball_r <= radius)
+            {
+                capped.insert(key);
+            }
+        }
+        capped
+    }
     fn select(
         &mut self,
         tasks: Vec<(Target, Option<NeedPoint>)>,
@@ -534,10 +627,18 @@ impl Cache {
                         && !self
                             .blocked
                             .contains(&site_key(q.candidate.site.map(f64::from)))
-                        && q.quote.contact().required_column_radius(target.load)
-                            <= q.column.radius()
-                        && q.quote.contact().required_column_radius(target.load)
-                            <= q.candidate.joint_r / 1.04
+                        && if target.grow {
+                            replacing.is_some_and(|i| {
+                                q.candidate.ball_r > chosen[i].candidate.ball_r
+                                    && q.quote.full_capacity()
+                                        > chosen[i].quote.full_capacity() + 1e-9
+                            })
+                        } else {
+                            q.quote.contact().required_column_radius(target.load)
+                                <= q.column.radius()
+                                && q.quote.contact().required_column_radius(target.load)
+                                    <= q.candidate.joint_r / 1.04
+                        }
                         && chosen.iter().enumerate().all(|(i, c)| {
                             Some(i) == replacing
                                 || *pairs
@@ -590,7 +691,6 @@ pub(super) fn run(
     shift: f64,
 ) -> Proposal {
     let mut chosen = Vec::new();
-    let mut pending = Vec::new();
     let mut cache = Cache::default();
     let valid = !unavailable(&layers.stack)
         && settings.coverage_reach_mm.is_finite()
@@ -604,20 +704,30 @@ pub(super) fn run(
         }
         let layout = view(&chosen, layers, shift);
         let detail = load::analyse_full(&layers.stack, &layout, &load::Extras::default());
+        // [O] Load grows tips first. Only a completed, unsuccessful growth search
+        // (or a tip already at the search cap) can request load-sharing neighbours.
+        let capped = cache.grow_tips(builder, &mut chosen, &detail);
+        let detail = load::analyse_full(
+            &layers.stack,
+            &view(&chosen, layers, shift),
+            &load::Extras::default(),
+        );
         let mut targets = needs_targets(layers, sites, &chosen, settings, shift);
-        targets.append(&mut pending);
         targets.extend(load_targets(
             &detail,
             &chosen,
             (1.9 + 0.1 * f64::from(round % 3)).clamp(settings.ring_mm[0], settings.ring_mm[1]),
-            layers,
+            &capped,
+            &layers.grid,
             shift,
         ));
         let sizing_loads = super::routing_loads(&detail);
         let mut tasks: Vec<_> = chosen
             .iter()
             .zip(&sizing_loads)
-            .map(|(x, &load)| {
+            .zip(&detail.contacts)
+            .filter(|(_, c)| c.ratio <= 12.0)
+            .map(|((x, &load), _)| {
                 let envelope = cache.load_envelope.entry(site_key(x.site.xyz)).or_default();
                 *envelope = envelope.max(load);
                 let load = *envelope;
@@ -627,6 +737,7 @@ pub(super) fn run(
                         deadline: f64::INFINITY,
                         load,
                         anchor: false,
+                        grow: false,
                         ring: None,
                     },
                     Some(x.site),
@@ -640,14 +751,13 @@ pub(super) fn run(
             let start = (round as usize * 17) % tasks.len();
             tasks.rotate_left(start);
         }
-        let near = cache.measure(builder, &tasks, sites, shift, &chosen);
+        let near = cache.measure(builder, &tasks, (sites, shift), &chosen, false);
         cache.select(tasks, near, &mut chosen);
         let selected = load::analyse_full(
             &layers.stack,
             &view(&chosen, layers, shift),
             &load::Extras::default(),
         );
-        pending = load_targets(&selected, &chosen, 1.9, layers, shift);
         cache.size_columns(builder, &mut chosen, &super::routing_loads(&selected));
         let layout = view(&chosen, layers, shift);
         let detail = load::analyse_full(&layers.stack, &layout, &load::Extras::default());

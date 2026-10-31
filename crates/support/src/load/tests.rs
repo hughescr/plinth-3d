@@ -158,6 +158,30 @@ fn shares_sum_to_the_layer_area_and_layers_are_never_summed() {
 }
 
 #[test]
+fn per_layer_labels_use_each_contacts_own_worst_section_not_the_group_average() {
+    let stack = body(&[12.0]);
+    let lay = layout(
+        vec![
+            contact(0.5, 2.0, 0, 0.1, 1.0),
+            contact(2.5, 2.0, 0, 0.8, 1.0),
+        ],
+        1.0,
+        1.0,
+    );
+    let d = analyse_full(&stack, &lay, &Extras::default());
+    let g = &d.groups[0];
+    assert!(close(g.contact_sections_mm2[0][1], 0.1));
+    assert!(close(g.contact_sections_mm2[1][1], 0.8));
+    for (&i, &[load, section]) in g.active.iter().zip(&g.contact_sections_mm2) {
+        assert!(close(load / section, d.contacts[i as usize].ratio));
+        assert!(!close(
+            load / (g.section_sum_mm2 / 2.0),
+            d.contacts[i as usize].ratio
+        ));
+    }
+}
+
+#[test]
 fn a_contact_not_yet_printed_gets_no_share() {
     let stack = body(&[8.0, 8.0, 8.0, 8.0]);
     let lay = layout(
