@@ -40,14 +40,20 @@ fn checker_binary() -> PathBuf {
     path
 }
 
-/// Every `.chitubox` file under `test-data/chitubox-native`, sorted.
+/// The file plinth's writer made, in `load-test-2026-10-30`. It is NOT native ground truth.
+const PLINTH_WRITTEN: &str = "Round 50.keepup.chitubox";
+
+/// Every `.chitubox` file ChituBox wrote under `test-data/chitubox-native`, sorted. The
+/// plinth-written file ([`PLINTH_WRITTEN`]) is left out.
 fn native_files() -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).expect("read native dir").flatten() {
             let p = entry.path();
             if p.is_dir() {
                 walk(&p, out);
-            } else if p.extension().is_some_and(|e| e == "chitubox") {
+            } else if p.extension().is_some_and(|e| e == "chitubox")
+                && p.file_name().is_none_or(|n| n != PLINTH_WRITTEN)
+            {
                 out.push(p);
             }
         }
