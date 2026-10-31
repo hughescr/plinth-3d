@@ -1,6 +1,7 @@
 //! `devloop gate`: the merge gate (design dev-loop.md section 9), budget 180 s. Run it in the
 //! background. Steps, in order, each stopping the gate at its first failure:
 //!
+//! * `cargo fmt --check` in every Rust workspace;
 //! * clippy in every Rust workspace (`-D warnings`);
 //! * the loop runner's own unit tests;
 //! * L2, the fast suite, and L3, the Round bases;
@@ -8,6 +9,8 @@
 //!   the provenance of `test-data/` and `reference/`, and that nothing under them changed;
 //! * the loop-bench record, when the build configuration changed (design section 9, step 5);
 //! * commit signatures.
+//!
+//! Before `gate: PASS` it prints `gate: unverified N`, the refused items counted in L2 and L3.
 //!
 //! Exit: 0 pass; 1 a step failed; 3 over the gate budget; 4 setup error; 5 interrupted.
 //! `gate --clean` is the Cold level (see `clean.rs`).
@@ -21,6 +24,7 @@ use crate::scan;
 use crate::supervise::{self, End, Spec};
 use crate::sys;
 use crate::t;
+use std::cell::Cell;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -42,6 +46,15 @@ fn tail(text: &str, n: usize) -> String {
 struct Ctx<'a> {
     root: &'a Path,
     alloc: t::Alloc,
+    /// Refused items counted over L2 and L3 (`PLINTH-UNVERIFIED:` lines).
+    unverified: Cell<u32>,
+}
+
+/// The gate's line for items that were refused instead of reconstructed. A shape kind with
+/// no native match is a passing refusal test; it is counted here and never read as a pass of
+/// reconstruction (design dev-loop.md section 10, row 10).
+fn unverified_line(n: u32) -> String {
+    format!("gate: unverified {n} (refused, not reconstructed; not passes of reconstruction)")
 }
 
 /// Run a shell command in the checkout under supervision (own process group, deadline,
@@ -94,6 +107,17 @@ pub fn shell_in(
     ))
 }
 
+/// `rustfmt` check of the main workspace, `checker/` and `tools/devloop` (the same three
+/// workspaces as the pre-commit hook), so a formatting failure stops the gate and not only a
+/// commit.
+const FMT_SCRIPT: &str = "cargo fmt --all --check \
+     && (cd checker && cargo fmt --check) \
+     && (cd tools/devloop && cargo fmt --check)";
+
+fn fmt(c: &Ctx) -> Step {
+    shell(c, "fmt", FMT_SCRIPT, 30)
+}
+
 fn clippy(c: &Ctx) -> Step {
     shell(
         c,
@@ -118,6 +142,8 @@ fn level(c: &Ctx, name: &str) -> Step {
     let plan = t::prepare(c.root, &[name.to_owned()])?;
     let outcome = t::execute(&plan, &|| false)?;
     t::print(&outcome);
+    c.unverified
+        .set(c.unverified.get().saturating_add(outcome.unverified));
     if outcome.code == 0 {
         Ok(())
     } else {
@@ -311,7 +337,8 @@ fn record(root: &Path, secs: f64, budget_s: u64, verdict: &str) {
 
 type StepFn = fn(&Ctx) -> Step;
 
-const STEPS: [(&str, StepFn); 7] = [
+const STEPS: [(&str, StepFn); 8] = [
+    ("fmt", fmt),
     ("clippy", clippy),
     ("devloop-tests", devloop_tests),
     ("L2", l2),
@@ -349,7 +376,11 @@ fn run(root: &Path) -> i32 {
             return 4;
         }
     };
-    let ctx = Ctx { root, alloc };
+    let ctx = Ctx {
+        root,
+        alloc,
+        unverified: Cell::new(0),
+    };
     for (name, step) in STEPS {
         let t0 = Instant::now();
         if let Err(e) = step(&ctx) {
@@ -366,6 +397,7 @@ fn run(root: &Path) -> i32 {
     }
     let secs = started.elapsed().as_secs_f64();
     let load = sys::load1();
+    println!("{}", unverified_line(ctx.unverified.get()));
     println!(
         "gate: {secs:.1} s / budget {budget_s} s / load {load:.2} / threads {}",
         ctx.alloc.threads
@@ -391,6 +423,34 @@ mod tests {
         for l in ["N", "B", "U", "E", "X", "Y", "R", ""] {
             assert!(bad_signature(l), "{l}");
         }
+    }
+
+    #[test]
+    fn fmt_runs_first_and_covers_all_three_workspaces() {
+        assert_eq!(STEPS[0].0, "fmt");
+        assert!(FMT_SCRIPT.contains("cargo fmt --all --check"));
+        assert!(FMT_SCRIPT.contains("cd checker && cargo fmt --check"));
+        assert!(FMT_SCRIPT.contains("cd tools/devloop && cargo fmt --check"));
+        let names: Vec<&str> = STEPS.iter().map(|s| s.0).collect();
+        assert_eq!(
+            names,
+            [
+                "fmt",
+                "clippy",
+                "devloop-tests",
+                "L2",
+                "L3",
+                "static",
+                "bench-record",
+                "signatures"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_unverified_count_is_printed_with_its_number() {
+        assert!(unverified_line(0).starts_with("gate: unverified 0 "));
+        assert!(unverified_line(3).starts_with("gate: unverified 3 "));
     }
 
     #[test]

@@ -721,3 +721,66 @@ Facts that follow:
 - Q3 (preview): partly. A written, flat, wrong-scene preview opens and slices. ChituBox renders a new preview on each save. Empty preview still open.
 - Q16 (front block rebuilt on save): partly. For an unsupported model the re-saved front block equals the input. Whether ChituBox rebuilds it from state or copies it is not known, and nothing is known for supported models.
 - Section 3 "whether ChituBox needs the preview to match the scene": no, it does not (for opening and slicing).
+
+## 19. Support part shapes that `plinth-emit` builds (step 10)
+
+**Verified from samples** by `crates/emit/tests/it/native_shapes.rs`, which re-measures every number below on each run. Nothing here says ChituBox accepts a file that plinth wrote with these parts: no load test with supports has been done (section 15, Q1, Q2, Q5, Q6).
+
+### 19.1 What was compared
+
+`plinth_emit::shapes::build` takes the parameters of one part and returns the 72-byte record fields and the part's mesh. The test reads the parameters out of each native record (its own start, end, r1, r2 and tail word 0; for a raft part also the top z, which only the mesh holds), builds the part, and compares it with the native record:
+
+- the record fields (type, start, end, r1, r2, six tail words), bit for bit;
+- every mesh coordinate, in triangle order, so winding is compared too.
+
+It covers every support record of every supported model in samples 03, 04-connected, 04-hex, 05 (both plates) and 07: 654 records. Records shared by several samples count once per sample. A second test swaps the built records into the model, writes the project, and compares the file with the native one: same length; same bytes before the support-mesh blob and after it (support index, group header, all 72-byte records with their absolute mesh offsets, trailer); blob floats within the tolerance below.
+
+### 19.2 How each part is built
+
+All support data is in the model-local frame (section 13, item 18).
+
+- **Rotation.** Every mesh is built for an axis pointing straight down (-z) and then turned onto the real axis by the shortest-arc rotation from -z (Qt's `QQuaternion::rotationTo`, single precision). For an axis that points straight up, the turn is a half turn about y. This reproduces the ring order of all 653 reproducible records. A tilted part therefore has ring vertex 0 on the side the shortest-arc turn gives, not on a fixed world direction.
+- **Frustum (types 1 to 5).** Two rings of 16 vertices at 22.5 degrees x j, counter-clockwise from +x in the straight-down frame; start ring radius r1, end ring radius r2. Triangles: for j = 0 to 15, `[S_j, E_j, E_(j+1)]` then `[S_j, E_(j+1), S_(j+1)]` (32), then 14 start-cap triangles, then 14 end-cap triangles. The cap triangle order is a table; it is the same in all 326 frustum records of the samples, and the end cap is the start cap with ring index i replaced by (16 - i) mod 16. ChituBox's triangulator made the table and no rule for it is known.
+- **Type 5 (default-mat pad).** The record's start is the top and its end the bottom, but the mesh is built from the end (ring radius r1 = 3.64) up to the start (ring radius r2 = 5.0). Seen from the record fields, the mesh is wide at the top (section 10.1).
+- **Ball (types 7, 8, 9).** The two poles are the record's start and end, bit for bit. Centre = (start + end) / 2, radius = r1 (= r2). 15 rings at 11.25 degrees x k from the start pole, 16 vertices each at 22.5 degrees x j. Triangles: 16 start-pole fan `[P, R1_j, R1_(j+1)]`, 14 bands of 32 (`[Rk_j, R(k+1)_j, R(k+1)_(j+1)]`, `[Rk_j, R(k+1)_(j+1), Rk_(j+1)]`), 16 end-pole fan `[R15_j, Q, R15_(j+1)]`. Frame as above, with the start pole at +z in the straight-down frame.
+- **Raft pad (type 6, tail `[0, 4.0]`).** 20-sided prism. Rim radius r1 / 2, rim vertex i at 18 degrees x i from +x. Top (at z_top) a fan from the top centre, then the bottom (z_top - r2) a fan with reversed order, then 40 side triangles. The record stores start = end = (x, y, 0), r1 = diameter, r2 = thickness. The real z exists only in the mesh.
+- **Raft bridge (type 6, tail `[1.0, 4.0]`).** Box between the two pad centres, half width r1 / 2 to each side, flat ends at the centres, 12 triangles. The record stores the two centres at z = 0, r1 = width, r2 = thickness.
+- **Tail words.** Type 1: word 0 is the contact value (a parameter; its meaning is still a guess, section 10.1). Type 2: 0.15. Type 6: word 1 is 4.0, word 0 is 0.0 for a pad and 1.0 for a bridge. All other words are 0.
+- **Attr.** `kind << 8 | preset_id << 2`; raft records 0x1e00; a brace between two kinds `high << 32 | low` (`shapes::attr`, `attr_pair`).
+
+### 19.3 Accuracy, and why the tolerance is what it is
+
+Record fields: bit for bit in every reproducible record. Meshes:
+
+- 91.8 percent of all mesh coordinates (1,165,451 of 1,269,612) match bit for bit; 169 of 653 meshes match in every coordinate.
+- Every mesh is within **1.5 ULP** of the native one, where one ULP is the spacing of f32 at the part's largest coordinate (the errors are measured against that coordinate, not each one, because a native vertex is the f32 sum "part position + rotated offset" and so carries the rounding of the position even when its own value is near 0). The stated tolerance is **2 ULP**.
+- Why not exact: the native vertices come out of single-precision arithmetic whose exact order of operations is not known. Several orders of the quaternion product, the normalisation and the ring sine and cosine were tried; the best matched about 83 percent of ring vertices, and none matched all.
+- Why 2 ULP is acceptable: for coordinates below 32 mm one ULP is at most 1.9e-6 mm, so 2 ULP is under 4 nanometres, about 25,000 times finer than the smallest limit the checker applies (H9, 0.1 mm). It is the measured maximum (1.5) plus half a step; a wrong shape is far outside it (a ball radius off by 0.01 mm, an end point off by 1e-4 mm, swapped radii and a wrong type all fail the sabotage test).
+
+### 19.4 Result by support kind
+
+Records are summed over the six supported models of the five samples.
+
+| Kind (record type) | Records | Fields exact | Mesh exact (all coords) | Mesh within 2 ULP | Max error (ULP) | Status |
+|---|---|---|---|---|---|---|
+| Tip ball (7) | 97 | 97 | 0 | 97 | 1.0 | reproduced within tolerance |
+| Tip cone (1) | 97 | 97 | 6 | 97 | 1.0 | reproduced within tolerance |
+| Joint ball (9) | 137 | 137 | 33 | 137 | 1.0 | reproduced within tolerance |
+| Rod: pillar, link, leg, brace (3) | 131 | 131 | 44 | 131 | 1.5 | reproduced within tolerance |
+| Base flare (4) | 62 | 62 | 50 | 62 | 0.5 | reproduced within tolerance |
+| Default-mat pad (5) | 10 | 10 | 0 | 10 | 1.0 | reproduced within tolerance |
+| Foot cone (2) | 26 | 26 | 5 | 26 | 1.0 | reproduced within tolerance |
+| Foot ball (8) | 11 | 11 | 0 | 11 | 1.0 | reproduced within tolerance |
+| Raft pad (6) | 43 | 43 | 1 | 43 | 1.0 | reproduced within tolerance |
+| Raft bridge (6) | 39 | 39 | 30 | 39 | 0.5 | reproduced within tolerance |
+| Hex raft mat (6) | 1 | not built | not built | not built | - | **unverified**: the builder refuses it |
+
+No kind is reproduced fully bit for bit across all its records.
+
+### 19.5 What is not established
+
+- **Hex raft mat: unverified.** One native record (2,772 triangles, hole layout, start and end of -1e8 and -1e9). No rule for the holes, the 3.1 / 4.2 mm margin or the sentinels is known, so `build(&Spec::HexMat)` returns `ShapeError::Unverified` and `native_unverified_hex_raft_mat_is_refused_not_guessed` checks that it does and prints a `PLINTH-UNVERIFIED:` line, which `scripts/t` counts as `unverified 1` on its verdict line (design section 6.2). It is never built from a guess.
+- **Sizes never varied in the samples:** pad diameter 2.2, thickness 0.2, bridge width 2.2, 16 and 20 sides. The builder takes other values, but nothing checks them against a native file. Neither is the sphere ring count (15) or any radius outside those in sections 10.3 to 10.6.
+- **Only the shape is built here.** Not part of step 10 and not tested against the samples: how parts are placed (heads, bases, the 0.002 mm overlaps, the 0.6 mm flare shift under a raft, what ends a foot over a hex hole), which bridges join which pads (section 11.2 gives an inferred rule), brace placement and the attr kind code of a given UI action.
+- **Not a load test.** Whether ChituBox opens and slices a file whose support meshes plinth wrote is open (H8; section 15).
+- **Older native files** (the seven in `test-data/chitubox-native/`, version unknown) are not part of this comparison.

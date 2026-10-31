@@ -1,9 +1,11 @@
 //! plinth-emit: mesh and (later) support plan to native ChituBox records.
 //!
-//! Step 7 holds only the transport path: a model, no supports, lifted off the plate. The
-//! result is a diagnostic file, never a print candidate.
+//! Step 7 holds the transport path: a model, no supports, lifted off the plate. The result
+//! is a diagnostic file, never a print candidate. Step 10 adds [`shapes`]: the native
+//! support part shapes (balls, cones, rods, raft pads and bridges) built from parameters.
 
 pub mod loop_canary;
+pub mod shapes;
 pub mod transport;
 
 pub use loop_canary::loop_canary;

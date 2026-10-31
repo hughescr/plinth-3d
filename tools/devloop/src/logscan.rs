@@ -17,7 +17,16 @@ pub struct Stats {
     pub skipped: u32,
     /// nextest said it had no tests to run.
     pub no_tests_msg: bool,
+    /// Lines that start with [`UNVERIFIED_MARK`]: things a test could not check against a
+    /// native file and refused, rather than pass on a guess (design section 3, 6.2).
+    pub unverified: u32,
 }
+
+/// A test that meets something no native file settles prints one line that starts with this
+/// text and then the kind and the reason. `.config/nextest.toml` keeps the output of the
+/// `native_unverified_*` tests (a passing test's output is otherwise dropped) so the runner
+/// can count the lines and print `unverified N` on the verdict line.
+pub const UNVERIFIED_MARK: &str = "PLINTH-UNVERIFIED:";
 
 /// The cargo status verb of a line (`Compiling`, `Finished`, ...), if it is one.
 fn verb(line: &str) -> Option<&str> {
@@ -61,6 +70,9 @@ pub fn scan(log: &str) -> Stats {
         }
         if line.contains("no tests to run") {
             s.no_tests_msg = true;
+        }
+        if line.trim_start().starts_with(UNVERIFIED_MARK) {
+            s.unverified = s.unverified.saturating_add(1);
         }
     }
     s
@@ -120,6 +132,16 @@ mod tests {
             scan("        PASS [ 0.01s] x::Compiling_is_fun\n").compiled,
             0
         );
+    }
+
+    #[test]
+    fn unverified_lines_are_counted_only_at_the_start_of_a_line() {
+        let s = scan(
+            "PLINTH-UNVERIFIED: hex raft mat: no rule\n    PLINTH-UNVERIFIED: other: why\n\
+             a PLINTH-UNVERIFIED: mid-line mention\nplain\n",
+        );
+        assert_eq!(s.unverified, 2);
+        assert_eq!(scan(LOG).unverified, 0);
     }
 
     #[test]

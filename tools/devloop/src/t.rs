@@ -375,6 +375,8 @@ pub struct Outcome {
     pub line: String,
     pub elapsed: Duration,
     pub rebuilt: Vec<String>,
+    /// `PLINTH-UNVERIFIED:` lines in the log: refused items, not passes of reconstruction.
+    pub unverified: u32,
 }
 
 #[must_use]
@@ -417,7 +419,7 @@ pub fn execute(plan: &Plan, abort: &dyn Fn() -> bool) -> Result<Outcome, Exit> {
     };
     let v = verdict::decide(&facts);
     let line = format!(
-        "{} {} {} s / budget {} s / target {} s / load {:.2} / tests {} (skipped {}) / pkg-cache waits {} ({} s) / threads {} / {}",
+        "{} {} {} s / budget {} s / target {} s / load {:.2} / tests {} (skipped {}, unverified {}) / pkg-cache waits {} ({} s) / threads {} / {}",
         plan.level_name,
         plan.crate_label,
         secs(ran.elapsed),
@@ -426,6 +428,7 @@ pub fn execute(plan: &Plan, abort: &dyn Fn() -> bool) -> Result<Outcome, Exit> {
         load,
         stats.tests,
         stats.skipped,
+        stats.unverified,
         ran.watch.pc_count,
         secs(ran.watch.pc_wait),
         plan.alloc.threads,
@@ -443,6 +446,7 @@ pub fn execute(plan: &Plan, abort: &dyn Fn() -> bool) -> Result<Outcome, Exit> {
         line,
         elapsed: ran.elapsed,
         rebuilt: logscan::rebuilt(&text),
+        unverified: stats.unverified,
     })
 }
 
