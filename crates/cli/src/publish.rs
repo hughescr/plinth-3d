@@ -122,6 +122,62 @@ pub fn publish(temp: &Path, dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Publish a portable bundle with the model as its commit record. All files are
+/// synced in staging first; reports and pictures are linked into a newly reserved
+/// real directory, and the model is linked LAST. Thus a visible model always has
+/// its complete review set. No symlink or temporary backing store survives success.
+/// A crash before the model link can leave review files, never a published model.
+/// Existing directories and files are never replaced.
+pub fn publish_bundle(temp: &Path, dest: &Path) -> io::Result<()> {
+    fn files(dir: &Path, relative: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+        for entry in fs::read_dir(dir.join(relative))? {
+            let entry = entry?;
+            let path = relative.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                files(dir, &path, out)?;
+            } else if entry.file_type()?.is_file() {
+                File::open(entry.path())?.sync_all()?;
+                out.push(path);
+            } else {
+                return Err(io::Error::other("bundle contains a non-regular file"));
+            }
+        }
+        File::open(dir.join(relative))?.sync_all()
+    }
+    let mut paths = Vec::new();
+    files(temp, Path::new(""), &mut paths)?;
+    let is_model = |p: &PathBuf| p.extension().is_some_and(|x| x == "chitubox");
+    if paths.iter().filter(|p| is_model(p)).count() != 1 {
+        return Err(io::Error::other(
+            "bundle needs exactly one model commit record",
+        ));
+    }
+    paths.sort_by_key(|p| (is_model(p), p.clone()));
+    fs::create_dir(dest)?; // Atomic no-replace reservation; owned only on success.
+    let result = (|| {
+        for path in paths {
+            let final_path = dest.join(&path);
+            let parent = final_path
+                .parent()
+                .ok_or_else(|| io::Error::other("no parent"))?;
+            fs::create_dir_all(parent)?;
+            fs::hard_link(temp.join(&path), &final_path)?;
+            File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(dest);
+    } else {
+        // Cleanup is not part of acceptance: all final files have independent names.
+        let _ = fs::remove_dir_all(temp);
+        if let Some(parent) = dest.parent() {
+            let _ = File::open(parent).and_then(|f| f.sync_all());
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +248,50 @@ mod tests {
         assert!(name.len() < 80, "{name}");
         assert!(name.starts_with(".plinth-model.tmp-"), "{name}");
         assert_ne!(t, temp_path(Path::new("out"), "model"));
+    }
+
+    #[test]
+    fn supported_bundle_is_portable_and_never_replaces_a_directory() {
+        let d = dir("bundle");
+        let staged = d.join("stage");
+        let dest = d.join("ready");
+        fs::create_dir_all(staged.join("pictures")).unwrap();
+        fs::write(staged.join("pictures/01.png"), b"picture").unwrap();
+        fs::write(staged.join("model.fr21.json"), b"report").unwrap();
+        fs::write(staged.join("model.chitubox"), b"model").unwrap();
+        fs::create_dir(&dest).unwrap();
+        assert_eq!(
+            publish_bundle(&staged, &dest).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert!(names(&dest).is_empty());
+        fs::remove_dir(&dest).unwrap();
+        publish_bundle(&staged, &dest).unwrap();
+        assert!(
+            !fs::symlink_metadata(&dest)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!staged.exists(), "no temporary backing directory");
+        // Relocating the whole visible directory cannot break any file link.
+        let moved = d.join("moved");
+        fs::rename(&dest, &moved).unwrap();
+        assert_eq!(fs::read(moved.join("model.chitubox")).unwrap(), b"model");
+        assert_eq!(fs::read(moved.join("pictures/01.png")).unwrap(), b"picture");
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn invalid_bundle_never_exposes_a_model() {
+        let d = dir("invalid-bundle");
+        let staged = d.join("stage");
+        fs::create_dir(&staged).unwrap();
+        fs::write(staged.join("model.chitubox"), b"model").unwrap();
+        std::os::unix::fs::symlink("missing-picture", staged.join("01.png")).unwrap();
+        assert!(publish_bundle(&staged, &d.join("ready")).is_err());
+        assert!(!d.join("ready").exists());
+        fs::remove_dir_all(d).unwrap();
     }
 
     #[test]

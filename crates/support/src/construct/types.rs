@@ -83,6 +83,22 @@ pub struct PosedModel {
     pub(super) plate: f32,
 }
 impl PosedModel {
+    pub(super) fn copy_exact(&self) -> Self {
+        Self {
+            mesh: Mesh::new(
+                self.mesh.xs().to_vec(),
+                self.mesh.ys().to_vec(),
+                self.mesh.zs().to_vec(),
+                self.mesh.indices().to_vec(),
+            )
+            .expect("frozen mesh"),
+            triangles: self.triangles.clone(),
+            translate: self.translate,
+            keep: self.keep.clone(),
+            orientation_valid: self.orientation_valid,
+            plate: self.plate,
+        }
+    }
     /// Centre in f64, round once to native f32, then recompute the local minimum.
     /// Native world z = local z - local minimum + translate.z. Thus the lowest
     /// written model vertex is exactly 5.0, without estimating a geometric error.

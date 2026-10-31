@@ -13,6 +13,22 @@ use plinth_geom::Bvh;
 
 pub use layout::layout_from_contacts;
 
+/// Largest modelled load through any fixed section of each chain, across ALL
+/// layers. ContactLoad::load_mm2 is only the load at the worst RATIO (often an
+/// early partial patch), and must not size columns for the later maximum load.
+#[must_use]
+pub fn routing_loads(detail: &load::LoadDetail) -> Vec<f64> {
+    let mut loads = vec![0.0_f64; detail.contacts.len()];
+    for s in &detail.sections {
+        if s.kind != load::PartKind::Patch
+            && let Some(load) = loads.get_mut(s.chain as usize)
+        {
+            *load = load.max(s.tributary.0 * s.area_mm2);
+        }
+    }
+    loads
+}
+
 /// Search settings **[S]**, not spacing laws or physical guarantees.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlanSettings {
@@ -51,6 +67,10 @@ pub struct Proposal {
     pub termination: Termination,
     /// Exact fixed-size candidates, stable order.
     pub candidates: Vec<ContactCandidate>,
+    /// Full member/brace/raft preview succeeded before any contact commit.
+    pub routed: bool,
+    /// Exact remaining routing blocker, if any; not a checker measurement.
+    pub routing_blocker: Option<String>,
     /// Last modelled load result.
     pub load: LoadReport,
     /// The matching load view, in the plate frame.
@@ -116,7 +136,7 @@ pub fn plan_contacts(
             &|rays, out| plinth_geom::ray::first_hits(&bvh, rays, out),
         );
     }
-    let needs = NeedsMap {
+    let mut needs = NeedsMap {
         points: sites.points[..needs_count]
             .iter()
             .copied()
@@ -129,12 +149,12 @@ pub fn plan_contacts(
         .points
         .retain(|p| matches!(p.class, SiteTag::Hidden | SiteTag::PartlyVisible));
     let shift = -f64::from(builder.model().plate_z());
-    let mut result = search::run(builder, layers, &sites.points, settings, shift);
     // Reports and pictures have one frame: plate coordinates, never native local z.
-    result.needs = needs;
-    for p in &mut result.needs.points {
+    for p in &mut needs.points {
         p.xyz[2] += shift;
     }
+    let mut result = search::run(builder, layers, &sites.points, &needs, settings, shift);
+    result.needs = needs;
     result.load = load::analyse_full(
         &layers.stack,
         &result.layout,
@@ -144,15 +164,6 @@ pub fn plan_contacts(
         },
     )
     .report;
-    // A modelled ratio cannot clear unresolved anchoring or load-path warnings.
-    if result
-        .load
-        .warnings
-        .iter()
-        .any(|w| w.class != load::WarningClass::Information)
-    {
-        result.termination = Termination::SearchBudgetExhausted;
-    }
     result
 }
 

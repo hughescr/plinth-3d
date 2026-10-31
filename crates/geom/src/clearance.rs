@@ -3,6 +3,9 @@
 //! capsule and triangle box give a second lower bound; actual vertex witnesses give
 //! upper bounds. These admission intervals need not have the checker's 0.005 mm width.
 
+mod pairs;
+pub use pairs::{solid_pair_lower, solid_pair_lowers};
+
 use crate::patch::{cross, dot, frustum_plane_gap, plane_distance_bounds, sub, triangle};
 use crate::{Bvh, Mesh, measure::Measure, patch::Ball};
 

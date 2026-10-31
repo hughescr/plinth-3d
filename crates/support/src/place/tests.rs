@@ -26,6 +26,67 @@ fn search_settings_pin_owner_process_and_starting_values() {
 }
 
 #[test]
+fn column_sizing_uses_the_later_maximum_not_the_early_worst_ratio() {
+    let detail = load::LoadDetail {
+        report: load::LoadReport::unverified(12.0, "controlled sizing fixture"),
+        contacts: vec![load::ContactLoad {
+            contact: 0,
+            component: Some(0),
+            first_layer: 0,
+            worst_layer: 1,
+            load_mm2: 1.,
+            ratio: 1000.,
+            tributary_xy: [0.; 2],
+            offset_mm: 0.,
+            layers_over: 2,
+            first_over: Some(1),
+            last_over: Some(10),
+        }],
+        sections: vec![
+            load::SectionDetail {
+                chain: 0,
+                part: 0,
+                kind: load::PartKind::Patch,
+                record: None,
+                area_mm2: 0.001,
+                tributary: (1000., 1),
+                additive: (0., 0),
+                equal_share: (0., 0),
+                rigid_lever: (0., 0),
+            },
+            load::SectionDetail {
+                chain: 0,
+                part: 1,
+                kind: load::PartKind::Neck,
+                record: None,
+                area_mm2: 0.1,
+                tributary: (80., 10),
+                additive: (0., 0),
+                equal_share: (0., 0),
+                rigid_lever: (0., 0),
+            },
+            load::SectionDetail {
+                chain: 0,
+                part: 2,
+                kind: load::PartKind::Column,
+                record: None,
+                area_mm2: 0.4,
+                tributary: (22.5, 10),
+                additive: (0., 0),
+                equal_share: (0., 0),
+                rigid_lever: (0., 0),
+            },
+        ],
+        groups: vec![],
+        peak: None,
+        coverage: None,
+    };
+    let loads = routing_loads(&detail);
+    assert_eq!(loads.len(), 1);
+    assert!((loads[0] - 9.0).abs() < 1e-12);
+}
+
+#[test]
 fn mutually_exclusive_alternatives_cannot_bypass_atomic_pair_admission() {
     use crate::construct::*;
     let mesh = plinth_geom::Mesh::new(
@@ -116,6 +177,7 @@ fn e2e_round25_private_planner_reports_exhaustion_honestly() {
             layer_origin_mm: 0.,
         },
     );
+    let builder = builder.with_workers(3).unwrap();
     let t = std::time::Instant::now();
     let p = plan_contacts(&builder, &layers, &PlanSettings::default());
     println!(
@@ -130,6 +192,34 @@ fn e2e_round25_private_planner_reports_exhaustion_honestly() {
         p.candidates.iter().map(|c| c.ball_r).collect::<Vec<_>>()
     );
     assert!(p.load.is_computed());
+    assert!(
+        p.candidates.len() >= 12,
+        "only {} contacts",
+        p.candidates.len()
+    );
+    let worst = p
+        .load
+        .sections
+        .iter()
+        .map(|s| s.ratios.tributary)
+        .fold(0.0, f64::max);
+    assert!(
+        p.load.sections.iter().all(|s| {
+            s.ratios.tributary <= 12.0
+                || p.load.warnings.iter().any(|w| {
+                    w.class != load::WarningClass::Information
+                        && (w.kind.contains("load") || w.kind.contains("ratio"))
+                        && !w.message.is_empty()
+                        && (w.contacts.contains(&s.chain) || w.layers.contains(&s.worst_layer))
+                })
+        }),
+        "unreported overload {worst}"
+    );
+    assert!(
+        p.routed,
+        "private route is not complete: {:?}",
+        p.routing_blocker
+    );
     assert_ne!(p.termination, Termination::ProvedNoLegalAnchor);
     let mut out = Vec::new();
     builder.probe(&p.candidates, &mut out);

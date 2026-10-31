@@ -384,8 +384,73 @@ fn e2e_exit_codes_and_no_overwrite_through_the_real_binary() {
     assert!(!out3.exists(), "not even the output folder is made");
 }
 
-/// Safety witness, not a supported-output acceptance test: a construction failure
-/// must not fall back to the old model-only transport path for approved Round 25.
+fn load_ratios_are_met_or_located(doc: &Json) -> bool {
+    let Some(fr) = doc.get("fr21") else {
+        return false;
+    };
+    let Some(ratios) = fr
+        .get("load")
+        .and_then(|l| l.get("largest_ratios"))
+        .and_then(Json::as_arr)
+    else {
+        return false;
+    };
+    let Some(warnings) = fr.get("warnings").and_then(Json::as_arr) else {
+        return false;
+    };
+    !ratios.is_empty()
+        && ratios.iter().all(|r| {
+            let ratio = match r.get("tributary_ratio") {
+                Some(Json::Num(r)) if r.is_finite() => *r,
+                Some(Json::Uint(r)) => *r as f64,
+                _ => return false,
+            };
+            if ratio <= 12.0 {
+                return true;
+            }
+            let layer = r.get("worst_layer").and_then(Json::as_u64);
+            let contact = r.get("contact").and_then(Json::as_u64);
+            warnings.iter().any(|w| {
+                matches!(
+                    w.get("class").and_then(Json::as_str),
+                    Some("intervention" | "unprintable as is")
+                ) && w
+                    .get("kind")
+                    .and_then(Json::as_str)
+                    .is_some_and(|s| s.contains("load") || s.contains("ratio"))
+                    && w.get("message")
+                        .and_then(Json::as_str)
+                        .is_some_and(|s| !s.is_empty())
+                    && [("layers", layer), ("contacts", contact)]
+                        .iter()
+                        .any(|(key, id)| {
+                            id.is_some()
+                                && w.get(key)
+                                    .and_then(Json::as_arr)
+                                    .is_some_and(|a| a.iter().any(|x| x.as_u64() == *id))
+                        })
+            })
+        })
+}
+
+#[test]
+fn named_load_blocker_test_rejects_prose_and_wrong_locations() {
+    let parse = |s: &str| jsonin::parse(s.as_bytes()).unwrap();
+    let mut doc = parse(
+        r#"{"fr21":{"load":{"largest_ratios":[{"tributary_ratio":13.0,"worst_layer":42,"contact":3}],"sharing_models":"load intervention unprintable"},"warnings":[]}}"#,
+    );
+    assert!(!load_ratios_are_met_or_located(&doc));
+    doc = parse(
+        r#"{"fr21":{"load":{"largest_ratios":[{"tributary_ratio":13.0,"worst_layer":42,"contact":3}]},"warnings":[{"class":"intervention","kind":"load ratio","layers":[41],"contacts":[2],"message":"add a support"}]}}"#,
+    );
+    assert!(!load_ratios_are_met_or_located(&doc));
+    doc = parse(
+        r#"{"fr21":{"load":{"largest_ratios":[{"tributary_ratio":13.0,"worst_layer":42,"contact":3}]},"warnings":[{"class":"intervention","kind":"load ratio","layers":[42],"contacts":[],"message":"add a support"}]}}"#,
+    );
+    assert!(load_ratios_are_met_or_located(&doc));
+}
+
+/// Deliverable witness: construction failure is a failure, never transport fallback.
 #[test]
 fn e2e_approved_round25_never_falls_back_to_transport() {
     let w = scratch("approved-construction");
@@ -413,34 +478,31 @@ fn e2e_approved_round25_never_falls_back_to_transport() {
     println!("{}", doc.render());
     let m = model(&doc, 0);
     assert_eq!(m.get("print_candidate"), Some(&Json::Bool(false)));
-    if result.status.success() {
-        let file = out.join("Round 25.keepup.chitubox");
-        let bytes = fs::read(&file).unwrap();
-        let native = plinth_chitubox::parse(&bytes).unwrap();
-        assert!(
-            !native.models[0]
-                .supports
-                .as_ref()
-                .unwrap()
-                .records
-                .is_empty()
-        );
-        assert!(out.join("Round 25.keepup.fr21.json").is_file());
-        assert_eq!(
-            fs::read_dir(out.join("Round 25.keepup.pictures"))
-                .unwrap()
-                .count(),
-            12
-        );
-    } else {
-        assert_eq!(result.status.code(), Some(1));
-        assert_eq!(
-            m.get("failed_stage").and_then(Json::as_str),
-            Some("construct")
-        );
-        assert!(
-            names(&out).is_empty(),
-            "no partial or model-only substitute"
-        );
-    }
+    assert!(result.status.success(), "{}", text(&result.stderr));
+    assert_eq!(m.get("kind").and_then(Json::as_str), Some("supported"));
+    let file = std::path::Path::new(m.get("output").and_then(Json::as_str).unwrap());
+    let bundle = file.parent().unwrap();
+    let bytes = fs::read(file).unwrap();
+    let native = plinth_chitubox::parse(&bytes).unwrap();
+    let records = &native.models[0].supports.as_ref().unwrap().records;
+    let contacts = records
+        .iter()
+        .filter(|r| r.record_type == plinth_chitubox::RecordType::TIP_BALL)
+        .count();
+    assert!(contacts >= 12, "only {contacts} contacts");
+    // A frozen output has passed rooted column/brace/raft completion; it cannot
+    // be emitted from an unrouted proposal. Require real non-head members too.
+    assert!(records.len() > contacts * 4, "no routed members");
+    let fr = jsonin::parse(&fs::read(bundle.join("Round 25.keepup.fr21.json")).unwrap()).unwrap();
+    assert!(
+        load_ratios_are_met_or_located(&fr),
+        "unreported overload: {}",
+        fr.render()
+    );
+    assert_eq!(
+        fs::read_dir(bundle.join("Round 25.keepup.pictures"))
+            .unwrap()
+            .count(),
+        12
+    );
 }

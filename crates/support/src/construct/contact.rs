@@ -318,15 +318,36 @@ pub(super) fn pair(a: &Contact, b: &Contact) -> Result<(), Reject> {
     if a.cand == b.cand {
         return Err(Reject::RegionBlocked { by: b.cand });
     }
-    if distance(a.centre, b.centre) - f64::from(a.radius + b.radius) - 2.0 * ENVELOPE < 0.012 {
+    // Sum radii in f64, not a rounded-down f32 sum. The patch is contained in
+    // its inflated ball; this is a lower bound on patch-envelope separation.
+    if distance(a.centre, b.centre)
+        - f64::from(a.radius)
+        - f64::from(b.radius)
+        - 2.0 * ENVELOPE
+        - 1e-7
+        < 0.012
+    {
         return Err(Reject::WouldFuse { with: b.cand });
     }
-    // Conservative bounding balls of the complete heads. This reserves MORE than the
-    // ball/cone region and cannot let two true regions overlap.
-    let ar = distance(a.centre, a.joint) + f64::from(a.joint_radius);
-    let br = distance(b.centre, b.joint) + f64::from(b.joint_radius);
-    if distance(a.centre, b.centre) < ar + br + 2.0 * ENVELOPE {
-        return Err(Reject::RegionBlocked { by: b.cand });
+    for ap in &a.parts {
+        for bp in &b.parts {
+            let gap = clearance::solid_pair_lower(
+                ap.solid().ok_or(Reject::UnknownShape)?,
+                bp.solid().ok_or(Reject::UnknownShape)?,
+            );
+            // Regions are the ball/cone solids, not enclosing spheres. Different
+            // chains must not fuse at the 0.010 mm resolution: keep the same
+            // 0.012 mm construction reserve as patches, not a numerical epsilon.
+            // A joint is always outside the region and retains the full build gap.
+            let required = if ap.kind() == PartKind::JointBall || bp.kind() == PartKind::JointBall {
+                0.32
+            } else {
+                0.012
+            };
+            if gap < required {
+                return Err(Reject::RegionBlocked { by: b.cand });
+            }
+        }
     }
     Ok(())
 }

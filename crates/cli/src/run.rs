@@ -4,6 +4,10 @@
 //! sorted input order; a failed model never stops the others, and finished files are kept
 //! (PRD FR-42).
 
+#[cfg(test)]
+#[path = "run_status_tests.rs"]
+mod status_tests;
+
 use crate::check::{self, Checked};
 use crate::mem;
 use crate::names::{self, Named};
@@ -79,6 +83,10 @@ pub struct ModelRun {
     pub steps: Vec<Step>,
     /// Tasks and threads of the parallel step, when it ran.
     pub parallel: Option<Parallel>,
+    /// A supported construction attempt, not a transport conversion.
+    pub supported: bool,
+    /// Unresolved placement, load or representation measurement.
+    pub planning_blockers: bool,
     /// The result.
     pub outcome: Outcome,
 }
@@ -178,13 +186,55 @@ pub fn collect_report_data(
         data.supports.contacts.add(c.site_class);
     }
     data.warnings = ld.detail.report.warnings.clone();
-    data.warnings.push(load::LoadWarning { class:load::WarningClass::Intervention,
-        kind:"construction search and early patch growth".into(), layers:vec![], contacts:vec![],
-        message:format!("Search ended {:?}. Early patch growth is the load model's disc approximation [U], not a certified per-layer patch. P5=18 is a lower bound only, not a second planner run. Native consumer representation remains Unverified.",proposal.termination) });
+    if proposal.termination != place::Termination::Satisfied {
+        data.warnings.push(load::LoadWarning { class:load::WarningClass::Intervention,
+            kind:"construction search budget".into(), layers:vec![], contacts:vec![],
+            message:format!("Search ended {:?}; unresolved needs remain. This is not a proof that no legal site exists.",proposal.termination) });
+    }
+    let partial: Vec<_> = ld
+        .detail
+        .sections
+        .iter()
+        .filter(|s| {
+            s.kind == load::PartKind::Patch
+                && ld
+                    .layout
+                    .contacts
+                    .get(s.chain as usize)
+                    .is_some_and(|c| s.area_mm2 < c.patch_lower_mm2 - 1e-9)
+        })
+        .collect();
+    if !partial.is_empty() {
+        data.warnings.push(load::LoadWarning { class:load::WarningClass::Intervention,
+            kind:"early patch growth not certified".into(),
+            layers:partial.iter().map(|s|s.tributary.1).collect(), contacts:partial.iter().map(|s|s.chain).collect(),
+            message:"The limiting early patches use a disc approximation [U], not certified per-layer geometry. P5=18 remains a lower bound, not a second planner run.".into() });
+    }
     data.load = Some(ld.detail.report.clone());
     data.load_data = Some(ld);
     data.run.rejections = proposal.rejections;
     data
+}
+
+/// A single status gate shared by JSON and publication. It also rejects incomplete
+/// controlled checker results; production check::run validates the rule identities.
+#[must_use]
+pub fn candidate_allowed(requested: bool, checked: &Checked, planning_blockers: bool) -> bool {
+    requested
+        && !planning_blockers
+        && checked.rules.len() == 9
+        && checked.candidate_blockers().is_empty()
+        && (1..=9).all(|i| {
+            checked
+                .rules
+                .iter()
+                .filter(|r| {
+                    r.id == format!("H{i}")
+                        && matches!(r.status.as_str(), "pass" | "not_applicable")
+                })
+                .count()
+                == 1
+        })
 }
 
 type Failure = (&'static str, String);
@@ -230,6 +280,40 @@ fn model_layers(model: &c::PosedModel, threads: usize) -> Result<load::ModelLaye
     }
 }
 
+fn proposal_diagnostic(
+    proposal: &place::Proposal,
+    answers: &[Result<c::Quote, c::Reject>],
+) -> String {
+    let upper = answers
+        .iter()
+        .filter_map(|q| q.as_ref().ok())
+        .map(|q| q.contact().patch().upper())
+        .reduce(f64::max);
+    let ratio = proposal
+        .load
+        .sections
+        .iter()
+        .map(|s| s.ratios.tributary)
+        .reduce(f64::max);
+    let unprintable = proposal
+        .load
+        .warnings
+        .iter()
+        .filter(|w| w.class == load::WarningClass::Unprintable)
+        .count();
+    format!(
+        "{:?}; {} proposed contacts; tip ball radii {:?} mm; rejections {:?}; private-plan patch upper {upper:?} mm² (NOT an emitted-file measurement); largest modelled tributary ratio {ratio:?}; {unprintable} unprintable warnings",
+        proposal.termination,
+        proposal.candidates.len(),
+        proposal
+            .candidates
+            .iter()
+            .map(|c| c.ball_r)
+            .collect::<Vec<_>>(),
+        proposal.rejections
+    )
+}
+
 fn supported(cfg: &Config, mesh: &Mesh, m: &mut ModelRun) -> Result<Built, Failure> {
     let fail = |e: c::Reject| {
         (
@@ -261,47 +345,38 @@ fn supported(cfg: &Config, mesh: &Mesh, m: &mut ModelRun) -> Result<Built, Failu
     let proposal = timed(&mut m.steps, "plan", || {
         place::plan_contacts(&builder, &layers, &place::PlanSettings::default())
     });
-    let mut diagnostic = format!(
-        "{:?}; {} proposed contacts; tip ball radii {:?} mm; rejections {:?}",
-        proposal.termination,
-        proposal.candidates.len(),
-        proposal
-            .candidates
-            .iter()
-            .map(|c| c.ball_r)
-            .collect::<Vec<_>>(),
-        proposal.rejections
-    );
     let mut answers = Vec::new();
     builder.probe(&proposal.candidates, &mut answers);
-    let upper = answers
+    let diagnostic = proposal_diagnostic(&proposal, &answers);
+    if !proposal.routed {
+        return Err((
+            "plan",
+            format!(
+                "route preview rejected before contact commit: {:?}; {diagnostic}",
+                proposal.routing_blocker
+            ),
+        ));
+    }
+    let contact_loads = place::routing_loads(&load::analyse_full(
+        &layers.stack,
+        &proposal.layout,
+        &load::Extras::default(),
+    ));
+    let column_radii: Vec<_> = answers
         .iter()
-        .filter_map(|q| q.as_ref().ok())
-        .map(|q| q.contact().patch().upper())
-        .reduce(f64::max);
-    let ratio = proposal
-        .load
-        .sections
-        .iter()
-        .map(|s| s.ratios.tributary)
-        .reduce(f64::max);
-    let unprintable = proposal
-        .load
-        .warnings
-        .iter()
-        .filter(|w| w.class == load::WarningClass::Unprintable)
-        .count();
-    diagnostic.push_str(&format!("; private-plan patch upper {upper:?} mm² (NOT an emitted-file measurement); largest modelled tributary ratio {ratio:?}; {unprintable} unprintable warnings"));
+        .zip(&contact_loads)
+        .map(|(q, &load)| q.as_ref().map(|q| q.contact().column_radius(load)))
+        .collect::<Result<_, _>>()
+        .map_err(|e| fail(e.clone()))?;
     let contacts = builder
         .commit(c::QuoteBatch::from_results(answers).map_err(fail)?)
         .map_err(fail)?;
     let mut routed = builder.into_routing();
     let columns: Vec<_> = contacts
         .into_iter()
-        .zip(&proposal.candidates)
-        .map(|(contact, c)| {
-            c::Section::new((c.joint_r / 1.04).max(0.25))
-                .map(|section| c::MemberProposal::Column { contact, section })
+        .zip(column_radii)
+        .map(|(contact, radius)| {
+            c::Section::new(radius).map(|section| c::MemberProposal::Column { contact, section })
         })
         .collect::<Result<_, _>>()
         .map_err(fail)?;
@@ -356,6 +431,10 @@ fn build_bytes(cfg: &Config, named: &Named, m: &mut ModelRun) -> Result<Built, F
     })?;
     m.triangles = mesh.triangle_count();
     if approved {
+        m.supported = true;
+        // A failed search is a planning blocker too, even before ReportData exists.
+        // Successful construction replaces this provisional blocker from its data.
+        m.planning_blockers = true;
         return supported(cfg, &mesh, m);
     }
     let (project, parallel) = timed(&mut m.steps, "convert", || {
@@ -391,9 +470,10 @@ fn write_check_publish(
     named: &Named,
     bytes: &[u8],
     fault: Fault,
-    planning_blockers: bool,
+    review: Option<(&mut rd::ReportData, Option<f64>)>,
     m: &mut ModelRun,
 ) -> Result<Outcome, Failure> {
+    let planning_blockers = m.planning_blockers;
     let final_name = format!("{}.chitubox", named.stem);
     let dest = cfg.out_dir.join(&final_name);
     let temp = publish::temp_path(&cfg.out_dir, "model");
@@ -441,7 +521,10 @@ fn write_check_publish(
     if planning_blockers {
         blockers.push("placement, load path or early-patch capacity remains unresolved".into());
     }
-    if cfg.candidate && !blockers.is_empty() {
+    if cfg.candidate && !candidate_allowed(true, &checked, planning_blockers) {
+        if blockers.is_empty() {
+            blockers.push("incomplete measured rule set".into());
+        }
         let _ = std::fs::remove_file(&temp);
         let message = format!(
             "{}: not offered as a print candidate; nothing was published ({})",
@@ -463,13 +546,68 @@ fn write_check_publish(
             ),
         ));
     }
-    timed(&mut m.steps, "publish", || publish::publish(&temp, &dest))
-        .map_err(|e| ("publish", io_message("cannot publish", &dest, &e)))?;
-    Ok(Outcome::Published {
-        path: dest,
+    if let Some((data, upper)) = review {
+        publish_supported(cfg, named, bytes, &temp, (data, upper, checked), m)
+    } else {
+        timed(&mut m.steps, "publish", || publish::publish(&temp, &dest))
+            .map_err(|e| ("publish", io_message("cannot publish", &dest, &e)))?;
+        Ok(Outcome::Published {
+            path: dest,
+            bytes: bytes.len() as u64,
+            checked,
+        })
+    }
+}
+
+fn publish_supported(
+    cfg: &Config,
+    named: &Named,
+    bytes: &[u8],
+    temp: &Path,
+    review: (&mut rd::ReportData, Option<f64>, Checked),
+    m: &mut ModelRun,
+) -> Result<Outcome, Failure> {
+    let (data, upper, checked) = review;
+    let staging = publish::temp_path(&cfg.out_dir, "bundle");
+    let bundle = cfg.out_dir.join(format!("{}.supported", named.stem));
+    let final_name = format!("{}.chitubox", named.stem);
+    std::fs::create_dir(&staging).map_err(|e| {
+        let _ = std::fs::remove_file(temp);
+        ("report", e.to_string())
+    })?;
+    let mut staged_cfg = cfg.clone();
+    staged_cfg.out_dir = staging.clone();
+    staged_cfg.candidate = candidate_allowed(cfg.candidate, &checked, m.planning_blockers);
+    let outcome = Outcome::Published {
+        path: bundle.join(&final_name),
         bytes: bytes.len() as u64,
         checked,
-    })
+    };
+    data.run.steps = m
+        .steps
+        .iter()
+        .map(|s| rd::StepTime {
+            name: s.name.into(),
+            seconds: s.secs,
+        })
+        .collect();
+    data.run.peak_memory_bytes = mem::peak().map_or(0, mem::Peak::job);
+    let result = (|| {
+        std::fs::rename(temp, staging.join(&final_name)).map_err(|e| ("write", e.to_string()))?;
+        timed(&mut m.steps, "report", || {
+            write_review(&staged_cfg, named, bytes, data, upper, &outcome)
+        })?;
+        timed(&mut m.steps, "publish", || {
+            publish::publish_bundle(&staging, &bundle)
+        })
+        .map_err(|e| ("publish", io_message("cannot publish", &bundle, &e)))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+        let _ = std::fs::remove_file(temp);
+    }
+    result?;
+    Ok(outcome)
 }
 
 fn write_review(
@@ -534,8 +672,14 @@ fn write_review(
         .filter(|r| r.record_type == plinth_chitubox::RecordType::TIP_BALL)
         .map(|r| Json::Num(f64::from(r.r1)))
         .collect();
-    let mut text = String::from(
-        "NOT A PRINT CANDIDATE. Modelled loads are not independent checker acceptance.\n",
+    let candidate = checked.is_some_and(|c| candidate_allowed(cfg.candidate, c, false));
+    let status = if candidate {
+        "print candidate"
+    } else {
+        "not a print candidate"
+    };
+    let mut text = format!(
+        "Supported output: {status}. Modelled loads are not independent checker acceptance.\n"
     );
     if let Some(c) = checked {
         for r in &c.rules {
@@ -547,7 +691,7 @@ fn write_review(
     ));
     text.push_str(&crate::report::fr21_text(data));
     let json = Json::obj([
-        ("status", Json::str("not a print candidate")),
+        ("status", Json::str(status)),
         ("sha256", Json::str(&data.identity.generated_sha256)),
         ("checker_rules", Json::Arr(rules)),
         (
@@ -590,6 +734,8 @@ fn run_model(cfg: &Config, named: &Named, fault: Fault) -> ModelRun {
         triangles: 0,
         steps: Vec::new(),
         parallel: None,
+        supported: false,
+        planning_blockers: false,
         outcome: Outcome::Failed {
             stage: "read",
             message: String::new(),
@@ -602,29 +748,12 @@ fn run_model(cfg: &Config, named: &Named, fault: Fault) -> ModelRun {
                 .iter()
                 .any(|w| w.class != load::WarningClass::Information)
         });
-        let outcome = write_check_publish(cfg, named, &built.bytes, fault, blocked, &mut m)?;
-        if let Some(data) = &mut built.report {
-            data.run.steps = m
-                .steps
-                .iter()
-                .map(|s| rd::StepTime {
-                    name: s.name.into(),
-                    seconds: s.secs,
-                })
-                .collect();
-            data.run.peak_memory_bytes = mem::peak().map_or(0, mem::Peak::job);
-            timed(&mut m.steps, "report", || {
-                write_review(
-                    cfg,
-                    named,
-                    &built.bytes,
-                    data,
-                    built.producer_patch_upper,
-                    &outcome,
-                )
-            })?;
-        }
-        Ok(outcome)
+        m.planning_blockers = blocked;
+        let review = built
+            .report
+            .as_mut()
+            .map(|data| (data, built.producer_patch_upper));
+        write_check_publish(cfg, named, &built.bytes, fault, review, &mut m)
     });
     m.outcome = result.unwrap_or_else(|(stage, message)| Outcome::Failed {
         stage,

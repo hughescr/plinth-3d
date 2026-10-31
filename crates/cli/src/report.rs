@@ -29,8 +29,14 @@ fn checker_json(c: Option<&Checked>) -> Json {
 /// What a file is called in the report: a transport file, or (candidate mode, published only
 /// after the checker passed it with no applicable rule unverified or violated) a print
 /// candidate.
-fn kind_of(candidate: bool) -> &'static str {
-    if candidate { "candidate" } else { "transport" }
+fn kind_of(candidate: bool, supported: bool) -> &'static str {
+    if supported {
+        "supported"
+    } else if candidate {
+        "candidate"
+    } else {
+        "transport"
+    }
 }
 
 fn label_of(candidate: bool) -> &'static str {
@@ -68,15 +74,27 @@ fn model_json(candidate: bool, m: &ModelRun) -> Json {
             checked.as_ref(),
         ),
     };
-    let blockers = checked.map_or_else(Vec::new, Checked::candidate_blockers);
-    let is_candidate = candidate && status == "published";
+    let mut blockers = checked.map_or_else(Vec::new, Checked::candidate_blockers);
+    if m.planning_blockers {
+        blockers.push("placement or load measurements unresolved".into());
+    }
+    let is_candidate = status == "published"
+        && checked
+            .is_some_and(|c| crate::run::candidate_allowed(candidate, c, m.planning_blockers));
     Json::obj([
         ("input", path(&m.input)),
         ("output_name", Json::str(format!("{}.chitubox", m.stem))),
         ("status", Json::str(status)),
-        ("kind", Json::str(kind_of(candidate))),
+        ("kind", Json::str(kind_of(candidate, m.supported))),
         ("print_candidate", Json::Bool(is_candidate)),
-        ("label", Json::str(label_of(is_candidate))),
+        (
+            "label",
+            Json::str(if m.supported && !is_candidate {
+                "supported, not a print candidate"
+            } else {
+                label_of(is_candidate)
+            }),
+        ),
         (
             "candidate_blockers",
             Json::Arr(blockers.iter().map(Json::str).collect()),
@@ -132,6 +150,9 @@ fn steps_json(m: &ModelRun) -> Json {
 #[must_use]
 pub fn to_json(cfg: &Config, run: &Run) -> Json {
     let failed = run.models.len() - run.published();
+    let supported = run.models.iter().any(|m| m.supported);
+    let candidate=cfg.candidate && !run.models.is_empty() && run.models.iter().all(|m|matches!(&m.outcome,
+        Outcome::Published { checked,.. } if crate::run::candidate_allowed(true,checked,m.planning_blockers)));
     Json::obj([
         ("report_version", Json::Uint(REPORT_VERSION)),
         (
@@ -141,12 +162,16 @@ pub fn to_json(cfg: &Config, run: &Run) -> Json {
                 ("version", Json::str(env!("CARGO_PKG_VERSION"))),
             ]),
         ),
-        ("kind", Json::str(kind_of(cfg.candidate))),
+        ("kind", Json::str(kind_of(cfg.candidate, supported))),
+        ("print_candidate", Json::Bool(candidate)),
         (
-            "print_candidate",
-            Json::Bool(cfg.candidate && failed == 0 && !run.models.is_empty()),
+            "label",
+            Json::str(if supported && !candidate {
+                "supported, not a print candidate"
+            } else {
+                label_of(candidate)
+            }),
         ),
-        ("label", Json::str(label_of(cfg.candidate && failed == 0))),
         (
             "models",
             Json::Arr(
@@ -775,7 +800,17 @@ pub fn progress_line(candidate: bool, m: &ModelRun) -> String {
             "plinth: {} -> {} ({}; checker: {}) {secs:.2} s",
             m.input.display(),
             path.display(),
-            label_of(candidate),
+            if m.supported
+                && !crate::run::candidate_allowed(candidate, checked, m.planning_blockers)
+            {
+                "supported, not a print candidate"
+            } else {
+                label_of(crate::run::candidate_allowed(
+                    candidate,
+                    checked,
+                    m.planning_blockers,
+                ))
+            },
             checked.verdict.name()
         ),
         Outcome::Failed { stage, message, .. } => {
@@ -805,6 +840,8 @@ mod tests {
             triangles: 12,
             steps: vec![],
             parallel: None,
+            supported: false,
+            planning_blockers: false,
             outcome,
         };
         let run = Run {

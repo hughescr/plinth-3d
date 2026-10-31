@@ -59,7 +59,9 @@ mod tests;
 mod types;
 
 pub use contact::require_capacity;
-pub use members::{Anchor, MemberId, MemberProposal, MemberQuote, MemberQuoteBatch, RaftId};
+pub use members::{
+    Anchor, ColumnCheck, MemberId, MemberProposal, MemberQuote, MemberQuoteBatch, RaftId,
+};
 pub use native::{NativePart, PartFields, PartKind};
 pub use types::{
     CappedPatch, KeepUpRecord, Limits, PatchBound, PoseError, PosedModel, ProcessRecord, Section,
@@ -127,6 +129,15 @@ pub enum Reject {
     /// This operation is not built.
     NotBuilt,
 }
+/// Located private-route failure. Sites must be blocked and re-planned, not
+/// committed and then repaired. Empty candidates means a whole-layout failure.
+#[derive(Debug)]
+pub struct RoutingFailure {
+    /// Exact construction rejection.
+    pub reject: Reject,
+    /// Candidate identities responsible for the rejected members.
+    pub candidates: Vec<CandId>,
+}
 /// Whole-batch rejection. Failure leaves the builder unchanged.
 pub type BatchReject = Reject;
 /// Freeze failed; no partially frozen plan escapes.
@@ -164,6 +175,28 @@ pub struct Contact {
     parts: Vec<NativePart>,
 }
 impl Contact {
+    fn copy_exact(&self) -> Self {
+        Self {
+            cand: self.cand,
+            centre: self.centre,
+            radius: self.radius,
+            joint: self.joint,
+            joint_radius: self.joint_radius,
+            patch: CappedPatch(PatchBound {
+                lo: self.patch.0.lo,
+                hi: self.patch.0.hi,
+            }),
+            parts: self.parts.iter().map(NativePart::copy_exact).collect(),
+        }
+    }
+    /// Load-sized column radius, rounded upward; never an admitted resize.
+    pub fn column_radius(&self, load: f64) -> f32 {
+        let r = f64::from(self.joint_radius / 1.04)
+            .max((load / 12.0 / 3.0615).sqrt())
+            .max(0.25);
+        let f = r as f32;
+        if f64::from(f) < r { f.next_up() } else { f }
+    }
     /// Candidate identity.
     pub fn candidate_id(&self) -> CandId {
         self.cand
@@ -204,6 +237,10 @@ impl Quote {
     /// Geometry certified by this private proposal; immutable until commit.
     pub fn contact(&self) -> &Contact {
         &self.contact
+    }
+    /// Same solid-against-solid H2/H6 guards used again at atomic commit.
+    pub fn compatible(&self, other: &Self) -> bool {
+        self.plan == other.plan && contact::pair(&self.contact, &other.contact).is_ok()
     }
     /// Plan revision.
     pub fn rev(&self) -> u64 {
@@ -310,6 +347,116 @@ impl PlanBuilder<Contacts> {
         out: &mut Vec<Result<Quote, Reject>>,
     ) {
         contact::probe(self, cands, out, true);
+    }
+    /// Private member feasibility on exact copies of measured quotes. No quote is
+    /// cloned or admitted to this plan. Results correspond to the supplied order.
+    pub fn probe_columns(&self, quotes: &[&Quote], loads: &[f64]) -> Vec<Result<(), Reject>> {
+        if quotes.len() != loads.len()
+            || quotes
+                .iter()
+                .any(|q| q.plan != self.id || q.rev != self.rev)
+        {
+            return quotes.iter().map(|_| Err(Reject::ForeignHandle)).collect();
+        }
+        let mut scratch = Self::new(
+            self.model.copy_exact(),
+            self.limits.clone(),
+            self.process.clone(),
+        );
+        scratch.workers = self.workers;
+        scratch.contacts = quotes.iter().map(|q| q.contact.copy_exact()).collect();
+        let proposals: Result<Vec<_>, _> = scratch
+            .contacts
+            .iter()
+            .zip(loads)
+            .enumerate()
+            .map(|(ix, (c, &load))| {
+                Section::new(c.column_radius(load)).map(|section| MemberProposal::Column {
+                    contact: ContactId {
+                        plan: scratch.id,
+                        ix,
+                    },
+                    section,
+                })
+            })
+            .collect();
+        let Ok(proposals) = proposals else {
+            return quotes.iter().map(|_| Err(Reject::NonFinite)).collect();
+        };
+        let routed = scratch.into_routing();
+        let mut out = Vec::new();
+        routed.probe_members(&proposals, &mut out);
+        out.into_iter().map(|q| q.map(|_| ())).collect()
+    }
+    /// Replay the entire private route (columns, required braces, raft, freeze)
+    /// before mutating the real builder. A successful column probe alone is not a
+    /// routed plan. Exact copies cannot acquire stronger certificates than commit.
+    pub fn preview_routing(&self, quotes: &[&Quote], loads: &[f64]) -> Result<(), Reject> {
+        self.preview_routing_located(quotes, loads)
+            .map_err(|f| f.reject)
+    }
+    /// Full route replay with candidate identities for feedback into the next
+    /// private search round. Uses the actual tributary loads, not zero-load rods.
+    pub fn preview_routing_located(
+        &self,
+        quotes: &[&Quote],
+        loads: &[f64],
+    ) -> Result<(), RoutingFailure> {
+        let failure = |reject, candidates| RoutingFailure { reject, candidates };
+        if quotes.len() != loads.len()
+            || quotes
+                .iter()
+                .any(|q| q.plan != self.id || q.rev != self.rev)
+        {
+            return Err(failure(Reject::ForeignHandle, Vec::new()));
+        }
+        let mut scratch = Self::new(
+            self.model.copy_exact(),
+            self.limits.clone(),
+            self.process.clone(),
+        );
+        scratch.workers = self.workers;
+        for (i, q) in quotes.iter().enumerate() {
+            for other in &quotes[..i] {
+                contact::pair(&q.contact, &other.contact)
+                    .map_err(|e| failure(e, vec![q.cand()]))?;
+            }
+        }
+        scratch.contacts = quotes.iter().map(|q| q.contact.copy_exact()).collect();
+        let columns = scratch
+            .contacts
+            .iter()
+            .zip(loads)
+            .enumerate()
+            .map(|(ix, (head, &load))| {
+                Section::new(head.column_radius(load)).map(|section| MemberProposal::Column {
+                    contact: ContactId {
+                        plan: scratch.id,
+                        ix,
+                    },
+                    section,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| failure(e, Vec::new()))?;
+        let mut routed = scratch.into_routing();
+        let mut out = Vec::new();
+        routed.probe_members(&columns, &mut out);
+        if let Some(e) = out.iter().find_map(|q| q.as_ref().err()) {
+            return Err(failure(
+                e.clone(),
+                out.iter()
+                    .zip(quotes)
+                    .filter_map(|(q, head)| q.is_err().then_some(head.cand()))
+                    .collect(),
+            ));
+        }
+        routed
+            .commit_members(
+                MemberQuoteBatch::from_results(out).map_err(|e| failure(e, Vec::new()))?,
+            )
+            .map_err(|e| failure(e, Vec::new()))?;
+        routed.finish_preview()
     }
     /// Consume one batch, sorted by candidate id, or change nothing.
     pub fn commit(&mut self, batch: QuoteBatch) -> Result<Vec<ContactId>, BatchReject> {

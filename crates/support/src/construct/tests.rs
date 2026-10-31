@@ -116,13 +116,127 @@ fn atomic_commit_stale_foreign_and_intrabatch_conflicts() {
             .iter()
             .all(|r| matches!(r, Err(Reject::WouldFuse { .. })))
     );
-    let blocked = quotes(&foreign, &[candidate(0, 0.), candidate(1, 1.)]);
+    let blocked = quotes(&foreign, &[candidate(0, 0.), candidate(1, 0.8)]);
     assert!(
         blocked
             .iter()
             .all(|r| matches!(r, Err(Reject::RegionBlocked { .. })))
     );
 }
+#[test]
+fn parallel_capped_heads_at_1_9_mm_pass_solid_reservations_and_columns() {
+    let (s, c) = 65_f64.to_radians().sin_cos();
+    let mesh = Mesh::new(
+        vec![-30.0, 30.0, 30.0, -30.0],
+        vec![-30.0 * c, -30.0 * c, 30.0 * c, 30.0 * c],
+        vec![-30.0 * s, -30.0 * s, 30.0 * s, 30.0 * s],
+        vec![0, 2, 1, 0, 3, 2],
+    )
+    .unwrap();
+    let mut p = builder(&mesh);
+    let tips: Vec<_> = [0.0, 1.9]
+        .into_iter()
+        .enumerate()
+        .map(|(i, x)| ContactCandidate {
+            id: CandId(i as u32),
+            site: [x, 0.0, 0.0],
+            ball_r: 0.41339996,
+            standoff: 0.15054,
+            axis: [0.0, s as f32, -c as f32],
+            neck: 0.39,
+            joint_r: 0.6084,
+            head_len: 1.84,
+        })
+        .collect();
+    let mut out = Vec::new();
+    p.probe(&tips, &mut out);
+    assert!(out.iter().all(Result::is_ok), "{out:?}");
+    let refs: Vec<_> = out.iter().map(|q| q.as_ref().unwrap()).collect();
+    assert!(
+        p.probe_columns(&refs, &[4.0, 4.0])
+            .iter()
+            .all(Result::is_ok)
+    );
+    p.commit(QuoteBatch::from_results(out).unwrap()).unwrap();
+    assert_eq!(p.contact_count(), 2);
+}
+
+#[test]
+fn patch_and_joint_build_boundaries_and_forged_batch_sabotage() {
+    let p = builder(&plate());
+    for delta in [-0.0001, 0.0001] {
+        let spacing = (0.424 + 2.0 * native::ENVELOPE + 0.012 + delta) as f32;
+        let out = quotes(&p, &[candidate(0, 0.0), candidate(1, spacing)]);
+        assert_eq!(
+            matches!(out[0], Err(Reject::WouldFuse { .. })),
+            delta < 0.0,
+            "{out:?}"
+        );
+        let spacing = (0.6 + 2.0 * native::ENVELOPE + 0.32 + delta) as f32;
+        let out = quotes(&p, &[candidate(0, 0.0), candidate(1, spacing)]);
+        assert_eq!(out.iter().all(Result::is_ok), delta > 0.0, "{out:?}");
+    }
+    let mut p = builder(&plate());
+    let mut q = quotes(&p, &[candidate(0, 0.0)]).remove(0).unwrap();
+    let mut sibling = quotes(&p, &[candidate(1, 10.0)]).remove(0).unwrap();
+    // Private fault injection bypasses probe only, isolating atomic commit's guard.
+    sibling.contact = q.contact.copy_exact();
+    sibling.contact.cand = CandId(1);
+    q.contact.cand = CandId(0);
+    assert!(matches!(
+        p.commit(QuoteBatch {
+            quotes: vec![q, sibling]
+        }),
+        Err(Reject::WouldFuse { .. })
+    ));
+    assert_eq!(p.contact_count(), 0);
+}
+
+#[test]
+fn column_probe_uses_load_and_needs_a_containing_joint() {
+    let p = builder(&plate());
+    let mut c = candidate(0, 0.);
+    let small = quotes(&p, &[c]);
+    let small = vec![small[0].as_ref().unwrap()];
+    assert!(p.probe_column_alternatives(&small, &[0.0])[0].is_ok());
+    assert!(matches!(
+        p.probe_column_alternatives(&small, &[20.0])[0],
+        Err(Reject::NarrowJoin)
+    ));
+    c.joint_r = 0.9;
+    c.head_len = 1.8;
+    let large = quotes(&p, &[c]);
+    let large = vec![large[0].as_ref().unwrap()];
+    let mut checks = p.probe_column_alternatives(&large, &[20.0]);
+    let checked = checks.remove(0).unwrap();
+    assert!(checked.radius() >= (20.0_f32 / 12.0 / 3.0615).sqrt());
+}
+
+#[test]
+fn different_chain_cones_keep_resolution_gap_not_numerical_epsilon() {
+    let p = builder(&plate());
+    let mut a = quotes(&p, &[candidate(0, -10.)]).remove(0).unwrap();
+    let mut b = quotes(&p, &[candidate(1, 10.)]).remove(0).unwrap();
+    // PRIVATE guard isolation: patch centres are well separated, and no joint
+    // can hide a loosened ball/cone rule. The finite native cone solids alone
+    // straddle 0.012, including both representation envelopes.
+    let cone = |x| {
+        NativePart::frustum(
+            PartKind::TipCone,
+            [x, 0., 0.],
+            [x, 0., 1.],
+            Section::new(0.2).unwrap(),
+            Section::new(0.2).unwrap(),
+        )
+        .unwrap()
+    };
+    a.contact.parts = vec![cone(0.)];
+    for delta in [-0.0001, 0.0001] {
+        b.contact.parts = vec![cone((0.4 + 2. * native::ENVELOPE + 0.012 + delta) as f32)];
+        assert_eq!(contact::pair(&a.contact, &b.contact).is_ok(), delta > 0.);
+    }
+}
+
 #[test]
 fn tip_family_radius_bound_is_inclusive_and_native_field_exact() {
     let p = builder(&plate());

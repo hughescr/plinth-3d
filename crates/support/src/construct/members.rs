@@ -79,6 +79,143 @@ impl MemberQuote {
     }
 }
 
+/// Private column certificate for mutually exclusive contact alternatives.
+#[derive(Debug)]
+pub struct ColumnCheck {
+    quote: MemberQuote,
+    head: Contact,
+    gap: f64,
+}
+impl ColumnCheck {
+    /// Radius actually measured against the model, heads and members. Reusing
+    /// this certificate for a wider load-sized column is forbidden.
+    pub fn radius(&self) -> f32 {
+        self.quote
+            .column
+            .as_ref()
+            .expect("column certificate")
+            .radius
+    }
+    /// Exact pair guards reused by final routing; no model query in this hot path.
+    pub fn compatible(&self, other: &Self) -> bool {
+        if let (Some(a), Some(b)) = (&self.quote.column, &other.quote.column)
+            && (f64::from(a.top[2] - a.bottom[2]) > crate::route::BRACE_FREE_LENGTH_MM
+                || f64::from(b.top[2] - b.bottom[2]) > crate::route::BRACE_FREE_LENGTH_MM)
+            && xy_distance(a, b) < 4.0
+        {
+            // A 45-degree X has node separation equal to this horizontal span.
+            // No long column can have a nearer neighbour than the 4 mm nodes.
+            return false;
+        }
+        for (column, head) in [(&self.quote, &other.head), (&other.quote, &self.head)] {
+            for p in &column.parts {
+                for h in &head.parts {
+                    let (Some(a), Some(b)) = (p.solid(), h.solid()) else {
+                        return false;
+                    };
+                    if clearance::solid_pair_lower(a, b) < self.gap {
+                        return false;
+                    }
+                }
+            }
+        }
+        other
+            .quote
+            .parts
+            .iter()
+            .enumerate()
+            .all(|(k, p)| keep_member(&self.quote, p, other.quote.role(k), self.gap).is_ok())
+    }
+}
+
+impl PlanBuilder<Contacts> {
+    /// Batch probe column/model and same-chain clearance for alternatives. Cross-
+    /// chain guards run during selection and again during real member admission.
+    pub fn probe_column_alternatives(
+        &self,
+        quotes: &[&Quote],
+        loads: &[f64],
+    ) -> Vec<Result<ColumnCheck, Reject>> {
+        if quotes.len() != loads.len()
+            || quotes
+                .iter()
+                .any(|q| q.plan != self.id || q.rev != self.rev)
+        {
+            return quotes.iter().map(|_| Err(Reject::ForeignHandle)).collect();
+        }
+        let mut scratch = Self::new(
+            self.model.copy_exact(),
+            self.limits.clone(),
+            self.process.clone(),
+        );
+        scratch.workers = self.workers;
+        scratch.contacts = quotes.iter().map(|q| q.contact.copy_exact()).collect();
+        let routed = scratch.into_routing();
+        let prepared: Vec<_> = routed
+            .contacts
+            .iter()
+            .zip(loads)
+            .enumerate()
+            .map(|(ix, (head, &load))| {
+                let section = Section::new(head.column_radius(load))?;
+                routed.prepare_member(MemberProposal::Column {
+                    contact: ContactId {
+                        plan: routed.id,
+                        ix,
+                    },
+                    section,
+                })
+            })
+            .collect();
+        let solids: Vec<_> = prepared
+            .iter()
+            .filter_map(|q| q.as_ref().ok())
+            .flat_map(|q| q.parts.iter().filter_map(NativePart::solid))
+            .collect();
+        let Ok(bvh) = Bvh::build(self.model.mesh()) else {
+            return quotes
+                .iter()
+                .map(|_| Err(Reject::MeasureExhausted))
+                .collect();
+        };
+        let mut gaps = Vec::new();
+        clearance::solid_gaps_with_workers(&bvh, &solids, &mut gaps, self.workers);
+        let mut at = 0;
+        prepared
+            .into_iter()
+            .enumerate()
+            .map(|(ix, q)| {
+                let q = q?;
+                let measured = &gaps[at..at + q.parts.len()];
+                at += q.parts.len();
+                for g in measured {
+                    let g = g.known().ok_or(Reject::MeasureExhausted)?;
+                    if g.lo - ENVELOPE < self.limits.gap {
+                        return Err(Reject::GapTooSmall { gap: g.lo });
+                    }
+                }
+                // Own flare has no same-chain exemption.
+                for h in &routed.contacts[ix].parts {
+                    if clearance::solid_pair_lower(
+                        q.parts[1].solid().ok_or(Reject::UnknownShape)?,
+                        h.solid().ok_or(Reject::UnknownShape)?,
+                    ) < self.limits.gap
+                    {
+                        return Err(Reject::RegionBlocked {
+                            by: quotes[ix].cand(),
+                        });
+                    }
+                }
+                Ok(ColumnCheck {
+                    quote: q,
+                    head: routed.contacts[ix].copy_exact(),
+                    gap: self.limits.gap,
+                })
+            })
+            .collect()
+    }
+}
+
 /// All-or-nothing member batch.
 #[derive(Debug)]
 pub struct MemberQuoteBatch {
@@ -99,6 +236,59 @@ pub struct RaftId {
 }
 
 impl PlanBuilder<Routed> {
+    pub(super) fn finish_preview(mut self) -> Result<(), RoutingFailure> {
+        let failure = |reject, candidates| RoutingFailure { reject, candidates };
+        let mut blocked = Vec::new();
+        for (i, c) in self.columns.iter().enumerate() {
+            if f64::from(c.top[2] - c.bottom[2]) <= crate::route::BRACE_FREE_LENGTH_MM {
+                continue;
+            }
+            let nearest = self
+                .columns
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .min_by(|(_, a), (_, b)| xy_distance(c, a).total_cmp(&xy_distance(c, b)));
+            if nearest.is_none_or(|(_, other)| {
+                let d = xy_distance(c, other);
+                !(4.0..=15.0).contains(&d)
+                    || self.model.plate + 4.2 + d as f32 > c.top[2].min(other.top[2])
+            }) {
+                blocked.push(self.contacts[c.contact].cand);
+            }
+        }
+        if !blocked.is_empty() {
+            return Err(failure(Reject::PrintOrder { layer: 0 }, blocked));
+        }
+        let braces = self.brace_proposals().map_err(|e| failure(e, Vec::new()))?;
+        let mut out = Vec::new();
+        self.probe_members(&braces, &mut out);
+        if let Some(e) = out.iter().find_map(|q| q.as_ref().err()) {
+            let mut candidates = Vec::new();
+            for (answer, proposal) in out.iter().zip(&braces) {
+                if answer.is_err()
+                    && let MemberProposal::Brace { from, to, .. } = proposal
+                {
+                    for id in [from, to] {
+                        if let Ok(c) = self.column(*id) {
+                            candidates.push(self.contacts[c.contact].cand);
+                        }
+                    }
+                }
+            }
+            candidates.sort();
+            candidates.dedup();
+            return Err(failure(e.clone(), candidates));
+        }
+        self.commit_members(
+            MemberQuoteBatch::from_results(out).map_err(|e| failure(e, Vec::new()))?,
+        )
+        .map_err(|e| failure(e, Vec::new()))?;
+        self.raft_connected().map_err(|e| failure(e, Vec::new()))?;
+        self.freeze()
+            .map(|_| ())
+            .map_err(|e| failure(e, Vec::new()))
+    }
     /// Probe fixed-size members against the model in one kernel batch, then keep
     /// every admitted head's reservation. Earlier columns may carry braces, but a
     /// sibling quote cannot be its carrier.
@@ -185,45 +375,23 @@ impl PlanBuilder<Routed> {
             }
         }
     }
-    // Reserve the same enclosing balls used by contact::pair, for ALL chains.
-    // A full frustum is inside its axis segment swept by its maximum radius.
-    // Envelopes keep the full 0.32 mm build gap to every other head reservation,
-    // protecting patches, cones and joints in both native representations. This is
-    // conservative: some harmless members can be refused. The only exception is
-    // a column's own certified centre-to-centre joint connection, made below.
+    // Actual finite solids, with native representation envelopes included. Only
+    // a column's own centre-to-centre joint connection is exempt.
     fn keep_heads(&self, quote: &MemberQuote) -> Result<(), Reject> {
         for (ix, head) in self.contacts.iter().enumerate() {
             let own_column = quote.column.as_ref().is_some_and(|c| c.contact == ix);
-            let radius = distance(head.centre, head.joint)
-                + f64::from(head.joint_radius.max(head.radius))
-                + 2.0 * ENVELOPE;
-            let centre = head.centre.map(f64::from);
             for part in &quote.parts {
                 if own_column && part.kind() == PartKind::Rod {
-                    continue; // Same-chain joint connection, never a base exemption.
-                }
-                let PartFields::Frustum { start, end, r1, r2 } = part.fields() else {
-                    return Err(Reject::UnknownShape);
-                };
-                // A vertical finite frustum has no radial Z extent. This exact
-                // cap-plane separation also keeps the wide plate flares usable.
-                if start[0].to_bits() == end[0].to_bits()
-                    && start[1].to_bits() == end[1].to_bits()
-                    && f64::from(start[2].max(end[2])) + ENVELOPE + self.limits.gap
-                        < centre[2] - radius
-                {
                     continue;
                 }
-                let a = start.map(f64::from);
-                let delta = sub(end.map(f64::from), a);
-                let t = (dot(sub(centre, a), delta) / dot(delta, delta)).clamp(0.0, 1.0);
-                let nearest = std::array::from_fn(|i| a[i] + t * delta[i]);
-                // Field coordinates are bounded by 100 mm; the 1e-8 mm arithmetic
-                // enclosure exceeds rounding of this non-degenerate segment solve.
-                if norm(sub(centre, nearest)) - f64::from(r1.max(r2)) - radius
-                    < self.limits.gap + ENVELOPE + 1e-8
-                {
-                    return Err(Reject::RegionBlocked { by: head.cand });
+                for head_part in &head.parts {
+                    let lower = clearance::solid_pair_lower(
+                        part.solid().ok_or(Reject::UnknownShape)?,
+                        head_part.solid().ok_or(Reject::UnknownShape)?,
+                    );
+                    if lower < self.limits.gap {
+                        return Err(Reject::RegionBlocked { by: head.cand });
+                    }
                 }
             }
         }
@@ -669,8 +837,10 @@ fn keep_member(
         return Err(Reject::UnknownShape);
     };
     for (k, part) in q.parts.iter().enumerate() {
-        if designated_join(q.role(k), role) {
-            continue;
+        if designated_join(q.role(k), role)
+            || matches!((q.role(k), role), (MemberRole::Flare, MemberRole::Flare))
+        {
+            continue; // Owner permits plate bases to merge, never heads.
         }
         let PartFields::Frustum {
             start: a,
@@ -681,7 +851,7 @@ fn keep_member(
         else {
             return Err(Reject::UnknownShape);
         };
-        let lower = segment_distance(
+        let capsule = segment_distance(
             a.map(f64::from),
             b.map(f64::from),
             c.map(f64::from),
@@ -689,6 +859,10 @@ fn keep_member(
         ) - f64::from(ar.max(br))
             - f64::from(cr.max(dr))
             - 2.0 * ENVELOPE;
+        let lower = capsule.max(clearance::solid_pair_lower(
+            part.solid().ok_or(Reject::UnknownShape)?,
+            other.solid().ok_or(Reject::UnknownShape)?,
+        ));
         if lower < gap {
             return Err(Reject::GapTooSmall {
                 gap: lower.max(0.0),
