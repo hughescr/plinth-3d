@@ -23,6 +23,7 @@ pub enum Level {
     L1,
     L1d,
     L2,
+    L3,
 }
 
 impl Level {
@@ -30,9 +31,24 @@ impl Level {
         match self {
             Self::Noop => Kind::Noop,
             Self::L0 => Kind::Check,
-            Self::L1 | Self::L1d | Self::L2 => Kind::Test,
+            Self::L1 | Self::L1d | Self::L2 | Self::L3 => Kind::Test,
         }
     }
+}
+
+/// nextest filter that leaves out the end-to-end tests (`e2e_*`, T2): they need the built
+/// checker program and belong to L2 (Round 25) and L3 (the Round bases), not to L1.
+const NOT_E2E: &str = "not test(/(^|::)e2e_/)";
+/// L2 runs every test but the all-Rounds end-to-end test (L2 runs Round 25 only).
+const NOT_E2E_ROUNDS: &str = "not test(/(^|::)e2e_rounds_/)";
+/// L3 runs the end-to-end tests, and in the bench epoch the thread-count ones too.
+const ONLY_E2E: &str = "test(/(^|::)(threads_bench_)?e2e_/)";
+
+/// True when the caller already chose a nextest filter (then the runner adds none).
+fn has_filter(extra: &[String]) -> bool {
+    extra.iter().any(|a| {
+        a == "-E" || a == "--filterset" || a.starts_with("-E") || a.starts_with("--filterset")
+    })
 }
 
 fn parse_level(s: &str) -> Result<Level, String> {
@@ -42,7 +58,8 @@ fn parse_level(s: &str) -> Result<Level, String> {
         "L1" => Ok(Level::L1),
         "L1d" => Ok(Level::L1d),
         "L2" => Ok(Level::L2),
-        "L3" | "L4" | "L5" => Err(format!(
+        "L3" => Ok(Level::L3),
+        "L4" | "L5" => Err(format!(
             "level {s} is not available yet (its suites arrive in later steps)"
         )),
         _ => Err(format!("unknown level: {s}")),
@@ -96,14 +113,27 @@ pub fn build_command(
         return (vec![s("sh"), s("-c"), s(sh)], root.to_path_buf(), s("-"));
     }
     if level == Level::L2 {
-        // Both workspaces, then the explicit doctest run (nextest skips doctests). The
-        // independence check joins this chain when its script arrives.
+        // The checker program first (the end-to-end tests run it), then both workspaces and
+        // the explicit doctest run (nextest skips doctests). The independence check joins
+        // this chain when its script arrives.
         let sh = format!(
-            "cargo nextest run --workspace --locked && cargo test --doc -p plinth-support --locked \
+            "(cd checker && cargo build --locked) \
+             && cargo nextest run --workspace --locked -E '{NOT_E2E_ROUNDS}' \
+             && cargo test --doc -p plinth-support --locked \
              && cd checker && cargo nextest run --config-file '{}/.config/nextest.toml' --locked",
             root.display()
         );
         return (vec![s("sh"), s("-c"), sh], root.to_path_buf(), s("all"));
+    }
+    if level == Level::L3 {
+        // Rebuild the checker and the CLI (both after the edit), then run the end-to-end
+        // tests: the Round bases through the real binary and the real checker, against the
+        // stage manifest, plus Round 25 at 1 thread and at the slot's allocation.
+        let sh = format!(
+            "(cd checker && cargo build --locked) && cargo build --locked -p plinth-cli \
+             && cargo nextest run --locked -p plinth-cli -E '{ONLY_E2E}'"
+        );
+        return (vec![s("sh"), s("-c"), sh], root.to_path_buf(), s("rounds"));
     }
     let pkg = package_of(crate_arg);
     let is_checker = pkg == "plinth-check";
@@ -118,7 +148,7 @@ pub fn build_command(
         vec![s("cargo"), s("nextest"), s("run")]
     };
     if !is_checker {
-        cmd.extend([s("-p"), pkg]);
+        cmd.extend([s("-p"), pkg.clone()]);
     } else if level != Level::L0 {
         cmd.extend([
             s("--config-file"),
@@ -135,9 +165,47 @@ pub fn build_command(
         ]);
     } else {
         cmd.push(s("--locked"));
+        if matches!(level, Level::L1 | Level::L1d) && !has_filter(extra) {
+            cmd.extend([s("-E"), s(NOT_E2E)]);
+        }
         cmd.extend(extra.iter().cloned());
     }
+    if needs_checker(level, &pkg, extra) {
+        // Build the checker once, here, before nextest starts; the tests never run cargo.
+        let mut wrapped = vec![s("sh"), s("-c"), s(BUILD_CHECKER_THEN_EXEC), s("sh")];
+        wrapped.append(&mut cmd);
+        cmd = wrapped;
+    }
     (cmd, cwd, crate_arg.to_owned())
+}
+
+/// Environment variable that carries the absolute path of the built checker program to the
+/// tests (design dev-loop.md section 4.3). Tests never build it; when it is missing they fail.
+pub const CHECK_BIN_VAR: &str = "PLINTH_CHECK_BIN";
+
+/// Where the checker program is once `cd checker && cargo build --locked` has run.
+#[must_use]
+pub fn check_bin(root: &Path) -> PathBuf {
+    root.join("checker/target/debug/plinth-check")
+}
+
+/// Shell prefix for a command that is a single nextest run: build the checker, then run the
+/// rest of the arguments (`"$@"`, so no quoting of them is needed).
+const BUILD_CHECKER_THEN_EXEC: &str = "(cd checker && cargo build --locked) && exec \"$@\"";
+
+/// True when the tests this level selects start the checker program (directly or through the
+/// `plinth` binary), so the runner must build it first and pass its path in `PLINTH_CHECK_BIN`.
+/// L2 and L3 build it in their own command chain. For L1 and L1d: the acceptance crate always
+/// (readers-agree); the CLI crate when the caller chose a filter (then the end-to-end tests may
+/// be selected).
+fn needs_checker(level: Level, pkg: &str, extra: &[String]) -> bool {
+    match level {
+        Level::L2 | Level::L3 => true,
+        Level::L1 | Level::L1d => {
+            pkg == "plinth-acceptance" || (pkg == "plinth-cli" && has_filter(extra))
+        }
+        Level::Noop | Level::L0 => false,
+    }
 }
 
 /// The thread allocation of a slot: fixed per epoch, read from the slot marker, never computed.
@@ -208,6 +276,8 @@ pub struct Plan {
     cmd: Vec<String>,
     cwd: PathBuf,
     alloc: Alloc,
+    /// The checker program path for `PLINTH_CHECK_BIN`, when the selected tests start it.
+    check_bin: Option<PathBuf>,
 }
 
 fn setup(msg: impl std::fmt::Display) -> Exit {
@@ -232,16 +302,18 @@ pub fn prepare(root: &Path, args: &[String]) -> Result<Plan, Exit> {
     let alloc = allocation(root).map_err(setup)?;
     let level = parse_level(&level_name).map_err(setup)?;
     let crate_arg = args.get(1).cloned().unwrap_or_default();
-    if !matches!(level, Level::Noop | Level::L2) && crate_arg.is_empty() {
+    if !matches!(level, Level::Noop | Level::L2 | Level::L3) && crate_arg.is_empty() {
         return Err(setup(format!("{level_name} needs a crate")));
     }
-    if matches!(level, Level::L1 | Level::L1d | Level::L2) && !proc::has_tool("cargo-nextest") {
+    let uses_nextest = matches!(level, Level::L1 | Level::L1d | Level::L2 | Level::L3);
+    if uses_nextest && !proc::has_tool("cargo-nextest") {
         return Err(setup(
             "cargo-nextest is not installed (cargo install cargo-nextest --locked)",
         ));
     }
     let extra = args.get(2..).unwrap_or_default();
     let (cmd, cwd, crate_label) = build_command(root, level, &crate_arg, extra);
+    let check_bin = needs_checker(level, &package_of(&crate_arg), extra).then(|| check_bin(root));
     let cmd = if alloc.slot == "bench" {
         with_bench_profile(cmd)
     } else {
@@ -257,7 +329,22 @@ pub fn prepare(root: &Path, args: &[String]) -> Result<Plan, Exit> {
         cmd,
         cwd,
         alloc,
+        check_bin,
     })
+}
+
+/// The environment the command runs with.
+fn command_env(plan: &Plan) -> Vec<(String, String)> {
+    let jobs = plan.alloc.threads.to_string();
+    let mut env = vec![
+        ("CARGO_BUILD_JOBS".to_owned(), jobs.clone()),
+        ("NEXTEST_TEST_THREADS".to_owned(), jobs),
+        ("CARGO_TERM_COLOR".to_owned(), "never".to_owned()),
+    ];
+    if let Some(bin) = &plan.check_bin {
+        env.push((CHECK_BIN_VAR.to_owned(), bin.display().to_string()));
+    }
+    env
 }
 
 #[derive(Debug)]
@@ -284,15 +371,10 @@ fn last_lines(text: &str, n: usize) -> String {
 pub fn execute(plan: &Plan, abort: &dyn Fn() -> bool) -> Result<Outcome, Exit> {
     let log = plan.root.join("target/loop-last.log");
     std::fs::create_dir_all(plan.root.join("target")).map_err(setup)?;
-    let jobs = plan.alloc.threads.to_string();
     let spec = Spec {
         argv: plan.cmd.clone(),
         cwd: plan.cwd.clone(),
-        env: vec![
-            ("CARGO_BUILD_JOBS".into(), jobs.clone()),
-            ("NEXTEST_TEST_THREADS".into(), jobs),
-            ("CARGO_TERM_COLOR".into(), "never".into()),
-        ],
+        env: command_env(plan),
         log: log.clone(),
         term_after: TERM_AFTER,
         grace: GRACE,
@@ -465,13 +547,20 @@ mod tests {
                 "bench",
                 "-p",
                 "plinth-geom",
-                "--locked"
+                "--locked",
+                "-E",
+                NOT_E2E
             ])
         );
         let (l2, _, _) = build_command(Path::new("/r"), Level::L2, "", &[]);
         let sh = &with_bench_profile(l2)[2];
-        assert!(sh.starts_with("cargo nextest run --profile bench --workspace --locked"));
+        assert!(sh.contains("cargo nextest run --profile bench --workspace --locked"));
         assert!(sh.contains("cd checker && cargo nextest run --profile bench --config-file"));
+        let (l3, _, _) = build_command(Path::new("/r"), Level::L3, "", &[]);
+        assert!(
+            with_bench_profile(l3)[2]
+                .contains("cargo nextest run --profile bench --locked -p plinth-cli")
+        );
         let (l0, _, _) = build_command(Path::new("/r"), Level::L0, "geom", &[]);
         assert_eq!(with_bench_profile(l0.clone()), l0);
     }
@@ -507,7 +596,9 @@ mod tests {
                 "run",
                 "--config-file",
                 "/r/.config/nextest.toml",
-                "--locked"
+                "--locked",
+                "-E",
+                NOT_E2E
             ])
         );
         let (c0, _, _) = build_command(Path::new("/r"), Level::L0, "check", &[]);
@@ -518,12 +609,140 @@ mod tests {
     fn l2_runs_both_workspaces_and_the_doctests() {
         let (cmd, cwd, label) = build_command(Path::new("/r"), Level::L2, "", &[]);
         let sh = &cmd[2];
-        assert!(sh.starts_with("cargo nextest run --workspace --locked"));
+        // The checker program is built before any test that runs it.
+        assert!(sh.starts_with(
+            "(cd checker && cargo build --locked) && cargo nextest run --workspace --locked"
+        ));
+        assert!(sh.contains(NOT_E2E_ROUNDS), "L2 runs Round 25 only");
         assert!(sh.contains("cargo test --doc -p plinth-support"));
         assert!(
             sh.contains("cd checker && cargo nextest run --config-file '/r/.config/nextest.toml'")
         );
         assert_eq!((cwd, label.as_str()), (PathBuf::from("/r"), "all"));
+    }
+
+    #[test]
+    fn l3_rebuilds_checker_and_cli_then_runs_only_the_end_to_end_tests() {
+        let (cmd, cwd, label) = build_command(Path::new("/r"), Level::L3, "", &[]);
+        let sh = &cmd[2];
+        let build =
+            "(cd checker && cargo build --locked) && cargo build --locked -p plinth-cli && ";
+        assert!(sh.starts_with(build), "{sh}");
+        assert!(sh.contains("cargo nextest run --locked -p plinth-cli"));
+        assert!(sh.contains(ONLY_E2E));
+        assert_eq!((cwd, label.as_str()), (PathBuf::from("/r"), "rounds"));
+        assert_eq!(parse_level("L3"), Ok(Level::L3));
+    }
+
+    #[test]
+    fn l1_builds_the_checker_first_only_where_tests_start_it() {
+        let wrap = s(&[
+            "sh",
+            "-c",
+            "(cd checker && cargo build --locked) && exec \"$@\"",
+            "sh",
+            "cargo",
+            "nextest",
+            "run",
+            "-p",
+            "plinth-acceptance",
+            "--locked",
+            "-E",
+            NOT_E2E,
+        ]);
+        let (acc, cwd, _) = build_command(Path::new("/r"), Level::L1, "acceptance", &[]);
+        assert_eq!(acc, wrap);
+        assert_eq!(cwd, PathBuf::from("/r"));
+        // The CLI crate runs no checker-starting test unless the caller picks a filter.
+        let (plain, _, _) = build_command(Path::new("/r"), Level::L1, "cli", &[]);
+        assert_eq!(plain[0], "cargo");
+        let own = s(&["-E", "test(e2e_)"]);
+        let (mine, _, _) = build_command(Path::new("/r"), Level::L1d, "cli", &own);
+        assert_eq!(mine[..4], wrap[..4]);
+        assert_eq!(mine[4..7], s(&["cargo", "nextest", "run"])[..]);
+        let (geom, _, _) = build_command(Path::new("/r"), Level::L1, "geom", &[]);
+        assert_eq!(geom[0], "cargo");
+        // Under the bench slot the profile still lands on the nextest run.
+        assert!(
+            with_bench_profile(acc)
+                .join(" ")
+                .contains("nextest run --profile bench -p")
+        );
+    }
+
+    fn plan_for(root: &Path, level: Level, crate_arg: &str, extra: &[String]) -> Plan {
+        let (cmd, cwd, crate_label) = build_command(root, level, crate_arg, extra);
+        Plan {
+            root: root.to_path_buf(),
+            level_name: "Lx".into(),
+            level,
+            crate_label,
+            budget_s: 1,
+            target: String::new(),
+            cmd,
+            cwd,
+            alloc: Alloc {
+                slot: "s1".into(),
+                threads: 7,
+            },
+            check_bin: needs_checker(level, &package_of(crate_arg), extra).then(|| check_bin(root)),
+        }
+    }
+
+    fn env_of<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn checker_path_reaches_every_level_that_runs_checker_tests() {
+        let root = Path::new("/r");
+        let path = "/r/checker/target/debug/plinth-check";
+        let want = Some(path);
+        assert_eq!(check_bin(root), PathBuf::from(path));
+        for (level, krate, extra) in [
+            (Level::L2, "", vec![]),
+            (Level::L3, "", vec![]),
+            (Level::L1, "acceptance", vec![]),
+            (Level::L1d, "cli", s(&["-E", "test(e2e_)"])),
+        ] {
+            let env = command_env(&plan_for(root, level, krate, &extra));
+            assert_eq!(env_of(&env, CHECK_BIN_VAR), want, "{level:?} {krate}");
+            assert!(Path::new(path).is_absolute());
+            assert_eq!(env_of(&env, "NEXTEST_TEST_THREADS"), Some("7"));
+        }
+        for (level, krate) in [
+            (Level::L0, "acceptance"),
+            (Level::L1, "geom"),
+            (Level::L1, "cli"),
+            (Level::L1, "check"),
+            (Level::Noop, ""),
+        ] {
+            let env = command_env(&plan_for(root, level, krate, &[]));
+            assert_eq!(env_of(&env, CHECK_BIN_VAR), None, "{level:?} {krate}");
+        }
+    }
+
+    #[test]
+    fn l2_and_l3_build_the_checker_before_nextest_starts() {
+        for level in [Level::L2, Level::L3] {
+            let (cmd, _, _) = build_command(Path::new("/r"), level, "", &[]);
+            let sh = &cmd[2];
+            let build = sh.find("(cd checker && cargo build --locked)").unwrap();
+            let first_test = sh.find("cargo nextest run").unwrap();
+            assert_eq!(build, 0);
+            assert!(build < first_test, "{sh}");
+        }
+    }
+
+    #[test]
+    fn l1_leaves_out_end_to_end_tests_unless_the_caller_filters() {
+        let (plain, _, _) = build_command(Path::new("/r"), Level::L1, "cli", &[]);
+        assert!(plain.windows(2).any(|w| w == ["-E", NOT_E2E]));
+        let own = s(&["-E", "test(x)"]);
+        let (mine, _, _) = build_command(Path::new("/r"), Level::L1d, "cli", &own);
+        assert!(!mine.contains(&NOT_E2E.to_owned()));
+        assert!(has_filter(&s(&["--filterset=x"])));
+        assert!(!has_filter(&s(&["--no-capture"])));
     }
 
     #[test]
@@ -535,7 +754,7 @@ mod tests {
 
     #[test]
     fn later_levels_are_setup_errors_never_passes() {
-        for l in ["L3", "L4", "L5"] {
+        for l in ["L4", "L5"] {
             assert!(parse_level(l).unwrap_err().contains("not available yet"));
         }
         assert!(parse_level("L9").is_err());

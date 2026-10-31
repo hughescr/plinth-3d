@@ -1,0 +1,11 @@
+//! The one integration-test binary of this crate (design section 4.3).
+//!
+//! * `failures`: bad input, name collisions, interrupted writes, a full disk, a crash before
+//!   publishing and a misbehaving checker, all through the library with a fake checker so
+//!   they need nothing built outside this workspace.
+//! * `e2e_*` (in `e2e`): the real `plinth` binary and the real `plinth-check` program on the
+//!   three original Round STLs, against the committed stage manifest.
+
+mod common;
+mod e2e;
+mod failures;

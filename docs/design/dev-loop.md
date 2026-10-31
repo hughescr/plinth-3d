@@ -348,6 +348,7 @@ Slot rules:
 - **Do not use Claude Code's automatic `isolation: worktree` for Rust work.** It makes a new path every time, which forces a full rebuild (M16).
 - **No seeding.** Never copy, hard-link or pre-seed a build folder. (The first attempt lost 6 days to a stale seed.)
 - **One cargo command at a time per slot.** Run clippy and tests one after the other. A slot does not build while its previous test process still runs.
+- **Test code never runs cargo.** `scripts/t` builds the checker once before nextest starts (L2, L3, and L1 for the acceptance crate or a filtered CLI run) and passes its absolute path in `PLINTH_CHECK_BIN`. Tests that start the checker, or the `plinth` binary with `--checker`, read that variable; without it they fail with "run via scripts/t; PLINTH_CHECK_BIN not set". They never build and never skip.
 - **Disk.** Each slot's build folders are about 2 to 8 GB (estimate from M21). `scripts/slot` warns above 12 GB and runs `cargo sweep --time 7`. Five slots: about 40 GB at most.
 - **rust-analyzer.** If it runs, set `cargo.targetDir = true` in `rust-analyzer.toml` so it builds in `target/rust-analyzer/` and does not take the slot's lock.
 - **Lockfiles.** Only the orchestrator adds dependencies, on main, merged before any task needs them. This avoids lockfile conflicts between slots.
@@ -541,6 +542,7 @@ H8 is a record that ChituBox v1.4.0 opened, showed and sliced the **exact file**
 
 - The CLI takes `--max-threads` (default 8). It builds one Rayon pool and runs each model inside it. No global pool, no nested pools.
 - Work is split into coarse tasks only: ≥ 1,000 items or one layer band per task. (The first attempt measured tiny tasks running 1.9x slower.) Tune on measurement.
+- Orchestrator ruling: Mesh conversion uses scoped std threads under the --max-threads cap instead of a Rayon pool. Accepted for the transport path (no extra dependency). Revisit when contact construction needs work-stealing (step 11).
 - Models run one at a time, each with the full pool.
 - Generation, checking and rendering run one after another. The generator drops its large data before the checker starts.
 

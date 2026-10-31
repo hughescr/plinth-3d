@@ -10,6 +10,7 @@ publish.workspace = true
 doctest = false
 
 [dependencies]
+plinth-geom.workspace = true
 plinth-support.workspace = true
 plinth-chitubox.workspace = true
 

@@ -1,9 +1,13 @@
-//! plinth-emit: support plan to native ChituBox records. Empty skeleton (step 1 of the
-//! build plan).
+//! plinth-emit: mesh and (later) support plan to native ChituBox records.
+//!
+//! Step 7 holds only the transport path: a model, no supports, lifted off the plate. The
+//! result is a diagnostic file, never a print candidate.
 
 pub mod loop_canary;
+pub mod transport;
 
 pub use loop_canary::loop_canary;
+pub use transport::{EmitError, Parallel, TRANSPORT_LABEL, TRANSPORT_LIFT_MM, transport_project};
 
 /// Canary values of this crate and every crate below it, summed. Calling it from
 /// production code makes a canary edit drive the real rebuild chain.

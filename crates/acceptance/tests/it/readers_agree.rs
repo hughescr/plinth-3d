@@ -12,7 +12,6 @@
 use plinth_chitubox::{Project, parse};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 
 /// The one native file that is not a clean ChituBox save (format reference section 14): the
 /// checker reports it as not clean (exit 1) but still prints its numbers.
@@ -22,24 +21,23 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Build the checker from its own workspace (a no-op when up to date) and return its binary.
-fn checker_binary() -> &'static Path {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let dir = repo_root().join("checker");
-        let out = Command::new("cargo")
-            .args(["build", "--locked", "--bin", "plinth-check"])
-            .current_dir(&dir)
-            .env_remove("CARGO_TARGET_DIR")
-            .output()
-            .expect("start cargo for the checker");
-        assert!(
-            out.status.success(),
-            "building the checker failed:\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        dir.join("target/debug/plinth-check")
-    })
+/// The built checker program. The runner (`scripts/t`) builds it once before nextest starts
+/// and passes its absolute path in `PLINTH_CHECK_BIN`. The test never builds it and never
+/// skips: with no path, or a path to nothing, it fails.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test-only read of the checker path set by scripts/t"
+)]
+fn checker_binary() -> PathBuf {
+    let path = std::env::var_os("PLINTH_CHECK_BIN")
+        .map(PathBuf::from)
+        .expect("run via scripts/t; PLINTH_CHECK_BIN not set");
+    assert!(
+        path.is_file(),
+        "PLINTH_CHECK_BIN names a file that is not there: {} (run via scripts/t)",
+        path.display()
+    );
+    path
 }
 
 /// Every `.chitubox` file under `test-data/chitubox-native`, sorted.
