@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "search_tests.rs"]
+mod tests;
+
 use super::{PlanSettings, Proposal, Termination, layout_from_contacts, unavailable};
 use crate::construct::{CandId, ColumnCheck, ContactCandidate, Contacts, PlanBuilder, Quote};
 use crate::load::needs::{NeedPoint, NeedsMap, SiteTag};
@@ -77,6 +81,7 @@ struct Target {
     deadline: f64,
     load: f64,
     anchor: bool,
+    ring: Option<V3>,
 }
 fn covered(t: Target, chosen: &[Chosen], reach: f64, shift: f64) -> bool {
     chosen.iter().any(|x| {
@@ -104,6 +109,7 @@ fn needs_targets(
                 deadline: top - 0.000001,
                 load: 0.,
                 anchor: true,
+                ring: None,
             });
         }
     }
@@ -127,6 +133,7 @@ fn needs_targets(
             deadline: p.xyz[2] + shift + 0.05,
             load: 3.0,
             anchor: false,
+            ring: None,
         };
         if !covered(t, chosen, pitch, shift)
             && !seeds.iter().any(|s| d2(s.xyz, t.xyz) < pitch * pitch)
@@ -147,6 +154,7 @@ fn needs_targets(
                 deadline: p.xyz[2] + shift + 0.05,
                 load: 0.,
                 anchor: false,
+                ring: None,
             };
             if !covered(t, chosen, settings.coverage_reach_mm, shift)
                 && !region
@@ -168,6 +176,7 @@ fn needs_targets(
             deadline: layers.grid.z_top(r.layer),
             load: 0.,
             anchor: false,
+            ring: None,
         };
         if !covered(t, chosen, 2.13, shift) {
             targets.push(t);
@@ -195,24 +204,37 @@ fn load_targets(
         let first = c.first_over.unwrap_or(c.worst_layer);
         for layer in [first, c.worst_layer] {
             let deadline = layers.grid.z_top(layer);
-            for dx in [radius, -radius] {
+            let n = x.site.normal;
+            let length = n[0].hypot(n[1]);
+            let u = if length > 1e-8 {
+                [-n[1] / length, n[0] / length, 0.]
+            } else {
+                [1., 0., 0.]
+            };
+            let v = [
+                n[1] * u[2] - n[2] * u[1],
+                n[2] * u[0] - n[0] * u[2],
+                n[0] * u[1] - n[1] * u[0],
+            ];
+            let delta = [
+                c.tributary_xy[0] - x.site.xyz[0],
+                c.tributary_xy[1] - x.site.xyz[1],
+                deadline - shift - x.site.xyz[2],
+            ];
+            let project = |a: V3| (0..3).map(|k| a[k] * delta[k]).sum::<f64>();
+            let towards = project(v).atan2(project(u));
+            // All sides of the contact, with the most-loaded direction first.
+            // The ring describes search targets, not permission to move the site.
+            for step in [0, 1, -1, 2, -2, 3, -3, 4] {
+                let angle = towards + f64::from(step) * std::f64::consts::FRAC_PI_4;
                 out.push(Target {
-                    xyz: if layer == first {
-                        [
-                            x.site.xyz[0] + dx,
-                            x.site.xyz[1],
-                            (deadline - shift).min(x.site.xyz[2] + radius),
-                        ]
-                    } else {
-                        [
-                            c.tributary_xy[0] + dx,
-                            c.tributary_xy[1],
-                            deadline - shift - 0.025,
-                        ]
-                    },
+                    xyz: std::array::from_fn(|k| {
+                        x.site.xyz[k] + radius * (u[k] * angle.cos() + v[k] * angle.sin())
+                    }),
                     deadline,
                     load: (c.load_mm2 * 0.5).clamp(0.25, 12.0),
                     anchor: false,
+                    ring: Some(x.site.xyz),
                 });
             }
         }
@@ -226,6 +248,8 @@ struct Cache {
     available: Vec<Chosen>,
     rejected: BTreeMap<String, u64>,
     blocked: BTreeSet<[u32; 3]>,
+    load_envelope: BTreeMap<[u32; 3], f64>,
+    pairs: BTreeMap<(CandId, CandId), bool>,
 }
 impl Cache {
     fn near(
@@ -243,6 +267,9 @@ impl Cache {
                     .copied()
                     .filter(|p| {
                         p.xyz[2] + shift < target.deadline
+                            && target
+                                .ring
+                                .is_none_or(|centre| (1.0..=6.25).contains(&d2(centre, p.xyz)))
                             && (!target.anchor || p.xyz[2] + shift >= target.deadline - 0.05)
                             && chosen
                                 .iter()
@@ -304,7 +331,7 @@ impl Cache {
                 let neck = proposed;
                 {
                     for fan in [20., 0.] {
-                        let cand = candidate(self.next_id, &p, neck, fan, load.max(12.0));
+                        let cand = candidate(self.next_id, &p, neck, fan, load);
                         let key = site_key(p.xyz)
                             .into_iter()
                             .chain(
@@ -320,13 +347,13 @@ impl Cache {
                                     .map(f32::to_bits),
                             )
                             .collect();
-                        if alternatives.len() >= 96 || !self.seen.insert(key) {
+                        if alternatives.len() >= 384 || !self.seen.insert(key) {
                             continue;
                         }
                         alternatives.push(cand);
                         self.next_id += 1;
                         sampled.push(p);
-                        sample_loads.push(load.max(12.0));
+                        sample_loads.push(load);
                     }
                 }
                 if alternatives.len() > before {
@@ -345,7 +372,6 @@ impl Cache {
             .collect();
         let columns = builder.probe_column_alternatives(&valid, &loads);
         let mut columns = columns.into_iter();
-        let mut column_rejects = Vec::new();
         for (((candidate, site), _load), answer) in alternatives
             .into_iter()
             .zip(sampled)
@@ -356,7 +382,6 @@ impl Cache {
                 columns
                     .next()
                     .expect("one column per valid quote")
-                    .inspect_err(|_| column_rejects.push(site_key(candidate.site.map(f64::from))))
                     .map(|column| (quote, column))
             });
             match answer {
@@ -380,16 +405,6 @@ impl Cache {
                 }
             }
         }
-        for site in column_rejects {
-            if !self
-                .available
-                .iter()
-                .chain(chosen)
-                .any(|q| site_key(q.candidate.site.map(f64::from)) == site)
-            {
-                self.blocked.insert(site);
-            }
-        }
         task_sites
     }
     // Selection changes tributaries. Size private joints/columns from that new
@@ -398,35 +413,54 @@ impl Cache {
     fn size_columns(
         &mut self,
         builder: &PlanBuilder<Contacts>,
-        chosen: &mut Vec<Chosen>,
+        chosen: &mut [Chosen],
         loads: &[f64],
     ) {
         let mut candidates = Vec::new();
-        let mut sites = Vec::new();
+        let mut owners = Vec::new();
         let mut estimates = Vec::new();
-        let old = std::mem::take(chosen);
-        for (mut c, &load) in old.into_iter().zip(loads) {
-            if c.quote.contact().column_radius(load) <= c.candidate.joint_r / 1.04 {
-                chosen.push(c);
+        for (owner, (c, &load)) in chosen.iter().zip(loads).enumerate() {
+            let envelope = self.load_envelope.entry(site_key(c.site.xyz)).or_default();
+            *envelope = envelope.max(load);
+            if c.quote.contact().required_column_radius(*envelope) <= c.candidate.joint_r / 1.04 {
                 continue;
             }
-            // Reserve for the larger head's self-peel; the exact new load is
-            // replayed at route admission. This reserve is a search value [S].
-            let estimate = load * 1.1 + 1.0;
-            c.candidate.id = CandId(self.next_id);
-            self.next_id += 1;
+            // Conservative max-over-rounds input; no removal can make an earlier
+            // sizing certificate shrink. A failed resize keeps the contact and
+            // its load target, rather than banning a perfectly usable site.
+            let estimate = *envelope * 1.1 + 1.0;
             let radius = ((estimate / 12.0 / 3.0615).sqrt() as f32)
                 .next_up()
                 .max(0.25);
-            c.candidate.joint_r = 1.04 * radius.max(1.5 * c.candidate.neck);
-            c.candidate.head_len = (2.6 - c.candidate.joint_r - c.candidate.standoff).max(1.5);
-            // A larger joint may need a less vertical departure to keep the
-            // neighbouring sheet gap. Re-probe the normal direction; do not
-            // reuse the smaller head's departure certificate.
-            c.candidate.axis = axis(c.site.normal, 0.0);
-            candidates.push(c.candidate);
-            sites.push(c.site);
-            estimates.push(estimate);
+            for fan in [35., 30., 25., 20., 15., 10., 5., 0.] {
+                for reach in [2.6, 2.8, 2.94] {
+                    let mut cand = c.candidate;
+                    cand.id = CandId(self.next_id);
+                    self.next_id += 1;
+                    cand.joint_r = 1.04 * radius.max(1.5 * cand.neck);
+                    cand.head_len = (reach - cand.joint_r - cand.standoff).max(1.5);
+                    cand.axis = axis(c.site.normal, fan);
+                    let key = cand
+                        .site
+                        .into_iter()
+                        .chain(cand.axis)
+                        .chain([
+                            cand.ball_r,
+                            cand.standoff,
+                            cand.neck,
+                            cand.joint_r,
+                            cand.head_len,
+                        ])
+                        .map(f32::to_bits)
+                        .collect();
+                    if !self.seen.insert(key) {
+                        continue;
+                    }
+                    candidates.push(cand);
+                    owners.push(owner);
+                    estimates.push(estimate);
+                }
+            }
         }
         let mut answers = Vec::new();
         builder.probe_alternatives(&candidates, &mut answers);
@@ -439,12 +473,8 @@ impl Cache {
         let mut columns = builder
             .probe_column_alternatives(&valid, &loads)
             .into_iter();
-        for (((candidate, site), _load), answer) in candidates
-            .into_iter()
-            .zip(sites)
-            .zip(estimates)
-            .zip(answers)
-        {
+        let mut resized = BTreeSet::new();
+        for ((candidate, owner), answer) in candidates.into_iter().zip(owners).zip(answers) {
             let answer = answer.and_then(|quote| {
                 columns
                     .next()
@@ -452,15 +482,35 @@ impl Cache {
                     .map(|column| (quote, column))
             });
             match answer {
-                Ok((quote, column)) => chosen.push(Chosen {
-                    candidate,
-                    site,
-                    quote,
-                    column,
-                }),
+                Ok((quote, column))
+                    if !resized.contains(&owner)
+                        && chosen.iter().enumerate().all(|(i, c)| {
+                            i == owner
+                                || (quote.compatible(&c.quote) && column.compatible(&c.column))
+                        }) =>
+                {
+                    let site = chosen[owner].site;
+                    chosen[owner] = Chosen {
+                        candidate,
+                        site,
+                        quote,
+                        column,
+                    };
+                    resized.insert(owner);
+                }
                 Err(e) => {
-                    self.blocked.insert(site_key(candidate.site.map(f64::from)));
                     *self.rejected.entry(format!("sizing {e:?}")).or_default() += 1;
+                }
+                Ok((quote, column)) => {
+                    // Keep measured alternatives for later rounds; a changed
+                    // neighbour can remove a pair conflict without re-measuring
+                    // this immutable head against the same model.
+                    self.available.push(Chosen {
+                        candidate,
+                        quote,
+                        column,
+                        site: chosen[owner].site,
+                    });
                 }
             }
         }
@@ -471,8 +521,10 @@ impl Cache {
         near: Vec<Vec<NeedPoint>>,
         chosen: &mut Vec<Chosen>,
     ) {
-        self.available.append(chosen);
-        for ((target, _), near) in tasks.into_iter().zip(near) {
+        for ((target, old), near) in tasks.into_iter().zip(near) {
+            let replacing =
+                old.and_then(|p| chosen.iter().position(|c| d2(c.site.xyz, p.xyz) < 1e-12));
+            let pairs = &mut self.pairs;
             let mut opts: Vec<_> = self
                 .available
                 .iter()
@@ -482,11 +534,21 @@ impl Cache {
                         && !self
                             .blocked
                             .contains(&site_key(q.candidate.site.map(f64::from)))
-                        && q.quote.contact().column_radius(target.load) <= q.column.radius()
-                        && q.quote.contact().column_radius(target.load)
+                        && q.quote.contact().required_column_radius(target.load)
+                            <= q.column.radius()
+                        && q.quote.contact().required_column_radius(target.load)
                             <= q.candidate.joint_r / 1.04
-                        && chosen.iter().all(|c| {
-                            separated(&q.quote, &c.quote) && q.column.compatible(&c.column)
+                        && chosen.iter().enumerate().all(|(i, c)| {
+                            Some(i) == replacing
+                                || *pairs
+                                    .entry((
+                                        q.candidate.id.min(c.candidate.id),
+                                        q.candidate.id.max(c.candidate.id),
+                                    ))
+                                    .or_insert_with(|| {
+                                        separated(&q.quote, &c.quote)
+                                            && q.column.compatible(&c.column)
+                                    })
                         })
                 })
                 .map(|(i, _)| i)
@@ -508,7 +570,13 @@ impl Cache {
                 })
             });
             if let Some(&i) = opts.first() {
-                chosen.push(self.available.swap_remove(i));
+                let replacement = self.available.swap_remove(i);
+                if let Some(at) = replacing {
+                    let old = std::mem::replace(&mut chosen[at], replacement);
+                    self.available.push(old);
+                } else {
+                    chosen.push(replacement);
+                }
             }
         }
     }
@@ -550,12 +618,16 @@ pub(super) fn run(
             .iter()
             .zip(&sizing_loads)
             .map(|(x, &load)| {
+                let envelope = cache.load_envelope.entry(site_key(x.site.xyz)).or_default();
+                *envelope = envelope.max(load);
+                let load = *envelope;
                 (
                     Target {
                         xyz: x.site.xyz,
                         deadline: f64::INFINITY,
                         load,
                         anchor: false,
+                        ring: None,
                     },
                     Some(x.site),
                 )
@@ -578,19 +650,11 @@ pub(super) fn run(
         pending = load_targets(&selected, &chosen, 1.9, layers, shift);
         cache.size_columns(builder, &mut chosen, &super::routing_loads(&selected));
         let layout = view(&chosen, layers, shift);
-        let detail = load::analyse_full(
-            &layers.stack,
-            &layout,
-            &load::Extras {
-                structure: Some(&layers.structure),
-                needs: Some(needs),
-            },
-        );
-        let refs: Vec<_> = chosen.iter().map(|c| &c.quote).collect();
-        let loads = super::routing_loads(&detail);
-        let routing = builder.preview_routing_located(&refs, &loads);
-        if routing.is_ok()
-            && needs_targets(layers, sites, &chosen, settings, shift).is_empty()
+        let detail = load::analyse_full(&layers.stack, &layout, &load::Extras::default());
+        // Selected heads/columns already carry pair and model certificates.
+        // Braces are optional admitted alternatives. Replay the full route once
+        // at the end, not eight times with transient tributary assignments.
+        if needs_targets(layers, sites, &chosen, settings, shift).is_empty()
             && !chosen.is_empty()
             && detail.contacts.iter().all(|c| c.ratio <= 12.0)
             && detail
@@ -602,51 +666,56 @@ pub(super) fn run(
             termination = Termination::Satisfied;
             break;
         }
-        if let Err(failure) = routing {
-            *cache
-                .rejected
-                .entry(format!("route {:?}", failure.reject))
-                .or_default() += 1;
-            // A route rejection is feedback, not an after-the-budget surprise.
-            // Keep the last round's rejected layout for an honest diagnostic.
-            if round + 1 < settings.max_rounds.min(8) {
-                for c in &chosen {
-                    if failure.candidates.contains(&c.candidate.id) {
-                        cache
-                            .blocked
-                            .insert(site_key(c.candidate.site.map(f64::from)));
-                    }
-                }
-                chosen.retain(|c| {
-                    !cache
-                        .blocked
-                        .contains(&site_key(c.candidate.site.map(f64::from)))
-                });
-            }
-        }
         // No changed==false exit: all eight rounds can open fresh sites.
         termination = Termination::SearchBudgetExhausted;
     }
-    finish(builder, layers, shift, chosen, cache, termination)
+    finish(builder, layers, needs, shift, chosen, (cache, termination))
 }
 
 fn finish(
     builder: &PlanBuilder<Contacts>,
     layers: &ModelLayers,
+    needs: &NeedsMap,
     shift: f64,
     mut chosen: Vec<Chosen>,
-    cache: Cache,
-    mut termination: Termination,
+    state: (Cache, Termination),
 ) -> Proposal {
+    let (cache, mut termination) = state;
     chosen.sort_by_key(|c| c.candidate.id);
     let layout = view(&chosen, layers, shift);
     let detail = load::analyse_full(&layers.stack, &layout, &load::Extras::default());
     let refs: Vec<_> = chosen.iter().map(|c| &c.quote).collect();
     let loads = super::routing_loads(&detail);
-    let routing = builder.preview_routing(&refs, &loads);
-    let routing_blocker = routing.as_ref().err().map(|e| format!("{e:?}"));
-    if routing.is_err() && termination == Termination::Satisfied {
-        termination = Termination::SearchBudgetExhausted;
+    let routing = builder.preview_plan(&refs, &loads);
+    let routing_blocker = routing.as_ref().err().map(|e| format!("{:?}", e.reject));
+    let mut full_layout = layout.clone();
+    if let Ok(plan) = &routing {
+        super::add_members(plan, &mut full_layout);
+    }
+    let detail = load::analyse_full(
+        &layers.stack,
+        &full_layout,
+        &load::Extras {
+            structure: Some(&layers.structure),
+            needs: Some(needs),
+        },
+    );
+    if routing.is_err() {
+        termination = Termination::RouteFailed;
+    } else if termination == Termination::Satisfied
+        && (detail.contacts.iter().any(|c| c.ratio > 12.0)
+            || !layers.structure.needs_anchor().into_iter().all(|island| {
+                chosen.iter().any(|c| {
+                    let z = c.site.xyz[2] + shift;
+                    z >= layers.grid.z_bottom(island.first_layer) - 1e-8
+                        && z < layers.grid.z_top(island.first_layer)
+                        && (c.site.xyz[0] - island.first_xy[0])
+                            .hypot(c.site.xyz[1] - island.first_xy[1])
+                            < 0.5
+                })
+            }))
+    {
+        termination = Termination::FinalReplayUnsatisfied;
     }
     let load = detail.report;
     Proposal {

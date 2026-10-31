@@ -189,13 +189,21 @@ impl Contact {
             parts: self.parts.iter().map(NativePart::copy_exact).collect(),
         }
     }
-    /// Load-sized column radius, rounded upward; never an admitted resize.
-    pub fn column_radius(&self, load: f64) -> f32 {
+    /// Desired load-sized radius for private resizing, rounded upward.
+    pub fn required_column_radius(&self, load: f64) -> f32 {
         let r = f64::from(self.joint_radius / 1.04)
             .max((load / 12.0 / 3.0615).sqrt())
             .max(0.25);
         let f = r as f32;
         if f64::from(f) < r { f.next_up() } else { f }
+    }
+    /// Fixed column admitted by this head. A load that exceeds the available
+    /// joint is a capacity miss, not a broken join. Private planning first tries
+    /// larger heads and neighbours; §5.4's capped fallback retains the legal
+    /// geometry and the final load replay reports its located overload.
+    pub fn column_radius(&self, load: f64) -> f32 {
+        self.required_column_radius(load)
+            .min(self.joint_radius / 1.04)
     }
     /// Candidate identity.
     pub fn candidate_id(&self) -> CandId {
@@ -275,6 +283,7 @@ pub struct Routed;
 pub struct PlanBuilder<S> {
     id: u64,
     rev: u64,
+    patch_cache: contact::PatchCache,
     workers: usize,
     model: PosedModel,
     limits: Limits,
@@ -314,6 +323,7 @@ impl PlanBuilder<Contacts> {
         Self {
             id: NEXT_PLAN.fetch_add(1, Ordering::Relaxed),
             rev: 0,
+            patch_cache: std::sync::Mutex::default(),
             workers: 1,
             model,
             limits,
@@ -402,6 +412,14 @@ impl PlanBuilder<Contacts> {
         quotes: &[&Quote],
         loads: &[f64],
     ) -> Result<(), RoutingFailure> {
+        self.preview_plan(quotes, loads).map(|_| ())
+    }
+    /// Exact private frozen route for the final load replay, with no real commit.
+    pub fn preview_plan(
+        &self,
+        quotes: &[&Quote],
+        loads: &[f64],
+    ) -> Result<SupportPlan, RoutingFailure> {
         let failure = |reject, candidates| RoutingFailure { reject, candidates };
         if quotes.len() != loads.len()
             || quotes
@@ -494,6 +512,7 @@ impl PlanBuilder<Contacts> {
         PlanBuilder {
             id: self.id,
             rev: self.rev,
+            patch_cache: self.patch_cache,
             workers: self.workers,
             model: self.model,
             limits: self.limits,
@@ -511,12 +530,17 @@ impl PlanBuilder<Contacts> {
 /// Frozen immutable construction result, not evidence of print eligibility.
 #[derive(Debug)]
 pub struct SupportPlan {
+    unbraced: Vec<u32>,
     model: PosedModel,
     parts: Vec<NativePart>,
     contacts: Vec<Contact>,
     process: ProcessRecord,
 }
 impl SupportPlan {
+    /// Long columns without an admitted X-pair, indexed by contact for pictures.
+    pub fn unbraced_columns(&self) -> &[u32] {
+        &self.unbraced
+    }
     /// Exact checked record geometry.
     pub fn parts(&self) -> &[NativePart] {
         &self.parts

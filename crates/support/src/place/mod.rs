@@ -11,7 +11,7 @@ use crate::load::needs::{self, NeedsMap, RestPose, SiteTag};
 use crate::load::{self, LayerStack, LayoutView, LoadReport, ModelLayers};
 use plinth_geom::Bvh;
 
-pub use layout::layout_from_contacts;
+pub use layout::{add_members, layout_from_contacts};
 
 /// Largest modelled load through any fixed section of each chain, across ALL
 /// layers. ContactLoad::load_mm2 is only the load at the worst RATIO (often an
@@ -55,6 +55,11 @@ pub enum Termination {
     Satisfied,
     /// Samples or rounds exhausted; does not prove impossibility.
     SearchBudgetExhausted,
+    /// The final exact route replay failed; not a search-completeness claim.
+    RouteFailed,
+    /// Search stopped early but the complete final replay still has a load or
+    /// anchor miss. The search budget was not exhausted.
+    FinalReplayUnsatisfied,
     /// Reserved for a complete geometric impossibility proof, never sampling.
     ProvedNoLegalAnchor,
     /// Invalid or unavailable inputs prevented planning.
@@ -155,15 +160,6 @@ pub fn plan_contacts(
     }
     let mut result = search::run(builder, layers, &sites.points, &needs, settings, shift);
     result.needs = needs;
-    result.load = load::analyse_full(
-        &layers.stack,
-        &result.layout,
-        &load::Extras {
-            structure: Some(&layers.structure),
-            needs: Some(&result.needs),
-        },
-    )
-    .report;
     result
 }
 

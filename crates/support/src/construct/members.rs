@@ -2,6 +2,9 @@ use super::native::{ENVELOPE, distance, dot, norm, sub};
 use super::*;
 use plinth_geom::{Bvh, clearance};
 
+#[path = "bracing.rs"]
+mod bracing;
+
 /// Member handle, scoped to a plan. Columns are carriers; braces are not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemberId {
@@ -98,15 +101,6 @@ impl ColumnCheck {
     }
     /// Exact pair guards reused by final routing; no model query in this hot path.
     pub fn compatible(&self, other: &Self) -> bool {
-        if let (Some(a), Some(b)) = (&self.quote.column, &other.quote.column)
-            && (f64::from(a.top[2] - a.bottom[2]) > crate::route::BRACE_FREE_LENGTH_MM
-                || f64::from(b.top[2] - b.bottom[2]) > crate::route::BRACE_FREE_LENGTH_MM)
-            && xy_distance(a, b) < 4.0
-        {
-            // A 45-degree X has node separation equal to this horizontal span.
-            // No long column can have a nearer neighbour than the 4 mm nodes.
-            return false;
-        }
         for (column, head) in [(&self.quote, &other.head), (&other.quote, &self.head)] {
             for p in &column.parts {
                 for h in &head.parts {
@@ -236,30 +230,8 @@ pub struct RaftId {
 }
 
 impl PlanBuilder<Routed> {
-    pub(super) fn finish_preview(mut self) -> Result<(), RoutingFailure> {
+    pub(super) fn finish_preview(mut self) -> Result<SupportPlan, RoutingFailure> {
         let failure = |reject, candidates| RoutingFailure { reject, candidates };
-        let mut blocked = Vec::new();
-        for (i, c) in self.columns.iter().enumerate() {
-            if f64::from(c.top[2] - c.bottom[2]) <= crate::route::BRACE_FREE_LENGTH_MM {
-                continue;
-            }
-            let nearest = self
-                .columns
-                .iter()
-                .enumerate()
-                .filter(|(j, _)| *j != i)
-                .min_by(|(_, a), (_, b)| xy_distance(c, a).total_cmp(&xy_distance(c, b)));
-            if nearest.is_none_or(|(_, other)| {
-                let d = xy_distance(c, other);
-                !(4.0..=15.0).contains(&d)
-                    || self.model.plate + 4.2 + d as f32 > c.top[2].min(other.top[2])
-            }) {
-                blocked.push(self.contacts[c.contact].cand);
-            }
-        }
-        if !blocked.is_empty() {
-            return Err(failure(Reject::PrintOrder { layer: 0 }, blocked));
-        }
         let braces = self.brace_proposals().map_err(|e| failure(e, Vec::new()))?;
         let mut out = Vec::new();
         self.probe_members(&braces, &mut out);
@@ -285,9 +257,7 @@ impl PlanBuilder<Routed> {
         )
         .map_err(|e| failure(e, Vec::new()))?;
         self.raft_connected().map_err(|e| failure(e, Vec::new()))?;
-        self.freeze()
-            .map(|_| ())
-            .map_err(|e| failure(e, Vec::new()))
+        self.freeze().map_err(|e| failure(e, Vec::new()))
     }
     /// Probe fixed-size members against the model in one kernel batch, then keep
     /// every admitted head's reservation. Earlier columns may carry braces, but a
@@ -297,17 +267,38 @@ impl PlanBuilder<Routed> {
         proposals: &[MemberProposal],
         out: &mut Vec<Result<MemberQuote, Reject>>,
     ) {
+        self.measure_members(proposals, out, false);
+    }
+    fn measure_members(
+        &self,
+        proposals: &[MemberProposal],
+        out: &mut Vec<Result<MemberQuote, Reject>>,
+        alternatives: bool,
+    ) {
         out.clear();
         if self.raft || proposals.len() > 8192 {
             out.extend(proposals.iter().map(|_| Err(Reject::ResourceExhausted)));
             return;
         }
-        let mut prepared: Vec<_> = proposals.iter().map(|p| self.prepare_member(*p)).collect();
+        let mut prepared: Vec<_> = proposals
+            .iter()
+            .map(|p| {
+                let q = self.prepare_member(*p)?;
+                if alternatives {
+                    // Cheap solid/solid guards before expensive model measurements.
+                    self.keep_heads(&q)?;
+                    for (part, &role) in self.members.iter().zip(&self.member_roles) {
+                        keep_member(&q, part, role, self.limits.gap)?;
+                    }
+                }
+                Ok(q)
+            })
+            .collect();
         let braces: Vec<_> = prepared
             .iter()
             .filter_map(|q| q.as_ref().ok().and_then(|q| q.brace))
             .collect();
-        if let Err(e) = self.check_node_spacing(&braces) {
+        if !alternatives && let Err(e) = self.check_node_spacing(&braces) {
             // Member batches are committed atomically. Conservatively refuse all
             // proposed braces in an invalid node layout, but keep column results.
             for q in &mut prepared {
@@ -357,7 +348,7 @@ impl PlanBuilder<Routed> {
                     break;
                 }
             }
-            for (j, other) in out[..i].iter().enumerate() {
+            for (j, other) in out[..i].iter().enumerate().filter(|_| !alternatives) {
                 let Ok(other) = other else {
                     continue;
                 };
@@ -456,7 +447,7 @@ impl PlanBuilder<Routed> {
                 let xy = ((f64::from(start[0] - end[0])).powi(2)
                     + (f64::from(start[1] - end[1])).powi(2))
                 .sqrt();
-                if xy > 15.0
+                if !(4.0..=15.0).contains(&xy)
                     || (f64::from(from_z - to_z).abs() - xy).abs() > 0.001
                     || from_z < self.model.plate + 4.2
                     || to_z < self.model.plate + 4.2
@@ -656,90 +647,31 @@ impl PlanBuilder<Routed> {
                     .any(|(x, y)| (x - hi).abs() < 1e-5 && (y - lo).abs() < 1e-5)
         })
     }
-    /// Propose the owner's 45° X-pair to each long column's nearest carrier.
-    /// Insufficient vertical room is a rejection, not permission to change the rule.
+    /// Measure all 4–15 mm partners in batches, nearest first. Reserve node
+    /// heights on BOTH columns. A rejected pair tries higher nodes and then the
+    /// next partner; no admissible pair leaves an unbraced warning, not a failed
+    /// route or a blocked contact site.
     pub fn brace_proposals(&self) -> Result<Vec<MemberProposal>, Reject> {
-        let mut pairs = std::collections::BTreeSet::new();
-        for (i, c) in self.columns.iter().enumerate() {
-            if f64::from(c.top[2] - c.bottom[2]) <= crate::route::BRACE_FREE_LENGTH_MM {
-                continue;
-            }
-            let (j, other) = self
-                .columns
-                .iter()
-                .enumerate()
-                .filter(|(j, _)| *j != i)
-                .min_by(|(_, a), (_, b)| {
-                    xy_distance(c, a)
-                        .total_cmp(&xy_distance(c, b))
-                        .then(a.contact.cmp(&b.contact))
-                })
-                .ok_or(Reject::PrintOrder { layer: 0 })?;
-            let distance = xy_distance(c, other);
-            if !(4.0..=15.0).contains(&distance) {
-                return Err(Reject::PrintOrder { layer: 0 });
-            }
-            pairs.insert((i.min(j), i.max(j)));
-        }
-        let mut proposals = Vec::new();
-        for (a, b) in pairs {
-            let from = &self.columns[a];
-            let to = &self.columns[b];
-            let lo = self.model.plate + 4.2;
-            let hi = lo + xy_distance(from, to) as f32;
-            if hi > from.top[2].min(to.top[2]) {
-                return Err(Reject::PrintOrder { layer: 0 });
-            }
-            let section = Section::new(0.25)?;
-            let from = MemberId {
-                plan: self.id,
-                ix: from.member,
-            };
-            let to = MemberId {
-                plan: self.id,
-                ix: to.member,
-            };
-            proposals.push(MemberProposal::Brace {
-                from,
-                to,
-                from_z: lo,
-                to_z: hi,
-                section,
-            });
-            proposals.push(MemberProposal::Brace {
-                from,
-                to,
-                from_z: hi,
-                to_z: lo,
-                section,
-            });
-        }
-        Ok(proposals)
+        bracing::schedule(self)
     }
-    /// Freeze only a complete rooted fixed-size layout. Long unbraced columns are
-    /// not silently accepted: bracing completion is currently a caller obligation
-    /// checked here by the presence of a brace at every long column.
+    /// Freeze a rooted fixed-size layout. Unbraced long columns remain explicit
+    /// diagnostics in the frozen plan; they do not invalidate geometric admission.
     pub fn freeze(self) -> Result<SupportPlan, IncompletePlan> {
         if !self.raft || self.columns.len() != self.contacts.len() {
             return Err(Reject::NotBuilt);
         }
-        for c in &self.columns {
-            if f64::from(c.top[2] - c.bottom[2]) > crate::route::BRACE_FREE_LENGTH_MM {
-                let nearest = self
-                    .columns
-                    .iter()
-                    .filter(|other| other.contact != c.contact)
-                    .min_by(|a, b| {
-                        xy_distance(c, a)
-                            .total_cmp(&xy_distance(c, b))
-                            .then(a.contact.cmp(&b.contact))
-                    })
-                    .ok_or(Reject::PrintOrder { layer: 0 })?;
-                if xy_distance(c, nearest) > 15.0 || !self.has_x_pair(c.contact, nearest.contact) {
-                    return Err(Reject::PrintOrder { layer: 0 });
-                }
-            }
-        }
+        let unbraced = self
+            .columns
+            .iter()
+            .filter(|c| {
+                f64::from(c.top[2] - c.bottom[2]) > crate::route::BRACE_FREE_LENGTH_MM
+                    && !self
+                        .columns
+                        .iter()
+                        .any(|other| self.has_x_pair(c.contact, other.contact))
+            })
+            .map(|c| c.contact as u32)
+            .collect();
         let mut parts = Vec::new();
         for c in &self.contacts {
             // Rebuild-free transfer of the exact checked meshes into the frozen plan.
@@ -754,6 +686,7 @@ impl PlanBuilder<Routed> {
             parts,
             contacts: self.contacts,
             process: self.process,
+            unbraced,
         })
     }
 }

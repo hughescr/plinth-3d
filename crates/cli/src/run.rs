@@ -122,51 +122,7 @@ pub fn collect_report_data(
     proposal: place::Proposal,
 ) -> rd::ReportData {
     let mut layout = proposal.layout;
-    let shift = -f64::from(plan.model().plate_z());
-    // Exact final member fields, including each brace's own peel on its earlier
-    // carrier. No model load is assigned to braces.
-    for (record, part) in plan
-        .parts()
-        .iter()
-        .enumerate()
-        .skip(plan.contacts().len() * 3)
-    {
-        let c::PartFields::Frustum { start, end, r1, r2 } = part.fields() else {
-            continue;
-        };
-        let vertical = (start[0] - end[0]).abs() < 1e-6 && (start[1] - end[1]).abs() < 1e-6;
-        let kind = if part.kind() == c::PartKind::BaseFlare {
-            load::PartKind::Flare
-        } else if vertical {
-            load::PartKind::Column
-        } else {
-            load::PartKind::Brace
-        };
-        let low = if start[2] < end[2] { start } else { end };
-        let owner = plan.contacts().iter().position(|c| {
-            let j = c.joint();
-            (j[0] - low[0]).abs() < 1e-5 && (j[1] - low[1]).abs() < 1e-5
-        });
-        let Some(owner) = owner else { continue };
-        let area = 8. * f64::from(r1.min(r2)).powi(2) * (std::f64::consts::PI / 8.).sin();
-        let section = load::PartSection {
-            kind,
-            record: Some(record as u32),
-            area_lower_mm2: area,
-            z_range_mm: [
-                f64::from(start[2].min(end[2])) + shift,
-                f64::from(start[2].max(end[2])) + shift,
-            ],
-        };
-        if kind == load::PartKind::Brace {
-            layout.chains.push(load::PartChain {
-                contact: owner as u32,
-                parts: vec![section],
-            });
-        } else {
-            layout.chains[owner].parts.push(section);
-        }
-    }
+    place::add_members(plan, &mut layout);
     let ld = rd::LoadData::build(&layers.stack, layout, layers.structure, proposal.needs);
     let mut data = rd::ReportData {
         process: rd::ProcessValues {
@@ -186,9 +142,18 @@ pub fn collect_report_data(
         data.supports.contacts.add(c.site_class);
     }
     data.warnings = ld.detail.report.warnings.clone();
+    for &contact in plan.unbraced_columns() {
+        data.warnings.push(load::LoadWarning {
+            class: load::WarningClass::Intervention,
+            kind: "unbraced column".into(),
+            layers: vec![ld.layout.contacts[contact as usize].first_layer],
+            contacts: vec![contact],
+            message: format!("Column at contact {contact} has no admitted 45-degree X-pair to a carrier 4–15 mm away. Add bracing at this picture marker; stability is unassessed."),
+        });
+    }
     if proposal.termination != place::Termination::Satisfied {
         data.warnings.push(load::LoadWarning { class:load::WarningClass::Intervention,
-            kind:"construction search budget".into(), layers:vec![], contacts:vec![],
+            kind:"construction plan unresolved".into(), layers:vec![], contacts:vec![],
             message:format!("Search ended {:?}; unresolved needs remain. This is not a proof that no legal site exists.",proposal.termination) });
     }
     let partial: Vec<_> = ld
@@ -230,7 +195,8 @@ pub fn candidate_allowed(requested: bool, checked: &Checked, planning_blockers: 
                 .iter()
                 .filter(|r| {
                     r.id == format!("H{i}")
-                        && matches!(r.status.as_str(), "pass" | "not_applicable")
+                        && (r.status == "pass"
+                            || (i == 5 && r.status == "not_applicable" && r.not_applicable_proved))
                 })
                 .count()
                 == 1

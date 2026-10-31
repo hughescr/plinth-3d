@@ -193,16 +193,34 @@ fn patch_and_joint_build_boundaries_and_forged_batch_sabotage() {
 }
 
 #[test]
-fn column_probe_uses_load_and_needs_a_containing_joint() {
+fn capped_column_keeps_its_joint_and_exposes_a_capacity_miss() {
     let p = builder(&plate());
     let mut c = candidate(0, 0.);
     let small = quotes(&p, &[c]);
     let small = vec![small[0].as_ref().unwrap()];
     assert!(p.probe_column_alternatives(&small, &[0.0])[0].is_ok());
-    assert!(matches!(
-        p.probe_column_alternatives(&small, &[20.0])[0],
-        Err(Reject::NarrowJoin)
-    ));
+    let capped = p
+        .probe_column_alternatives(&small, &[20.0])
+        .remove(0)
+        .unwrap();
+    assert!(capped.radius() < small[0].contact().required_column_radius(20.0));
+    assert!(capped.radius() <= small[0].contact().joint_radius() / 1.04);
+    // The complete final replay must see the fixed narrow column, not a desired
+    // load-sized section that was never built.
+    let plan = p.preview_plan(&small, &[20.0]).unwrap();
+    let mut layout = crate::place::layout_from_contacts(
+        &[small[0].contact()],
+        &[],
+        &crate::load::LayerStack::default(),
+        -f64::from(plan.model().plate_z()),
+    );
+    crate::place::add_members(&plan, &mut layout);
+    let column = layout.chains[0]
+        .parts
+        .iter()
+        .find(|s| s.kind == crate::load::PartKind::Column)
+        .unwrap();
+    assert!(20.0 / column.area_lower_mm2 > 12.0);
     c.joint_r = 0.9;
     c.head_len = 1.8;
     let large = quotes(&p, &[c]);
@@ -865,7 +883,8 @@ fn rooted_braces_crossing_a_v_bottom_hit_member_gap_rejection() {
         .unwrap();
     let mut p = p.into_routing();
     let columns: Vec<_> = contacts
-        .into_iter()
+        .iter()
+        .copied()
         .map(|contact| MemberProposal::Column {
             contact,
             section: Section::new(0.25).unwrap(),
@@ -873,10 +892,26 @@ fn rooted_braces_crossing_a_v_bottom_hit_member_gap_rejection() {
         .collect();
     let mut out = Vec::new();
     p.probe_members(&columns, &mut out);
-    p.commit_members(MemberQuoteBatch::from_results(out).unwrap())
+    let ids = p
+        .commit_members(MemberQuoteBatch::from_results(out).unwrap())
         .unwrap();
-    let braces = p.brace_proposals().unwrap();
-    assert_eq!(braces.len(), 2);
+    // Automatic scheduling refuses the obstructed partner instead of failing
+    // the contact route. The explicit public API still rejects the bad pair.
+    assert!(p.brace_proposals().unwrap().is_empty());
+    let lo = p.model.plate + 4.2;
+    let a = p.get(contacts[0]).unwrap().joint();
+    let b = p.get(contacts[1]).unwrap().joint();
+    let hi = lo + (a[0] - b[0]).hypot(a[1] - b[1]);
+    let braces: Vec<_> = [(lo, hi), (hi, lo)]
+        .into_iter()
+        .map(|(from_z, to_z)| MemberProposal::Brace {
+            from: ids[0],
+            to: ids[1],
+            from_z,
+            to_z,
+            section: Section::new(0.25).unwrap(),
+        })
+        .collect();
     let before = (p.rev(), p.members.len());
     let mut out = Vec::new();
     p.probe_members(&braces, &mut out);

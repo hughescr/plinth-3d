@@ -861,6 +861,7 @@ mod tests {
                 id: "H1".into(),
                 status: "unverified".into(),
                 reason: "later".into(),
+                not_applicable_proved: false,
             }],
             structure_notes: vec![],
         };

@@ -12,6 +12,49 @@ use plinth_geom::{
 // NOT the checker's wider validation domain. Compare native f32 fields directly.
 const MAX_TIP_BALL_R: f32 = 0.42;
 
+#[cfg(test)]
+#[path = "probe_batch_tests.rs"]
+mod probe_batch_tests;
+
+type PatchArea = Measure<patch::AreaBounds>;
+pub(super) type PatchCache =
+    std::sync::Mutex<std::collections::BTreeMap<[u64; 4], (PatchArea, usize)>>;
+struct PatchBatch {
+    areas: Vec<PatchArea>,
+    components: Vec<usize>,
+}
+
+fn cached_patches(plan: &PlanBuilder<Contacts>, bvh: &Bvh<'_>, balls: &[Ball]) -> PatchBatch {
+    // Fan/length alternatives share canonical enclosing/contained measurement
+    // spheres. The immutable model and the full bit key bind every cache entry.
+    let key = |b: &Ball| {
+        [
+            b.centre[0].to_bits(),
+            b.centre[1].to_bits(),
+            b.centre[2].to_bits(),
+            b.radius.to_bits(),
+        ]
+    };
+    let mut cache = plan.patch_cache.lock().expect("patch cache poisoned");
+    let missing: std::collections::BTreeMap<_, _> = balls
+        .iter()
+        .filter(|b| !cache.contains_key(&key(b)))
+        .map(|b| (key(b), *b))
+        .collect();
+    let queries: Vec<_> = missing.values().copied().collect();
+    let mut components = Vec::new();
+    let mut areas = Vec::new();
+    patch::ball_patch_components(bvh, &queries, &mut components);
+    patch::ball_patches_with_workers(bvh, &queries, &mut areas, plan.workers);
+    for ((k, area), count) in missing.keys().zip(areas).zip(components) {
+        cache.insert(*k, (area, count));
+    }
+    PatchBatch {
+        areas: balls.iter().map(|b| cache[&key(b)].0.clone()).collect(),
+        components: balls.iter().map(|b| cache[&key(b)].1).collect(),
+    }
+}
+
 struct Prepared {
     contact: Contact,
     outer: Ball,
@@ -65,42 +108,57 @@ pub(super) fn probe(
         .map(|(i, c)| prepare(plan, c, hits.tri[i] as usize, hits.dist2[i]))
         .collect();
     let valid: Vec<_> = prepared.iter().filter_map(|p| p.as_ref().ok()).collect();
-    let balls: Vec<_> = valid.iter().flat_map(|p| [p.outer, p.inner]).collect();
     let solids: Vec<_> = valid.iter().flat_map(|p| [p.joint, p.cone]).collect();
-    let mut components = Vec::new();
-    patch::ball_patch_components(&bvh, &balls, &mut components);
-    let mut areas = Vec::new();
     let mut gaps = Vec::new();
-    patch::ball_patches_with_workers(&bvh, &balls, &mut areas, plan.workers);
     clearance::solid_gaps_with_workers(&bvh, &solids, &mut gaps, plan.workers);
     let cones: Vec<_> = valid.iter().map(|p| p.cone).collect();
     let mut departures = Vec::new();
     clearance::capped_departures(&bvh, &cones, &mut departures);
+    // Profiled hot path: patch subdivision dominated proposals whose finite
+    // heads already fail clearance/departure. Reject those first, then measure
+    // only the survivors in ONE patch batch. This changes no admitted geometry
+    // or search domain, and leaves every unresolved measurement closed.
+    let geometry = geometry_rejections(&gaps, &departures, plan.limits.gap, alternatives);
+    let balls: Vec<_> = valid
+        .iter()
+        .zip(&geometry)
+        .filter(|(_, result)| result.is_ok())
+        .flat_map(|(p, _)| [p.outer, p.inner])
+        .collect();
+    let PatchBatch { areas, components } = cached_patches(plan, &bvh, &balls);
     let mut at = 0;
+    let mut patch_at = 0;
     for result in prepared {
         match result {
             Err(e) => out.push(Err(e)),
             Ok(mut p) => {
-                let measured = if areas[at].is_unverified() || areas[at + 1].is_unverified() {
-                    Err(Reject::MeasureExhausted)
-                } else if components[at] != 1 {
-                    Err(Reject::SecondSheet)
-                } else {
-                    check_measurements(
-                        plan,
-                        &p,
-                        &areas[at],
-                        &areas[at + 1],
-                        &gaps[at],
-                        &gaps[at + 1],
-                    )
-                };
+                if let Err(e) = &geometry[at / 2] {
+                    out.push(Err(e.clone()));
+                    at += 2;
+                    continue;
+                }
+                let measured =
+                    if areas[patch_at].is_unverified() || areas[patch_at + 1].is_unverified() {
+                        Err(Reject::MeasureExhausted)
+                    } else if components[patch_at] != 1 {
+                        Err(Reject::SecondSheet)
+                    } else {
+                        check_measurements(
+                            plan,
+                            &p,
+                            &areas[patch_at],
+                            &areas[patch_at + 1],
+                            &gaps[at],
+                            &gaps[at + 1],
+                        )
+                    };
                 let measured = measured.and_then(|patch| match departures[at / 2].known() {
                     Some(true) => Ok(patch),
                     Some(false) => Err(Reject::DepartureNotMonotone),
                     None => Err(Reject::MeasureExhausted),
                 });
                 at += 2;
+                patch_at += 2;
                 out.push(measured.map(|patch| {
                     p.contact.patch = patch;
                     Quote {
@@ -137,6 +195,38 @@ pub(super) fn probe(
             *r = Err(e);
         }
     }
+}
+
+fn geometry_rejections(
+    gaps: &[Measure<clearance::GapBounds>],
+    departures: &[Measure<bool>],
+    gap: f64,
+    alternatives: bool,
+) -> Vec<Result<(), Reject>> {
+    departures
+        .iter()
+        .enumerate()
+        .map(|(i, departure)| {
+            // Public whole-layout probes preserve diagnostic precedence. Private
+            // alternatives need a rejection certificate, not every possible reason.
+            if !alternatives {
+                return Ok(());
+            }
+            let joint = gaps[2 * i].known().ok_or(Reject::MeasureExhausted)?;
+            if joint.lo < gap {
+                return Err(Reject::GapTooSmall { gap: joint.lo });
+            }
+            let cone = gaps[2 * i + 1].known().ok_or(Reject::MeasureExhausted)?;
+            if cone.lo - ENVELOPE <= 0.02 {
+                return Err(Reject::HeadTouchesModel);
+            }
+            match departure.known() {
+                Some(true) => Ok(()),
+                Some(false) => Err(Reject::DepartureNotMonotone),
+                None => Err(Reject::MeasureExhausted),
+            }
+        })
+        .collect()
 }
 
 fn prepare(
@@ -243,8 +333,21 @@ fn prepare(
             patch: CappedPatch(PatchBound { lo: 0.0, hi: 0.0 }),
             parts: vec![ball, cone, joint_ball],
         },
-        outer,
-        inner,
+        // Canonicalise only the measurement spheres, never native geometry.
+        // f32 pole averaging at |coordinate| <= 101 moves the sphere centre by
+        // < 8e-6 mm. Two ENVELOPE radii enclose the original outer sphere; the
+        // inner radius loses the exact centre displacement and rounds DOWN to
+        // 1e-5 mm. These enclosures let fan/length variants share a patch query.
+        outer: Ball {
+            centre: centre.map(f64::from),
+            radius: f64::from(c.ball_r) + 2.0 * ENVELOPE,
+        },
+        inner: Ball {
+            centre: centre.map(f64::from),
+            radius: ((inner.radius - norm(sub(inner.centre, centre.map(f64::from)))) * 100000.0)
+                .floor()
+                / 100000.0,
+        },
         cone: cone_solid,
         joint: joint_solid,
     })

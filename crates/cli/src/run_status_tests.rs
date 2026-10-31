@@ -11,6 +11,7 @@ fn measured_pass() -> Checked {
                 id: format!("H{i}"),
                 status: if i == 5 { "not_applicable" } else { "pass" }.into(),
                 reason: "controlled measured result".into(),
+                not_applicable_proved: i == 5,
             })
             .collect(),
     }
@@ -22,7 +23,10 @@ fn candidate_opens_only_for_a_complete_measured_pass_without_planning_blockers()
     assert!(!candidate_allowed(false, &pass, false));
     assert!(!candidate_allowed(true, &pass, true));
     for i in 0..9 {
-        for status in ["unverified", "violation"] {
+        for status in ["unverified", "violation", "not_applicable"] {
+            if i == 4 && status == "not_applicable" {
+                continue;
+            }
             let mut result = pass.clone();
             result.rules[i].status = status.into();
             assert!(
@@ -35,6 +39,9 @@ fn candidate_opens_only_for_a_complete_measured_pass_without_planning_blockers()
         result.rules.remove(i);
         assert!(!candidate_allowed(true, &result, false));
     }
+    let mut result = pass.clone();
+    result.rules[4].not_applicable_proved = false;
+    assert!(!candidate_allowed(true, &result, false));
     let mut result = pass.clone();
     result.verdict = Verdict::Unverified;
     assert!(!candidate_allowed(true, &result, false));

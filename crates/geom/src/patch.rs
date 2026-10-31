@@ -3,7 +3,7 @@
 //! The construction certificate uses adaptive triangle subdivision, not a point grid.
 //! A triangle wholly in the sphere contributes its entire area to both bounds; a
 //! disjoint bounding box contributes nothing; unresolved triangles contribute only
-//! to the upper bound. The exact area of each child is one quarter of its parent.
+//! to the upper bound. The exact area of each child is half its parent (longest-edge bisection).
 //! This avoids treating agreement between two floating circle integrals as a proof.
 
 use crate::{Bvh, Mesh, measure::Measure};
@@ -25,11 +25,13 @@ pub struct AreaBounds {
     pub hi: f64,
 }
 
+#[inline]
 pub(crate) fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     std::array::from_fn(|i| a[i] - b[i])
 }
+#[inline]
 pub(crate) fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a.iter().zip(b).map(|(a, b)| a * b).sum()
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 pub(crate) fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
@@ -167,40 +169,39 @@ pub(crate) fn frustum_plane_gap(
         .max(0.0)
 }
 
-// At most 20 successive midpoint roundings, coordinates bounded by 1000 mm.
-// Division by 2 is exact except subnormals. Even 64 ulps at 1000 encloses the
+// At most 32 successive midpoint roundings, coordinates bounded by 1000 mm.
+// Division by 2 is exact except subnormals. 128 ulps at 1000 encloses the
 // accumulated coordinate error (including subnormal underflow) on each axis.
-const POSITION_ERROR: f64 = 64.0 * f64::EPSILON * 1000.0;
-// Depth limits precision, never enclosure soundness: all unresolved area remains
-// in the upper bound. Sixteen levels meet the fast-suite width requirement without
-// spending four times the boundary work for precision admission does not require.
-const MAX_DEPTH: u32 = 16;
+const POSITION_ERROR: f64 = 128.0 * f64::EPSILON * 1000.0;
+// Binary longest-edge splits avoid replicating very thin facets into four skinny
+// children. Depth limits precision only: all unresolved area stays in the upper
+// bound, with the same 0.00025 mm edge-length precision as the quadtree.
+const MAX_DEPTH: u32 = 32;
 const MAX_NODES: usize = 2_000_000;
 
+#[inline(always)]
 fn classify(t: [[f64; 3]; 3], ball: Ball) -> i8 {
-    let r2 = Interval::exact(ball.radius).square();
-    let mut box_distance = Interval::exact(0.0);
-    for k in 0..3 {
-        let lo = t.iter().map(|p| p[k]).fold(f64::INFINITY, f64::min) - POSITION_ERROR;
-        let hi = t.iter().map(|p| p[k]).fold(f64::NEG_INFINITY, f64::max) + POSITION_ERROR;
-        let distance = (lo - ball.centre[k]).max(ball.centre[k] - hi).max(0.0);
-        // Both the box subtraction and distance subtraction get outward slack.
-        let d = Interval(
-            (distance - POSITION_ERROR).max(0.0),
-            distance + POSITION_ERROR,
-        );
-        box_distance = box_distance.add(d.square());
+    // All points are in ±1000 mm. Subtraction, three squares and two adds
+    // perturb a Euclidean norm by < 32*eps*4000 mm. Midpoint position
+    // uncertainty adds sqrt(3)*POSITION_ERROR. 1e-9 mm encloses both, with
+    // over 10x reserve. Inflating/deflating the radius avoids directed-rounding
+    // operations at every subdivision node; area sums remain outward rounded.
+    const SLACK: f64 = 1e-9;
+    let outer2 = (ball.radius + SLACK).powi(2);
+    let inner2 = (ball.radius - SLACK).max(0.0).powi(2);
+    let mut box_distance = 0.0;
+    for (k, &centre) in ball.centre.iter().enumerate() {
+        let lo = t[0][k].min(t[1][k]).min(t[2][k]);
+        let hi = t[0][k].max(t[1][k]).max(t[2][k]);
+        let d = (lo - centre).max(centre - hi).max(0.0);
+        box_distance += d * d;
     }
-    if box_distance.0 > r2.1 {
+    if box_distance > outer2 {
         return -1;
     }
-    if t.iter().all(|p| {
-        let distance = (0..3).fold(Interval::exact(0.0), |sum, k| {
-            let d = Interval(p[k] - POSITION_ERROR, p[k] + POSITION_ERROR)
-                .sub(Interval::exact(ball.centre[k]));
-            sum.add(d.square())
-        });
-        distance.1 < r2.0
+    if t.iter().all(|&p| {
+        let d = sub(p, ball.centre);
+        dot(d, d) < inner2
     }) {
         return 1;
     }
@@ -253,13 +254,6 @@ fn patch_triangles(
         }
         // Refinement controls precision, not soundness. Short triangles need not
         // pay sixteen levels: every unresolved boundary still contributes to U.
-        let longest = (0..3)
-            .map(|k| {
-                let d = sub(t[k], t[(k + 1) % 3]);
-                dot(d, d).sqrt()
-            })
-            .fold(0.0, f64::max);
-        let depth_limit = ((longest / 0.00025).log2().ceil().max(0.0) as u32).min(MAX_DEPTH);
         stack.push((t, area, 0));
         while let Some((t, area, depth)) = stack.pop() {
             nodes += 1;
@@ -272,18 +266,25 @@ fn patch_triangles(
                     lo = (lo + area.0).next_down().max(0.0);
                     hi = (hi + area.1).next_up();
                 }
-                _ if depth == depth_limit => hi = (hi + area.1).next_up(),
                 _ => {
-                    let midpoint =
-                        |a: [f64; 3], b: [f64; 3]| std::array::from_fn(|k| (a[k] + b[k]) * 0.5);
-                    let [a, b, c] = t;
-                    let ab = midpoint(a, b);
-                    let bc = midpoint(b, c);
-                    let ca = midpoint(c, a);
-                    let child = area.mul(Interval::exact(0.25));
-                    for tri in [[a, ab, ca], [ab, b, bc], [ca, bc, c], [ab, bc, ca]] {
-                        stack.push((tri, child, depth + 1));
+                    let (edge, length2) = (0..3)
+                        .map(|k| {
+                            let d = sub(t[k], t[(k + 1) % 3]);
+                            (k, dot(d, d))
+                        })
+                        .max_by(|a, b| a.1.total_cmp(&b.1))
+                        .expect("three edges");
+                    if depth == MAX_DEPTH || length2 <= 0.00025_f64.powi(2) {
+                        hi = (hi + area.1).next_up();
+                        continue;
                     }
+                    let a = t[edge];
+                    let b = t[(edge + 1) % 3];
+                    let c = t[(edge + 2) % 3];
+                    let mid = std::array::from_fn(|k| (a[k] + b[k]) * 0.5);
+                    let child = area.mul(Interval::exact(0.5));
+                    stack.push(([a, mid, c], child, depth + 1));
+                    stack.push(([mid, b, c], child, depth + 1));
                 }
             }
         }
@@ -465,6 +466,30 @@ mod tests {
             assert_eq!(areas[i], ball_patch_reference(&m, ball));
             assert_eq!(components[i], ball_patch_components_reference(&m, ball));
         }
+    }
+
+    #[test]
+    fn very_thin_long_facets_keep_the_analytic_strip_area_enclosed() {
+        let h = 0.001_f64;
+        let r = 0.42_f64;
+        let mesh = Mesh::new(
+            vec![-30., 30., 30., -30.],
+            vec![-h, -h, h, h],
+            vec![0.; 4],
+            vec![0, 1, 2, 0, 2, 3],
+        )
+        .unwrap();
+        let ball = Ball {
+            centre: [0.; 3],
+            radius: r,
+        };
+        let truth = 2. * (h * (r * r - h * h).sqrt() + r * r * (h / r).asin());
+        let answer = ball_patch_reference(&mesh, ball);
+        let b = answer
+            .known()
+            .expect("thin facets must not exhaust the subdivision budget");
+        assert!(b.lo <= truth && b.hi >= truth, "{b:?} truth={truth}");
+        assert!(b.hi - b.lo < 0.001);
     }
 
     #[test]

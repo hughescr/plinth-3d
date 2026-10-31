@@ -69,14 +69,14 @@ fn far_joint_side_reservation_keeps_the_full_build_gap() {
 }
 
 #[test]
-fn dense_long_columns_expose_the_unresolved_nearest_brace_rule() {
+fn dense_long_columns_are_allowed_and_reported_unbraced() {
     let mut plan = builder(&crate::construct::tests::plate());
     let mut out = Vec::new();
     plan.probe(&[candidate(0, 0.0), candidate(1, 1.9)], &mut out);
     let ids = plan.commit(QuoteBatch::from_results(out).unwrap()).unwrap();
     let mut plan = plan.into_routing();
     // Private fixture extends the plate distance only, isolating brace policy.
-    // There is no public model mutation or way to freeze this fixture unbraced.
+    // There is no public model mutation; freeze retains explicit unbraced ids.
     plan.model.plate -= 10.0;
     let columns: Vec<_> = ids
         .into_iter()
@@ -89,12 +89,9 @@ fn dense_long_columns_expose_the_unresolved_nearest_brace_rule() {
     plan.probe_members(&columns, &mut out);
     plan.commit_members(MemberQuoteBatch::from_results(out).unwrap())
         .unwrap();
-    assert!(matches!(
-        plan.brace_proposals(),
-        Err(Reject::PrintOrder { .. })
-    ));
+    assert!(plan.brace_proposals().unwrap().is_empty());
     plan.raft_connected().unwrap();
-    assert!(matches!(plan.freeze(), Err(Reject::PrintOrder { .. })));
+    assert_eq!(plan.freeze().unwrap().unbraced_columns(), &[0, 1]);
 }
 
 #[test]

@@ -79,3 +79,50 @@ pub fn layout_from_contacts(
     }
     layout
 }
+
+/// Append the exact fixed members to the contact load view. Shared by the final
+/// private replay and CLI report so they use identical self-peel inputs.
+pub fn add_members(plan: &crate::construct::SupportPlan, layout: &mut LayoutView) {
+    let shift = -f64::from(plan.model().plate_z());
+    for (record, part) in plan
+        .parts()
+        .iter()
+        .enumerate()
+        .skip(plan.contacts().len() * 3)
+    {
+        let PartFields::Frustum { start, end, r1, r2 } = part.fields() else {
+            continue;
+        };
+        let vertical = (start[0] - end[0]).abs() < 1e-6 && (start[1] - end[1]).abs() < 1e-6;
+        let kind = if part.kind() == NativeKind::BaseFlare {
+            PartKind::Flare
+        } else if vertical {
+            PartKind::Column
+        } else {
+            PartKind::Brace
+        };
+        let low = if start[2] < end[2] { start } else { end };
+        let owner = plan.contacts().iter().position(|c| {
+            let j = c.joint();
+            (j[0] - low[0]).abs() < 1e-5 && (j[1] - low[1]).abs() < 1e-5
+        });
+        let Some(owner) = owner else { continue };
+        let section = PartSection {
+            kind,
+            record: Some(record as u32),
+            area_lower_mm2: 8. * f64::from(r1.min(r2)).powi(2) * (std::f64::consts::PI / 8.).sin(),
+            z_range_mm: [
+                f64::from(start[2].min(end[2])) + shift,
+                f64::from(start[2].max(end[2])) + shift,
+            ],
+        };
+        if kind == PartKind::Brace {
+            layout.chains.push(PartChain {
+                contact: owner as u32,
+                parts: vec![section],
+            });
+        } else {
+            layout.chains[owner].parts.push(section);
+        }
+    }
+}

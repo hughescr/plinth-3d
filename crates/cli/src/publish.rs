@@ -122,12 +122,10 @@ pub fn publish(temp: &Path, dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Publish a portable bundle with the model as its commit record. All files are
-/// synced in staging first; reports and pictures are linked into a newly reserved
-/// real directory, and the model is linked LAST. Thus a visible model always has
-/// its complete review set. No symlink or temporary backing store survives success.
-/// A crash before the model link can leave review files, never a published model.
-/// Existing directories and files are never replaced.
+/// Sync the complete staging tree and publish it with ONE directory rename on
+/// the output volume. Before that rename the destination is absent; afterwards
+/// it contains the entire bundle. Hidden stale staging trees are never reused.
+/// Existing destinations are left untouched.
 pub fn publish_bundle(temp: &Path, dest: &Path) -> io::Result<()> {
     fn files(dir: &Path, relative: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
         for entry in fs::read_dir(dir.join(relative))? {
@@ -152,30 +150,28 @@ pub fn publish_bundle(temp: &Path, dest: &Path) -> io::Result<()> {
             "bundle needs exactly one model commit record",
         ));
     }
-    paths.sort_by_key(|p| (is_model(p), p.clone()));
-    fs::create_dir(dest)?; // Atomic no-replace reservation; owned only on success.
-    let result = (|| {
-        for path in paths {
-            let final_path = dest.join(&path);
-            let parent = final_path
-                .parent()
-                .ok_or_else(|| io::Error::other("no parent"))?;
-            fs::create_dir_all(parent)?;
-            fs::hard_link(temp.join(&path), &final_path)?;
-            File::open(parent)?.sync_all()?;
+    // Serialize publishers with a kernel-held directory lock, not a lockfile
+    // that a crash can leave behind. This also protects the no-replace check on
+    // systems where rename would otherwise replace an empty directory.
+    let parent = dest
+        .parent()
+        .ok_or_else(|| io::Error::other("no bundle parent"))?;
+    let directory = File::open(parent)?;
+    let _lock = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+        .map_err(|(_, e)| io::Error::from_raw_os_error(e as i32))?;
+    match fs::symlink_metadata(dest) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "bundle destination exists",
+            ));
         }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(dest);
-    } else {
-        // Cleanup is not part of acceptance: all final files have independent names.
-        let _ = fs::remove_dir_all(temp);
-        if let Some(parent) = dest.parent() {
-            let _ = File::open(parent).and_then(|f| f.sync_all());
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
-    result
+    fs::rename(temp, dest)?;
+    let _ = File::open(parent).and_then(|f| f.sync_all());
+    Ok(())
 }
 
 #[cfg(test)]
@@ -279,6 +275,35 @@ mod tests {
         fs::rename(&dest, &moved).unwrap();
         assert_eq!(fs::read(moved.join("model.chitubox")).unwrap(), b"model");
         assert_eq!(fs::read(moved.join("pictures/01.png")).unwrap(), b"picture");
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn abandoned_partial_staging_does_not_block_retry_or_expose_a_final_directory() {
+        let d = dir("bundle-retry");
+        let dest = d.join("ready");
+        let abandoned = temp_path(&d, "bundle");
+        fs::create_dir(&abandoned).unwrap();
+        fs::write(abandoned.join("report.json"), b"partial").unwrap();
+        assert!(!dest.exists());
+        let retry = temp_path(&d, "bundle");
+        fs::create_dir(&retry).unwrap();
+        fs::write(retry.join("model.chitubox"), b"complete model").unwrap();
+        fs::write(retry.join("report.json"), b"complete report").unwrap();
+        publish_bundle(&retry, &dest).unwrap();
+        assert!(!retry.exists());
+        assert_eq!(
+            fs::read(dest.join("report.json")).unwrap(),
+            b"complete report"
+        );
+        assert_eq!(
+            fs::read(dest.join("model.chitubox")).unwrap(),
+            b"complete model"
+        );
+        assert!(
+            abandoned.exists(),
+            "a retry never consumes another run's staging tree"
+        );
         fs::remove_dir_all(d).unwrap();
     }
 
