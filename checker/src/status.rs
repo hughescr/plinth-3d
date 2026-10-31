@@ -79,6 +79,13 @@ pub struct Location {
     pub layer: Option<u32>,
 }
 
+/// A place in the file that explains a rule's answer, with the reason in plain words.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Located {
+    pub location: Location,
+    pub reason: String,
+}
+
 /// One entry of the rejection list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rejection {
@@ -131,12 +138,22 @@ pub fn rejections(rules: &[RuleResult], structure_ok: bool) -> Vec<Rejection> {
             Status::Unverified => RejectionKind::Unverified,
             Status::Pass | Status::NotApplicable => continue,
         };
-        out.push(Rejection {
-            rule: r.id.to_owned(),
-            kind,
-            location: None,
-            reason: r.reason.clone(),
-        });
+        if r.located.is_empty() {
+            out.push(Rejection {
+                rule: r.id.to_owned(),
+                kind,
+                location: None,
+                reason: r.reason.clone(),
+            });
+        }
+        for l in &r.located {
+            out.push(Rejection {
+                rule: r.id.to_owned(),
+                kind,
+                location: Some(l.location.clone()),
+                reason: l.reason.clone(),
+            });
+        }
     }
     out
 }
@@ -174,10 +191,19 @@ fn rejection_json(r: &Rejection) -> Json {
 pub fn fields(rules: &[RuleResult], structure_ok: bool) -> Vec<(&'static str, Json)> {
     let accept = acceptance(rules, structure_ok);
     let list = rejections(rules, structure_ok);
+    // Counts are of rules (a rule with many located entries counts once), plus one for an
+    // unreadable file.
     let count = |k: RejectionKind| {
-        Json::Uint(crate::bytes::wide(
-            list.iter().filter(|r| r.kind == k).count(),
-        ))
+        let rules_of_kind = rules
+            .iter()
+            .filter(|r| is_geometry(r.id))
+            .filter(|r| match k {
+                RejectionKind::Violation => r.status == Status::Violation,
+                RejectionKind::Unverified => r.status == Status::Unverified,
+            })
+            .count();
+        let file = usize::from(k == RejectionKind::Violation && !structure_ok);
+        Json::Uint(crate::bytes::wide(rules_of_kind + file))
     };
     let geometry = Json::obj([
         (

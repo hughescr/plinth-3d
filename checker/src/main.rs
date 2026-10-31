@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! plinth-check dump <file.chitubox | file.stl>
-//! plinth-check check --chitubox <file> --limits <limits.toml> [--stl <file>] [--out <report.json>]
+//! plinth-check check --chitubox <file> --limits <limits.toml> [--stl <file>] [--out <report.json>] [--threads <n>] [--pose-rotate-x-deg <deg>] [--stl-sha256 <hex>]
 //! ```
 //!
 //! `dump` prints the file's structure. `check` writes the JSON report (to stdout, or to `--out`).
@@ -13,10 +13,11 @@
 
 #![warn(clippy::cast_possible_truncation)]
 
+use plinth_check::h7::Pose;
 use plinth_check::{dump, limits, loop_canary, report};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage:\n  plinth-check dump <file.chitubox | file.stl>\n  plinth-check check --chitubox <file> --limits <limits.toml> [--stl <file>] [--out <report.json>]";
+const USAGE: &str = "usage:\n  plinth-check dump <file.chitubox | file.stl>\n  plinth-check check --chitubox <file> --limits <limits.toml> [--stl <file>] [--out <report.json>] [--threads <n>] [--pose-rotate-x-deg <deg>] [--stl-sha256 <hex>]";
 
 fn usage_error(msg: &str) -> ExitCode {
     eprintln!("plinth-check: {msg}\n{USAGE}");
@@ -56,7 +57,17 @@ fn flags(args: &[String]) -> Result<Vec<(&str, &str)>, String> {
     let mut out = Vec::new();
     let mut it = args.iter();
     while let Some(flag) = it.next() {
-        if !["--chitubox", "--limits", "--stl", "--out"].contains(&flag.as_str()) {
+        if ![
+            "--chitubox",
+            "--limits",
+            "--stl",
+            "--out",
+            "--threads",
+            "--pose-rotate-x-deg",
+            "--stl-sha256",
+        ]
+        .contains(&flag.as_str())
+        {
             return Err(format!("unknown argument {flag}"));
         }
         let Some(value) = it.next() else {
@@ -84,7 +95,22 @@ fn run_check(args: &[String]) -> ExitCode {
         Err(e) => return usage_error(&e),
     };
     let stl = get("--stl").map(read_input);
-    let rep = report::build(&limits, &read_input(chitubox), stl.as_ref());
+    let threads = match get("--threads").map(str::parse::<usize>) {
+        None => 1,
+        Some(Ok(n)) if n >= 1 => n,
+        Some(_) => return usage_error("--threads needs a whole number of at least 1"),
+    };
+    let rotate_x_deg = match get("--pose-rotate-x-deg").map(str::parse::<f64>) {
+        None => 0.0,
+        Some(Ok(d)) if d.is_finite() => d,
+        Some(_) => return usage_error("--pose-rotate-x-deg needs a number of degrees"),
+    };
+    let pose = Pose {
+        rotate_x_deg,
+        expected_sha256: get("--stl-sha256").map(str::to_owned),
+        actual_sha256: None,
+    };
+    let rep = report::build_posed(&limits, &read_input(chitubox), stl.as_ref(), threads, &pose);
     let text = rep.json.render();
     match get("--out") {
         Some(out) => {

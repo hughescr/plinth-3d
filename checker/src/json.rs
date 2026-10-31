@@ -33,6 +33,15 @@ impl Json {
         Self::Obj(pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect())
     }
 
+    /// The value of `key` if this is an object that has it.
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<&Json> {
+        match self {
+            Self::Obj(pairs) => pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
     /// An array of strings.
     #[must_use]
     pub fn strings(items: &[String]) -> Self {

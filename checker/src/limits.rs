@@ -2,6 +2,7 @@
 //! The file is data: `key = number  # comment` lines under a `[limits]` heading.
 
 use crate::bytes::{Res, fail};
+use crate::v3::V;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Limits {
@@ -24,6 +25,25 @@ impl Limits {
             ("region_length_mm", self.region_length_mm),
         ]
     }
+}
+
+/// The build volume the checker measures files for, in plate coordinates (mm): the Saturn 4
+/// Ultra 16K plate is 211.68 x 118.37 mm with 220 mm of height; the box is that, rounded up
+/// (`|x| <= 120`, `|y| <= 70`, `-1 <= z <= 230`). A coordinate outside it is not a file for
+/// this printer, and the numbers there are too large for the rounding allowances this checker
+/// states (they grow with the coordinates, but are only certified for a file this size), so
+/// the file is refused, never measured.
+pub const BUILD_X_MM: f64 = 120.0;
+pub const BUILD_Y_MM: f64 = 70.0;
+pub const BUILD_Z_MM: (f64, f64) = (-1.0, 230.0);
+
+/// Is the plate-coordinate point `p` inside the build volume (and finite)?
+#[must_use]
+pub fn in_build_volume(p: V) -> bool {
+    p[0].abs() <= BUILD_X_MM
+        && p[1].abs() <= BUILD_Y_MM
+        && p[2] >= BUILD_Z_MM.0
+        && p[2] <= BUILD_Z_MM.1
 }
 
 /// Parse the text of `limits.toml`. Unknown keys, duplicate keys, missing keys and bad numbers
@@ -91,6 +111,25 @@ mod tests {
         let l = parse(GOOD).expect("parses");
         assert_eq!(l.named()[0], ("h1_patch_area_mm2", 0.5));
         assert_eq!(l.named()[4], ("region_length_mm", 3.0));
+    }
+
+    #[test]
+    fn the_build_volume_is_the_plate_box_and_refuses_far_or_non_finite_points() {
+        assert!(in_build_volume([0.0, 0.0, 0.0]));
+        assert!(in_build_volume([120.0, -70.0, 230.0]));
+        assert!(in_build_volume([-120.0, 70.0, -1.0]));
+        for p in [
+            [120.1, 0.0, 10.0],
+            [0.0, 70.1, 10.0],
+            [0.0, 0.0, 230.1],
+            [0.0, 0.0, -1.1],
+            [0.0, 3000.0, 10.0],
+            [0.0, 0.0, 3000.0],
+            [f64::NAN, 0.0, 0.0],
+            [0.0, f64::INFINITY, 0.0],
+        ] {
+            assert!(!in_build_volume(p), "{p:?}");
+        }
     }
 
     #[test]
