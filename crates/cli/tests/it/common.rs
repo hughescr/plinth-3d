@@ -178,5 +178,6 @@ pub fn config(work: &Path, inputs: Vec<PathBuf>) -> Config {
         max_threads: 2,
         checker: fake_checker(work, "unverified", 2, 0),
         limits,
+        candidate: false,
     }
 }

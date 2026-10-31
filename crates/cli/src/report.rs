@@ -26,7 +26,22 @@ fn checker_json(c: Option<&Checked>) -> Json {
     c.map_or(Json::Null, Checked::to_json)
 }
 
-fn model_json(m: &ModelRun) -> Json {
+/// What a file is called in the report: a transport file, or (candidate mode, published only
+/// after the checker passed it with no applicable rule unverified or violated) a print
+/// candidate.
+fn kind_of(candidate: bool) -> &'static str {
+    if candidate { "candidate" } else { "transport" }
+}
+
+fn label_of(candidate: bool) -> &'static str {
+    if candidate {
+        "print candidate: the checker passed every applicable rule"
+    } else {
+        TRANSPORT_LABEL
+    }
+}
+
+fn model_json(candidate: bool, m: &ModelRun) -> Json {
     let (status, output, bytes, stage, error, checked) = match &m.outcome {
         Outcome::Published {
             path: p,
@@ -53,13 +68,19 @@ fn model_json(m: &ModelRun) -> Json {
             checked.as_ref(),
         ),
     };
+    let blockers = checked.map_or_else(Vec::new, Checked::candidate_blockers);
+    let is_candidate = candidate && status == "published";
     Json::obj([
         ("input", path(&m.input)),
         ("output_name", Json::str(format!("{}.chitubox", m.stem))),
         ("status", Json::str(status)),
-        ("kind", Json::str("transport")),
-        ("print_candidate", Json::Bool(false)),
-        ("label", Json::str(TRANSPORT_LABEL)),
+        ("kind", Json::str(kind_of(candidate))),
+        ("print_candidate", Json::Bool(is_candidate)),
+        ("label", Json::str(label_of(is_candidate))),
+        (
+            "candidate_blockers",
+            Json::Arr(blockers.iter().map(Json::str).collect()),
+        ),
         ("triangles", count(m.triangles)),
         ("output", output),
         ("bytes", bytes),
@@ -120,12 +141,20 @@ pub fn to_json(cfg: &Config, run: &Run) -> Json {
                 ("version", Json::str(env!("CARGO_PKG_VERSION"))),
             ]),
         ),
-        ("kind", Json::str("transport")),
-        ("print_candidate", Json::Bool(false)),
-        ("label", Json::str(TRANSPORT_LABEL)),
+        ("kind", Json::str(kind_of(cfg.candidate))),
+        (
+            "print_candidate",
+            Json::Bool(cfg.candidate && failed == 0 && !run.models.is_empty()),
+        ),
+        ("label", Json::str(label_of(cfg.candidate && failed == 0))),
         (
             "models",
-            Json::Arr(run.models.iter().map(model_json).collect()),
+            Json::Arr(
+                run.models
+                    .iter()
+                    .map(|m| model_json(cfg.candidate, m))
+                    .collect(),
+            ),
         ),
         (
             "job",
@@ -154,13 +183,14 @@ pub fn to_json(cfg: &Config, run: &Run) -> Json {
 
 /// One progress line for a finished model, for standard error.
 #[must_use]
-pub fn progress_line(m: &ModelRun) -> String {
+pub fn progress_line(candidate: bool, m: &ModelRun) -> String {
     let secs: f64 = m.steps.iter().map(|s| s.secs).sum();
     match &m.outcome {
         Outcome::Published { path, checked, .. } => format!(
-            "plinth: {} -> {} ({TRANSPORT_LABEL}; checker: {}) {secs:.2} s",
+            "plinth: {} -> {} ({}; checker: {}) {secs:.2} s",
             m.input.display(),
             path.display(),
+            label_of(candidate),
             checked.verdict.name()
         ),
         Outcome::Failed { stage, message, .. } => {
@@ -182,6 +212,7 @@ mod tests {
             max_threads: 2,
             checker: PathBuf::from("c"),
             limits: PathBuf::from("l"),
+            candidate: false,
         };
         let m = ModelRun {
             input: PathBuf::from("a.stl"),

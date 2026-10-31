@@ -46,6 +46,7 @@ pub fn config_from(opts: &args::Options, exe: &Path) -> Result<run::Config, Stri
         max_threads: opts.max_threads,
         checker: pick(&opts.checker, 0, "--checker")?,
         limits: pick(&opts.limits, 1, "--limits")?,
+        candidate: opts.candidate,
     })
 }
 

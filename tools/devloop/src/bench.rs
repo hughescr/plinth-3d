@@ -8,6 +8,7 @@
 //! Exit: 0 pass; 1 over budget, invalid repetition or a failed command; 4 setup error; 5 stopped.
 
 use crate::budget;
+use crate::identity;
 use crate::proc::{self, Exit};
 use crate::sys;
 use crate::t::{self, Outcome};
@@ -246,15 +247,35 @@ pub fn main(root: &Path) -> i32 {
         println!("LOOP-BENCH: stopped");
         return 5;
     }
+    let pass = !(b.fail || !clean);
     println!(
         "{}",
-        if b.fail || !clean {
-            "LOOP-BENCH FAIL"
-        } else {
+        if pass {
             "LOOP-BENCH PASS"
+        } else {
+            "LOOP-BENCH FAIL"
         }
     );
-    i32::from(b.fail || !clean)
+    if let Err(e) = write_record(root, pass) {
+        eprintln!("LOOP-BENCH: cannot write the bench record: {e}");
+        return 1;
+    }
+    i32::from(!pass)
+}
+
+/// Append this run to the bench record (read by `gate`, step 5 of design section 9).
+fn write_record(root: &Path, pass: bool) -> Result<(), String> {
+    use std::io::Write;
+    let id = identity::current(root)?;
+    let (stamp, _) = proc::now_stamp();
+    let row = id.row(&stamp, if pass { "pass" } else { "fail" });
+    let path = identity::record_path(root)?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| f.write_all(row.as_bytes()))
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[cfg(test)]

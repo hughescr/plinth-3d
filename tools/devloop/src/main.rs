@@ -1,6 +1,8 @@
-//! devloop: the plinth loop runner (design dev-loop.md sections 3.2, 3.3, 5.5, 5.6 and 10 step 3).
+//! devloop: the plinth loop runner (design dev-loop.md sections 3.2, 3.3, 5.5, 5.6, 9 and 10
+//! steps 3, 8 and 9).
 //!
-//! Subcommands: `t`, `loop-bench`, `slot`, `setup`, `check-independence` (later: `gate`).
+//! Subcommands: `t`, `loop-bench`, `slot`, `setup`, `check-independence`, `pre-commit`, `gate`
+//! (and `gate --clean`), `release-check`.
 //! The `scripts/*` files are thin shims that build this program if needed and run it with
 //! `--root <checkout>`. It depends on no plinth crate and no registry crate.
 
@@ -8,11 +10,18 @@
 
 mod bench;
 mod budget;
+mod clean;
+mod gate;
+mod identity;
 mod independence;
 mod lockwatch;
 mod logscan;
+mod precommit;
 mod proc;
+mod provenance;
+mod release;
 mod rustscan;
+mod scan;
 mod setup;
 mod slot;
 mod supervise;
@@ -22,8 +31,7 @@ mod verdict;
 
 use std::path::PathBuf;
 
-const USAGE: &str =
-    "usage: devloop [--root <checkout>] t|loop-bench|slot|setup|check-independence [args...]";
+const USAGE: &str = "usage: devloop [--root <checkout>] t|loop-bench|slot|setup|check-independence|pre-commit|gate|release-check [args...]";
 
 fn root_and_rest(args: &[String]) -> Result<(PathBuf, &[String]), String> {
     if args.first().is_some_and(|a| a == "--root") {
@@ -50,6 +58,9 @@ fn run(args: &[String]) -> i32 {
         Some("slot") => slot::main(&root, &rest[1..]),
         Some("setup") => setup::main(&root),
         Some("check-independence") => independence::main(&root),
+        Some("pre-commit") => precommit::main(&root),
+        Some("gate") => gate::main(&root, &rest[1..]),
+        Some("release-check") => release::main(&root),
         _ => {
             eprintln!("{USAGE}");
             4

@@ -226,7 +226,7 @@ pub fn marker_threads(text: &str) -> Option<u32> {
     (n > 0).then_some(n)
 }
 
-fn allocation(root: &Path) -> Result<Alloc, String> {
+pub fn allocation(root: &Path) -> Result<Alloc, String> {
     let gitdir = PathBuf::from(proc::git(root, &["rev-parse", "--absolute-git-dir"])?);
     let common = PathBuf::from(proc::git(
         root,
@@ -285,6 +285,12 @@ fn setup(msg: impl std::fmt::Display) -> Exit {
 }
 
 pub fn prepare(root: &Path, args: &[String]) -> Result<Plan, Exit> {
+    prepare_with(root, args, None)
+}
+
+/// [`prepare`] with the thread allocation given (the clean-checkout gate runs a fresh clone,
+/// which has no slot marker, with the allocation of the checkout that started it).
+pub fn prepare_with(root: &Path, args: &[String], given: Option<Alloc>) -> Result<Plan, Exit> {
     let level_name = args
         .first()
         .ok_or_else(|| setup("usage: scripts/t <level> [crate] [nextest args]"))?
@@ -299,7 +305,10 @@ pub fn prepare(root: &Path, args: &[String]) -> Result<Plan, Exit> {
             "RUSTFLAGS is set; unset it (it would throw away every build artifact)",
         ));
     }
-    let alloc = allocation(root).map_err(setup)?;
+    let alloc = match given {
+        Some(a) => a,
+        None => allocation(root).map_err(setup)?,
+    };
     let level = parse_level(&level_name).map_err(setup)?;
     let crate_arg = args.get(1).cloned().unwrap_or_default();
     if !matches!(level, Level::Noop | Level::L2 | Level::L3) && crate_arg.is_empty() {
@@ -331,6 +340,16 @@ pub fn prepare(root: &Path, args: &[String]) -> Result<Plan, Exit> {
         alloc,
         check_bin,
     })
+}
+
+impl Plan {
+    /// Judge this run as another level: its name in the verdict line and the log, and its
+    /// budget (the cold-checkout gate runs L2's command under the Cold budget).
+    pub fn relabel(&mut self, name: &str, budget_s: u64) {
+        self.level_name = name.to_owned();
+        self.budget_s = budget_s;
+        self.target = "-".to_owned();
+    }
 }
 
 /// The environment the command runs with.

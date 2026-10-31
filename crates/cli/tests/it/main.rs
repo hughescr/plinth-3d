@@ -6,6 +6,10 @@
 //! * `e2e_*` (in `e2e`): the real `plinth` binary and the real `plinth-check` program on the
 //!   three original Round STLs, against the committed stage manifest.
 
+//! * `broken_candidate_*` (in `candidate`): a print candidate is never published while a rule
+//!   is unverified or violated, with a control that publishes.
+
+mod candidate;
 mod common;
 mod e2e;
 mod failures;
