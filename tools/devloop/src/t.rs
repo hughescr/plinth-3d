@@ -170,7 +170,7 @@ pub fn build_command(
         }
         cmd.extend(extra.iter().cloned());
     }
-    if needs_checker(level, &pkg, extra) {
+    if needs_checker(level, &pkg) {
         // Build the checker once, here, before nextest starts; the tests never run cargo.
         let mut wrapped = vec![s("sh"), s("-c"), s(BUILD_CHECKER_THEN_EXEC), s("sh")];
         wrapped.append(&mut cmd);
@@ -195,15 +195,14 @@ const BUILD_CHECKER_THEN_EXEC: &str = "(cd checker && cargo build --locked) && e
 
 /// True when the tests this level selects start the checker program (directly or through the
 /// `plinth` binary), so the runner must build it first and pass its path in `PLINTH_CHECK_BIN`.
-/// L2 and L3 build it in their own command chain. For L1 and L1d: the acceptance crate always
-/// (readers-agree); the CLI crate when the caller chose a filter (then the end-to-end tests may
-/// be selected).
-fn needs_checker(level: Level, pkg: &str, extra: &[String]) -> bool {
+/// L2 and L3 build it in their own command chain. For L1 and L1d: the acceptance crate
+/// (readers-agree) and the CLI crate, with or without a filter. The CLI end-to-end tests start
+/// the checker, and the L1 filter (`NOT_E2E`) does not match every such name
+/// (`threads_bench_e2e_*`).
+fn needs_checker(level: Level, pkg: &str) -> bool {
     match level {
         Level::L2 | Level::L3 => true,
-        Level::L1 | Level::L1d => {
-            pkg == "plinth-acceptance" || (pkg == "plinth-cli" && has_filter(extra))
-        }
+        Level::L1 | Level::L1d => pkg == "plinth-acceptance" || pkg == "plinth-cli",
         Level::Noop | Level::L0 => false,
     }
 }
@@ -322,7 +321,7 @@ pub fn prepare_with(root: &Path, args: &[String], given: Option<Alloc>) -> Resul
     }
     let extra = args.get(2..).unwrap_or_default();
     let (cmd, cwd, crate_label) = build_command(root, level, &crate_arg, extra);
-    let check_bin = needs_checker(level, &package_of(&crate_arg), extra).then(|| check_bin(root));
+    let check_bin = needs_checker(level, &package_of(&crate_arg)).then(|| check_bin(root));
     let cmd = if alloc.slot == "bench" {
         with_bench_profile(cmd)
     } else {
@@ -676,9 +675,10 @@ mod tests {
         let (acc, cwd, _) = build_command(Path::new("/r"), Level::L1, "acceptance", &[]);
         assert_eq!(acc, wrap);
         assert_eq!(cwd, PathBuf::from("/r"));
-        // The CLI crate runs no checker-starting test unless the caller picks a filter.
+        // The CLI crate starts the checker with or without a filter (L1 and L1d alike).
         let (plain, _, _) = build_command(Path::new("/r"), Level::L1, "cli", &[]);
-        assert_eq!(plain[0], "cargo");
+        assert_eq!(plain[..4], wrap[..4]);
+        assert_eq!(plain[4..7], s(&["cargo", "nextest", "run"])[..]);
         let own = s(&["-E", "test(e2e_)"]);
         let (mine, _, _) = build_command(Path::new("/r"), Level::L1d, "cli", &own);
         assert_eq!(mine[..4], wrap[..4]);
@@ -708,7 +708,7 @@ mod tests {
                 slot: "s1".into(),
                 threads: 7,
             },
-            check_bin: needs_checker(level, &package_of(crate_arg), extra).then(|| check_bin(root)),
+            check_bin: needs_checker(level, &package_of(crate_arg)).then(|| check_bin(root)),
         }
     }
 
@@ -726,6 +726,8 @@ mod tests {
             (Level::L2, "", vec![]),
             (Level::L3, "", vec![]),
             (Level::L1, "acceptance", vec![]),
+            (Level::L1, "cli", vec![]),
+            (Level::L1d, "cli", vec![]),
             (Level::L1d, "cli", s(&["-E", "test(e2e_)"])),
         ] {
             let env = command_env(&plan_for(root, level, krate, &extra));
@@ -736,7 +738,6 @@ mod tests {
         for (level, krate) in [
             (Level::L0, "acceptance"),
             (Level::L1, "geom"),
-            (Level::L1, "cli"),
             (Level::L1, "check"),
             (Level::Noop, ""),
         ] {
