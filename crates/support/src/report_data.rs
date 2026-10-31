@@ -5,7 +5,11 @@
 //! `plinth-cli`'s report and by `plinth-render`. Every number states what it counts; the
 //! fields here carry the count and the unit, the report text carries the denominator.
 
-use crate::load::{LoadReport, LoadWarning, SiteClass};
+use crate::load::needs::{Coverage, NeedsMap, SiteTag};
+use crate::load::{
+    AssignedSource, Extras, LayerStack, LayoutView, LoadDetail, LoadReport, LoadWarning, SiteClass,
+    Structure, analyse_full, assign_sources,
+};
 
 /// Hashes and pose: which files this report is about.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -35,6 +39,8 @@ pub struct ProcessValues {
     pub coverage_reach_mm: f64,
     /// The overhang angle, degrees from horizontal.
     pub overhang_deg: f64,
+    /// Lift of the lowest model point above the plate, mm (H4).
+    pub lift_mm: f64,
 }
 
 /// Contacts counted by site class (not native record count).
@@ -119,6 +125,8 @@ pub struct ReportData {
     pub process: ProcessValues,
     /// The load model's answer, if it ran.
     pub load: Option<LoadReport>,
+    /// The numbers behind the load answer, the layout it was run on and the model structure.
+    pub load_data: Option<LoadData>,
     /// The supports block.
     pub supports: SupportsSummary,
     /// Volumes and height.
@@ -127,6 +135,150 @@ pub struct ReportData {
     pub run: RunData,
     /// All warnings, by class (a copy of the load warnings plus the placement ones).
     pub warnings: Vec<LoadWarning>,
+}
+
+/// What the overhang samples say, in surface and plan-view area (the design's section 0 lists
+/// plan-view areas; the surface area is larger).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NeedsSummary {
+    /// Samples taken.
+    pub samples: usize,
+    /// Surface area of the faces flatter than the limit, mm².
+    pub surface_mm2: f64,
+    /// The same area projected on the horizontal plane, mm².
+    pub projected_mm2: f64,
+    /// Plan-view area below 30 degrees, mm².
+    pub below_30_projected_mm2: f64,
+    /// Plan-view area from 30 to the limit, mm².
+    pub from_30_projected_mm2: f64,
+    /// Surface area by site class: hidden, partly visible, top, undecided (mm²).
+    pub class_surface_mm2: [f64; 4],
+    /// Cover of the samples by the layout.
+    pub coverage: Option<Coverage>,
+}
+
+impl NeedsSummary {
+    /// Summarise a needs map and the coverage found with it.
+    #[must_use]
+    pub fn of(needs: &NeedsMap, coverage: Option<Coverage>) -> Self {
+        let class = |f: fn(SiteTag) -> bool| needs.class_area_mm2(f);
+        Self {
+            samples: needs.points.len(),
+            surface_mm2: needs.total_area_mm2(),
+            projected_mm2: needs.band_projected_mm2(0.0, 180.0),
+            below_30_projected_mm2: needs.band_projected_mm2(0.0, 30.0),
+            from_30_projected_mm2: needs.band_projected_mm2(30.0, needs.limit_deg),
+            class_surface_mm2: [
+                class(|c| c == SiteTag::Hidden),
+                class(|c| c == SiteTag::PartlyVisible),
+                class(|c| c == SiteTag::Top),
+                class(|c| matches!(c, SiteTag::Unverified(_))),
+            ],
+            coverage,
+        }
+    }
+}
+
+/// How the largest ratio changes when the assumptions change (design section 4.7).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Sensitivity {
+    /// Largest tributary ratio with the slab envelope (the headline convention).
+    pub envelope_largest: f64,
+    /// Largest tributary ratio with the mid-plane slice areas instead.
+    pub midplane_largest: f64,
+    /// A lower bound on the contacts that hold the peak layer at P5 = 18: the peak area over
+    /// 18 times the largest limiting section in the layout. Not the planner's count (that
+    /// needs the planner); `None` when there is no contact.
+    pub contacts_lower_bound_p5_18: Option<u32>,
+}
+
+/// The load model's inputs and answer for one supported model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadData {
+    /// The numbers behind the report.
+    pub detail: LoadDetail,
+    /// The layout it was run on.
+    pub layout: LayoutView,
+    /// Islands, cups and reach.
+    pub structure: Structure,
+    /// The overhang samples, with their site class.
+    pub needs: NeedsMap,
+    /// Their summary.
+    pub needs_summary: NeedsSummary,
+    /// Sensitivity to the area convention and to P5.
+    pub sensitivity: Sensitivity,
+    /// The source elements of the peak layer and the contact each goes to (picture 7b).
+    pub peak_sources: Vec<AssignedSource>,
+}
+
+/// The stack with every layer's areas scaled from the envelope to the mid-plane slice.
+fn midplane_variant(stack: &LayerStack) -> LayerStack {
+    let mut out = stack.clone();
+    for l in &mut out.layers {
+        let s = if l.model_envelope > 0.0 {
+            l.model_midplane / l.model_envelope
+        } else {
+            1.0
+        };
+        l.model_envelope *= s;
+        for c in &mut l.components {
+            c.area *= s;
+            c.sources.iter_mut().for_each(|e| e.area *= s);
+        }
+    }
+    out
+}
+
+fn largest_tributary(d: &LoadDetail) -> f64 {
+    d.sections.iter().map(|s| s.tributary.0).fold(0.0, f64::max)
+}
+
+impl LoadData {
+    /// Run the load model on `stack` and `layout` and gather everything the report needs.
+    #[must_use]
+    pub fn build(
+        stack: &LayerStack,
+        layout: LayoutView,
+        structure: Structure,
+        needs: NeedsMap,
+    ) -> Self {
+        let extras = Extras {
+            structure: Some(&structure),
+            needs: Some(&needs),
+        };
+        let detail = analyse_full(stack, &layout, &extras);
+        let mid = analyse_full(&midplane_variant(stack), &layout, &Extras::default());
+        let best_section = layout
+            .contacts
+            .iter()
+            .map(|c| c.patch_lower_mm2.min(c.neck_area_mm2))
+            .fold(0.0, f64::max);
+        let lower_bound = detail.peak.filter(|_| best_section > 0.0).map(|p| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            {
+                (p.area_mm2 / (18.0 * best_section)).ceil() as u32
+            }
+        });
+        let sensitivity = Sensitivity {
+            envelope_largest: largest_tributary(&detail),
+            midplane_largest: largest_tributary(&mid),
+            contacts_lower_bound_p5_18: lower_bound,
+        };
+        let needs_summary = NeedsSummary::of(&needs, detail.coverage);
+        let peak_sources = detail
+            .peak
+            .map(|p| assign_sources(stack, &layout, p.layer))
+            .unwrap_or_default();
+        Self {
+            peak_sources,
+            detail,
+            layout,
+            structure,
+            needs,
+            needs_summary,
+            sensitivity,
+        }
+    }
 }
 
 impl ReportData {
