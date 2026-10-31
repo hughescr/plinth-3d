@@ -563,7 +563,7 @@ Step 12 then generates the supported Round 25 with zero violated or unverified a
 
 **For the owner:**
 
-1. **The post-output ChituBox sample** (PRD §12): at step 12, he opens, saves and slices a plinth-written file so we learn which solid ChituBox slices. Required before printing (PRD §8.1).
+1. **The post-output ChituBox sample** (PRD §12): at step 12, he opens, saves and slices a plinth-written file so we learn which solid ChituBox slices. Required before printing (PRD §8.1). The checker's hard-limit verdicts are measured on the written canonical support triangles only (ruling 2026-10-31, gpt-astra accepted with conditions), so this test must discriminate: a differential pair (one project with native supports, one with the same triangles as an ordinary mesh at identical coordinates), including an oblique tapered start and a sphere/contact boundary placed at layer and pixel phases where the true-circle and polygon predictions differ visibly. Compare decoded layer masks, not screenshots, before and after a native resave; record files, hashes, ChituBox version and slicing profile. The earlier load test (format spec §18) covered model-only files, so supported files are still untested.
 
 **For the orchestrator (decide from results, no owner input needed):**
 
