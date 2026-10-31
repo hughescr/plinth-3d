@@ -103,6 +103,15 @@ impl Run {
     }
 }
 
+/// The data the report and pictures of one supported model are made from (lane A fills it
+/// from the plan and the written file; lane B's `report::fr21_json` renders it). Step 0
+/// stub: a transport run has no supports, so it answers an unverified record.
+#[must_use]
+pub fn collect_report_data(model: &ModelRun) -> plinth_support::report_data::ReportData {
+    let _ = model;
+    plinth_support::report_data::ReportData::unverified("supported output is not built yet")
+}
+
 type Failure = (&'static str, String);
 
 fn timed<T>(steps: &mut Vec<Step>, name: &'static str, f: impl FnOnce() -> T) -> T {

@@ -16,23 +16,16 @@
 //! * A shape the native files do not let us reproduce is refused with
 //!   [`ShapeError::Unverified`]; it is never guessed. Today that is the hex raft mat.
 
-mod math;
-mod solids;
-
-pub use math::V3;
-pub use solids::{
-    BRIDGE_TRIANGLES, FRUSTUM_SIDES, FRUSTUM_TRIANGLES, PAD_SIDES, PAD_TRIANGLES, SPHERE_RINGS,
-    SPHERE_SIDES, SPHERE_TRIANGLES,
+// The pure f32 mesh kernel lives in `plinth_geom::shapes` (design step11-construction.md
+// section 10), so `plinth-support` can build and check the same vertices. This module keeps
+// the record building and re-exports the kernel's names, so callers need not change.
+pub use plinth_geom::shapes::{
+    BRIDGE_TRIANGLES, FRUSTUM_SIDES, FRUSTUM_TRIANGLES, MESH_TOLERANCE_ULPS, PAD_SIDES,
+    PAD_TRIANGLES, SPHERE_RINGS, SPHERE_SIDES, SPHERE_TRIANGLES, V3, mesh_error_ulps, ulp,
 };
 
 use plinth_chitubox::{RecordType, SupportRecord};
-
-/// The largest distance, in f32 units in the last place of the part's largest coordinate
-/// (see [`mesh_error_ulps`]), between a built mesh and the native one. The measured maximum
-/// over every native record is 1.5; the justification is in the format document, section
-/// 19. Two ULP is under 4 nanometres for coordinates below 32 mm, about 25,000 times finer
-/// than the smallest limit the checker applies (0.1 mm).
-pub const MESH_TOLERANCE_ULPS: f32 = 2.0;
+use plinth_geom::shapes::{bridge, frustum, pad, sphere};
 
 /// Type-2 tail word 0 in every native record.
 pub const FOOT_CONE_TAIL: f32 = 0.15;
@@ -173,10 +166,10 @@ fn check_finite(vals: &[f32], what: &'static str) -> Result<(), ShapeError> {
 fn axis_ok(start: V3, end: V3) -> Result<(), ShapeError> {
     check_finite(
         &[start[0], start[1], start[2], end[0], end[1], end[2]],
-        "non-finite point",
+        "non-finite point coordinate",
     )?;
-    let d = math::sub(end, start);
-    if math::length(d) > 0.0 {
+    let d = plinth_geom::shapes::math::sub(end, start);
+    if plinth_geom::shapes::math::length(d) > 0.0 {
         Ok(())
     } else {
         Err(ShapeError::Degenerate("start and end coincide"))
@@ -224,7 +217,7 @@ pub fn build(spec: &Spec) -> Result<SupportRecord, ShapeError> {
                 SphereRole::FootBall => RecordType::FOOT_BALL,
                 SphereRole::JointBall => RecordType::JOINT_BALL,
             };
-            let mesh = solids::sphere(start, end, radius);
+            let mesh = sphere(start, end, radius);
             Ok(record(ty, (start, end), (radius, radius), [0.0, 0.0], mesh))
         }
         Spec::TipCone {
@@ -237,7 +230,7 @@ pub fn build(spec: &Spec) -> Result<SupportRecord, ShapeError> {
             axis_ok(start, end)?;
             check_positive(&[r1, r2])?;
             check_finite(&[contact], "non-finite contact value")?;
-            let mesh = solids::frustum(start, end, r1, r2);
+            let mesh = frustum(start, end, r1, r2);
             Ok(record(
                 RecordType::TIP_CONE,
                 (start, end),
@@ -263,7 +256,7 @@ pub fn build(spec: &Spec) -> Result<SupportRecord, ShapeError> {
                 // the bottom (r1) up to the top (r2).
                 FrustumRole::BasePad => (RecordType::BASE_PAD, 0.0, (end, start)),
             };
-            let mesh = solids::frustum(mesh_ends.0, mesh_ends.1, r1, r2);
+            let mesh = frustum(mesh_ends.0, mesh_ends.1, r1, r2);
             Ok(record(ty, (start, end), (r1, r2), [tail, 0.0], mesh))
         }
         Spec::RaftPad {
@@ -274,7 +267,7 @@ pub fn build(spec: &Spec) -> Result<SupportRecord, ShapeError> {
         } => {
             check_finite(&[centre[0], centre[1], z_top], "non-finite pad position")?;
             check_positive(&[thickness, diameter])?;
-            let mesh = solids::pad(centre, z_top, z_top - thickness, diameter / 2.0);
+            let mesh = pad(centre, z_top, z_top - thickness, diameter / 2.0);
             let p = [centre[0], centre[1], 0.0];
             Ok(record(
                 RecordType::RAFT,
@@ -303,7 +296,7 @@ pub fn build(spec: &Spec) -> Result<SupportRecord, ShapeError> {
             if !(length_squared > 0.0 && length_squared.is_finite()) {
                 return Err(ShapeError::Degenerate("bridge ends coincide"));
             }
-            let mesh = solids::bridge(from, to, z_top, z_top - thickness, width / 2.0);
+            let mesh = bridge(from, to, z_top, z_top - thickness, width / 2.0);
             let (a, b) = ([from[0], from[1], 0.0], [to[0], to[1], 0.0]);
             Ok(record(
                 RecordType::RAFT,
@@ -355,44 +348,6 @@ pub fn attr(kind: u8, preset_id: u8) -> u64 {
 #[must_use]
 pub fn attr_pair(low: u64, high: u64) -> u64 {
     (high << 32) | low
-}
-
-/// The spacing between `x` and the next larger f32 (one unit in the last place).
-#[must_use]
-pub fn ulp(x: f32) -> f32 {
-    let a = x.abs();
-    f32::from_bits(a.to_bits() + 1) - a
-}
-
-/// The largest difference between two meshes of the same shape, in units in the last place
-/// of the largest coordinate magnitude in either mesh. `None` when the triangle counts
-/// differ or a value is not finite. 0.0 means bit-equal.
-///
-/// The unit is the ULP of the mesh's largest coordinate, not of each coordinate, because
-/// the native vertices are an f32 sum "part position + rotated offset": the sum rounds at
-/// the size of the position, so a coordinate that lands near 0 still carries an error of
-/// that size.
-#[must_use]
-pub fn mesh_error_ulps(
-    a: &[plinth_chitubox::Triangle],
-    b: &[plinth_chitubox::Triangle],
-) -> Option<f32> {
-    if a.len() != b.len() {
-        return None;
-    }
-    let pairs = || {
-        a.iter()
-            .flatten()
-            .flatten()
-            .zip(b.iter().flatten().flatten())
-    };
-    if pairs().any(|(x, y)| !x.is_finite() || !y.is_finite()) {
-        return None;
-    }
-    let scale = pairs().fold(0.0f32, |m, (x, y)| m.max(x.abs()).max(y.abs()));
-    let unit = ulp(scale.max(f32::MIN_POSITIVE));
-    let worst = pairs().fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
-    Some(worst / unit)
 }
 
 #[cfg(test)]
@@ -514,21 +469,6 @@ mod tests {
         .unwrap();
         assert_eq!(bridge.tail_f32(0).to_bits(), BRIDGE_TAIL_W0.to_bits());
         assert_eq!(bridge.tail_f32(1).to_bits(), RAFT_TAIL_W1.to_bits());
-    }
-
-    #[test]
-    fn mesh_error_is_measured_at_the_scale_of_the_largest_coordinate() {
-        assert_eq!(ulp(1.0).to_bits(), f32::EPSILON.to_bits());
-        let a = [[[10.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]];
-        assert!(mesh_error_ulps(&a, &a).unwrap().abs() < 1e-9);
-        // Moving a near-zero coordinate by 2 ULP of the biggest coordinate (10.0) is 2.0.
-        let mut b = a;
-        b[0][1][0] = 2.0 * ulp(10.0);
-        let e = mesh_error_ulps(&a, &b).unwrap();
-        assert!((e - 2.0).abs() < 1e-4, "{e}");
-        assert!(mesh_error_ulps(&a, &[]).is_none());
-        b[0][0][0] = f32::NAN;
-        assert!(mesh_error_ulps(&a, &b).is_none());
     }
 
     #[test]

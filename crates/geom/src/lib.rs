@@ -8,16 +8,28 @@
 //!   take slices and fill caller-owned output; there is no single-point public query.
 //!   [`reference::closest_points_reference`] is the scalar reference they must equal.
 //! * [`counters`]: calls and items per batch operation, to prove no per-item calls.
+//! * [`shapes`]: the pure f32 mesh kernel of the native ChituBox support shapes.
+//! * Step 11 batch operations, signatures first ([`measure::Measure`] answers
+//!   `Unverified` until each is built): [`slice`], [`raster`] and [`label`] (layers, lane
+//!   B); [`patch`], [`clearance`] and [`ray`] (construction, lane A).
 
 pub mod aabb;
 pub mod bvh;
+pub mod clearance;
 pub mod counters;
 pub mod error;
+pub mod label;
 pub mod loop_canary;
+pub mod measure;
 pub mod mesh;
 pub mod morton;
+pub mod patch;
 pub mod query;
+pub mod raster;
+pub mod ray;
 pub mod reference;
+pub mod shapes;
+pub mod slice;
 pub mod stl;
 mod tri;
 

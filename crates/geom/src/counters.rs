@@ -22,9 +22,21 @@ pub enum Op {
     MortonKeys,
     /// BVH construction: items are triangles.
     BvhBuild,
+    /// `slice::slice_layers`: items are layers.
+    SliceLayers,
+    /// `raster::rasterise`: items are layers.
+    Rasterise,
+    /// `label::label_components`: items are layers.
+    LabelComponents,
+    /// `patch::ball_patches`: items are balls.
+    BallPatches,
+    /// `clearance::solid_gaps`: items are solids.
+    SolidGaps,
+    /// `ray::first_hits`: items are rays.
+    FirstHits,
 }
 
-const OPS: usize = 3;
+const OPS: usize = 9;
 
 impl Op {
     const fn slot(self) -> usize {
@@ -32,6 +44,12 @@ impl Op {
             Self::ClosestPoints => 0,
             Self::MortonKeys => 1,
             Self::BvhBuild => 2,
+            Self::SliceLayers => 3,
+            Self::Rasterise => 4,
+            Self::LabelComponents => 5,
+            Self::BallPatches => 6,
+            Self::SolidGaps => 7,
+            Self::FirstHits => 8,
         }
     }
 }

@@ -2,6 +2,7 @@
 
 mod broken;
 mod readers_agree;
+mod rule_blocks;
 
 #[test]
 fn cli_chain_is_emit_chain_plus_cli_canary() {
