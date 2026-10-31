@@ -383,3 +383,64 @@ fn e2e_exit_codes_and_no_overwrite_through_the_real_binary() {
     assert_eq!(o.status.code(), Some(4), "{}", text(&o.stderr));
     assert!(!out3.exists(), "not even the output folder is made");
 }
+
+/// Safety witness, not a supported-output acceptance test: a construction failure
+/// must not fall back to the old model-only transport path for approved Round 25.
+#[test]
+fn e2e_approved_round25_never_falls_back_to_transport() {
+    let w = scratch("approved-construction");
+    let input = root().join("fixtures/round/approved/Round 25.keepup.stl");
+    let out = w.join("out");
+    let report = w.join("run.json");
+    let result = plinth(
+        &[
+            "--max-threads",
+            &slot_threads().to_string(),
+            "--out-dir",
+            &out.display().to_string(),
+            "--report",
+            &report.display().to_string(),
+        ],
+        &[&input],
+    );
+    println!(
+        "output directory: {}\nreport: {}\n{}",
+        out.display(),
+        report.display(),
+        text(&result.stderr)
+    );
+    let doc = jsonin::parse(&fs::read(&report).unwrap()).unwrap();
+    println!("{}", doc.render());
+    let m = model(&doc, 0);
+    assert_eq!(m.get("print_candidate"), Some(&Json::Bool(false)));
+    if result.status.success() {
+        let file = out.join("Round 25.keepup.chitubox");
+        let bytes = fs::read(&file).unwrap();
+        let native = plinth_chitubox::parse(&bytes).unwrap();
+        assert!(
+            !native.models[0]
+                .supports
+                .as_ref()
+                .unwrap()
+                .records
+                .is_empty()
+        );
+        assert!(out.join("Round 25.keepup.fr21.json").is_file());
+        assert_eq!(
+            fs::read_dir(out.join("Round 25.keepup.pictures"))
+                .unwrap()
+                .count(),
+            12
+        );
+    } else {
+        assert_eq!(result.status.code(), Some(1));
+        assert_eq!(
+            m.get("failed_stage").and_then(Json::as_str),
+            Some("construct")
+        );
+        assert!(
+            names(&out).is_empty(),
+            "no partial or model-only substitute"
+        );
+    }
+}

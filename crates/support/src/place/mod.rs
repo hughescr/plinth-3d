@@ -1,24 +1,28 @@
-//! The planner: where contacts go and how big they are (lane A; design
-//! `step11-construction.md` sections 5.2 to 5.6). Step 0 holds the signatures only.
-//!
-//! The planner works in a private proposal and calls the load model
-//! ([`crate::load::analyse`]) once per round. It never moves or grows an admitted contact.
+//! Private, bounded placement search. No admitted contact is moved or enlarged.
+//! Exhausted samples are not a proof that no legal anchor exists.
 
-use crate::construct::ContactCandidate;
-use crate::load::{LayerStack, LoadReport};
+mod layout;
+mod search;
+#[cfg(test)]
+mod tests;
 
-/// Planner settings (starting values from the design, **[S]**).
+use crate::construct::{ContactCandidate, Contacts, PlanBuilder};
+use crate::load::needs::{self, NeedsMap, RestPose, SiteTag};
+use crate::load::{self, LayerStack, LayoutView, LoadReport, ModelLayers};
+use plinth_geom::Bvh;
+
+pub use layout::layout_from_contacts;
+
+/// Search settings **[S]**, not spacing laws or physical guarantees.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlanSettings {
-    /// Most planner rounds.
+    /// Maximum private rounds.
     pub max_rounds: u32,
-    /// Spacing of the hexagonal sample over the needs regions is `coverage_reach_mm` times
-    /// the square root of 3, mm.
+    /// Maximum distance to an earlier contact, mm.
     pub coverage_reach_mm: f64,
-    /// Inner and outer radius of the ring of added contacts around a capped tip, mm.
+    /// Inner and outer radii for load additions, mm.
     pub ring_mm: [f64; 2],
 }
-
 impl Default for PlanSettings {
     fn default() -> Self {
         Self {
@@ -28,51 +32,131 @@ impl Default for PlanSettings {
         }
     }
 }
-
-/// How the search ended (design section 5.6 step 4).
+/// How the bounded search ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Termination {
-    /// Every ratio is within the design ratio and every island is anchored.
+    /// All modelled constraints are satisfied (not checker acceptance).
     Satisfied,
-    /// The rounds or samples ran out; nothing is proved.
+    /// Samples or rounds exhausted; does not prove impossibility.
     SearchBudgetExhausted,
-    /// No legal anchor exists within the stated search domain.
+    /// Reserved for a complete geometric impossibility proof, never sampling.
     ProvedNoLegalAnchor,
-    /// The planner is not built yet (step 0 stub).
+    /// Invalid or unavailable inputs prevented planning.
     NotBuilt,
 }
-
-/// The planner's answer.
+/// Private proposal. The caller must probe and atomically commit it before routing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Proposal {
-    /// How the search ended.
+    /// Search outcome, not print eligibility.
     pub termination: Termination,
-    /// The candidates to probe and commit, in a stable order.
+    /// Exact fixed-size candidates, stable order.
     pub candidates: Vec<ContactCandidate>,
-    /// The load model's last report on the proposal.
+    /// Last modelled load result.
     pub load: LoadReport,
+    /// The matching load view, in the plate frame.
+    pub layout: LayoutView,
+    /// Classified sub-45 degree needs, including the visible rim band.
+    pub needs: NeedsMap,
+    /// Admission rejections counted by reason.
+    pub rejections: Vec<(String, u64)>,
 }
 
-/// Plan the contacts for a sliced model.
+/// Build a classified site pool, seed first-layer islands, cover overhang and reach,
+/// then size and add contacts in private batches. Uses P5 = 12 **[O]**.
 #[must_use]
-pub fn plan_contacts(stack: &LayerStack, settings: &PlanSettings) -> Proposal {
-    let _ = (stack, settings);
-    Proposal {
-        termination: Termination::NotBuilt,
-        candidates: Vec::new(),
-        load: LoadReport::unverified(crate::load::DESIGN_RATIO, "the planner is not built yet"),
+pub fn plan_contacts(
+    builder: &PlanBuilder<Contacts>,
+    layers: &ModelLayers,
+    settings: &PlanSettings,
+) -> Proposal {
+    let mesh = builder.model().mesh();
+    let mut sites = needs::overhang_points(mesh, 89.9, 0.25);
+    // First-layer anchors need samples at the actual lower edge, not only at
+    // lattice centres. Stay slightly inside each face to retain its normal.
+    let mut edge_sites = Vec::new();
+    for t in 0..mesh.triangle_count() {
+        let [a, b, c] = mesh.triangle_corners(t);
+        let u: [f64; 3] = std::array::from_fn(|k| b[k] - a[k]);
+        let v: [f64; 3] = std::array::from_fn(|k| c[k] - a[k]);
+        let n = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        let len = n.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if len <= 0. || n[2] >= -0.001 * len {
+            continue;
+        }
+        for vertex in [a, b, c] {
+            edge_sites.push(needs::NeedPoint {
+                xyz: std::array::from_fn(|k| {
+                    vertex[k] * 0.99998 + (a[k] + b[k] + c[k]) / 3. * 0.00002
+                }),
+                normal: n.map(|x| x / len),
+                angle_deg: (-n[2] / len).acos().to_degrees(),
+                area_mm2: 0.,
+                triangle: t as u32,
+                class: SiteTag::Unverified("not classified"),
+            });
+        }
     }
+    // Edge samples are search alternatives only, not additional measured needs area.
+    let needs_count = sites.points.len();
+    sites.points.extend(edge_sites);
+    if let Ok(bvh) = Bvh::build(mesh) {
+        // The approved underside points along rotated +Z (design section 0).
+        // Resting UP points the opposite way, toward the decorated top. Using
+        // the underside normal here would reverse the visibility classes.
+        let a = builder.model().keep_up().rotation_x_deg.to_radians();
+        needs::classify_sites(
+            &mut sites.points,
+            &RestPose {
+                up: [0., a.sin(), -a.cos()],
+            },
+            &|rays, out| plinth_geom::ray::first_hits(&bvh, rays, out),
+        );
+    }
+    let needs = NeedsMap {
+        points: sites.points[..needs_count]
+            .iter()
+            .copied()
+            .filter(|p| p.angle_deg < 45.)
+            .collect(),
+        limit_deg: 45.,
+        spacing_mm: 0.25,
+    };
+    sites
+        .points
+        .retain(|p| matches!(p.class, SiteTag::Hidden | SiteTag::PartlyVisible));
+    let shift = -f64::from(builder.model().plate_z());
+    let mut result = search::run(builder, layers, &sites.points, settings, shift);
+    // Reports and pictures have one frame: plate coordinates, never native local z.
+    result.needs = needs;
+    for p in &mut result.needs.points {
+        p.xyz[2] += shift;
+    }
+    result.load = load::analyse_full(
+        &layers.stack,
+        &result.layout,
+        &load::Extras {
+            structure: Some(&layers.structure),
+            needs: Some(&result.needs),
+        },
+    )
+    .report;
+    // A modelled ratio cannot clear unresolved anchoring or load-path warnings.
+    if result
+        .load
+        .warnings
+        .iter()
+        .any(|w| w.class != load::WarningClass::Information)
+    {
+        result.termination = Termination::SearchBudgetExhausted;
+    }
+    result
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_stub_proposes_nothing_and_says_so() {
-        let p = plan_contacts(&LayerStack::default(), &PlanSettings::default());
-        assert_eq!(p.termination, Termination::NotBuilt);
-        assert!(p.candidates.is_empty());
-        assert!(!p.load.is_computed());
-    }
+/// An absent layer stack is explicitly unverified, never an empty successful plan.
+fn unavailable(stack: &LayerStack) -> bool {
+    stack.layers.is_empty() || !stack.layer_height_mm.is_finite() || stack.layer_height_mm <= 0.
 }

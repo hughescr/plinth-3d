@@ -124,6 +124,55 @@ fn atomic_commit_stale_foreign_and_intrabatch_conflicts() {
     );
 }
 #[test]
+fn tip_family_radius_bound_is_inclusive_and_native_field_exact() {
+    let p = builder(&plate());
+    let mut c = candidate(0, 11.0);
+    c.ball_r = 0.42;
+    c.standoff = 0.24;
+    assert!(quotes(&p, &[c])[0].is_ok());
+    c.ball_r = f32::from_bits(c.ball_r.to_bits() + 1);
+    assert!(matches!(quotes(&p, &[c])[0], Err(Reject::UnknownShape)));
+}
+
+#[test]
+fn rounded_head_reach_includes_standoff_from_the_contact_site() {
+    let p = builder(&plate());
+    for (standoff, accepted) in [(0.249, true), (0.251, false)] {
+        let mut c = candidate(0, 11.0);
+        c.ball_r = 0.42;
+        c.standoff = standoff;
+        let out = quotes(&p, &[c]);
+        assert_eq!(out[0].is_ok(), accepted, "{out:?}");
+        if let Ok(q) = &out[0] {
+            for part in q.contact.parts() {
+                for vertex in part.mesh().iter().flatten() {
+                    assert!(native::distance(*vertex, c.site) <= 2.95);
+                }
+            }
+        } else {
+            assert!(matches!(out[0], Err(Reject::UnknownShape)), "{out:?}");
+        }
+    }
+}
+
+#[test]
+fn in_family_cone_tail_beyond_contact_region_is_not_exempted() {
+    let p = builder(&plate());
+    let mut c = candidate(0, 0.0);
+    c.ball_r = 0.42;
+    c.standoff = 0.39;
+    c.head_len = 2.64;
+    // The previous ball-centred bound passed (2.64 + 0.30 < 2.95), although
+    // even the cone's end CENTRE lies 3.03 mm from the contact site. Such a
+    // tail may not use the local >0.02 mm clearance exemption. §5.4's complete
+    // head maximum refuses it outright, even if it could meet a 0.32 mm gap.
+    assert!(c.head_len + c.joint_r < 2.95);
+    assert!(c.standoff + c.head_len > 3.0);
+    let out = quotes(&p, &[c]);
+    assert!(matches!(out[0], Err(Reject::UnknownShape)), "{out:?}");
+}
+
+#[test]
 fn joint_second_sheet_is_gap_too_small_before_commit() {
     let z = -2.4 - 0.0772 - 0.3 - 0.1;
     let mesh = Mesh::new(
@@ -288,7 +337,7 @@ fn construction_guards_targeted_and_measured() {
     let base = candidate(0, 0.);
     let mut cases = Vec::new();
     let mut c = base;
-    c.ball_r = 0.45;
+    c.ball_r = 0.41; // In-family, so this still witnesses H1, not the radius guard.
     c.standoff = 0.;
     cases.push((c, "area"));
     let mut c = base;

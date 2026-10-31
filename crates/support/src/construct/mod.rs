@@ -201,6 +201,10 @@ impl Quote {
     pub fn cand(&self) -> CandId {
         self.contact.cand
     }
+    /// Geometry certified by this private proposal; immutable until commit.
+    pub fn contact(&self) -> &Contact {
+        &self.contact
+    }
     /// Plan revision.
     pub fn rev(&self) -> u64 {
         self.rev
@@ -247,6 +251,10 @@ pub struct PlanBuilder<S> {
     _state: PhantomData<S>,
 }
 impl<S> PlanBuilder<S> {
+    /// The immutable frozen model; sites use its local frame.
+    pub fn model(&self) -> &PosedModel {
+        &self.model
+    }
     /// Current revision.
     pub fn rev(&self) -> u64 {
         self.rev
@@ -292,7 +300,16 @@ impl PlanBuilder<Contacts> {
     }
     /// Pure whole-layout probe; pair conflicts are checked inside this batch too.
     pub fn probe(&self, cands: &[ContactCandidate], out: &mut Vec<Result<Quote, Reject>>) {
-        contact::probe(self, cands, out);
+        contact::probe(self, cands, out, false);
+    }
+    /// Batch-measure mutually exclusive private alternatives. These quotes cannot
+    /// bypass pair guards: commit checks the whole selected batch again.
+    pub fn probe_alternatives(
+        &self,
+        cands: &[ContactCandidate],
+        out: &mut Vec<Result<Quote, Reject>>,
+    ) {
+        contact::probe(self, cands, out, true);
     }
     /// Consume one batch, sorted by candidate id, or change nothing.
     pub fn commit(&mut self, batch: QuoteBatch) -> Result<Vec<ContactId>, BatchReject> {

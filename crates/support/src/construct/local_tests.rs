@@ -121,6 +121,30 @@ fn verify(mesh: &Mesh, site: [f32; 3], axis: [f32; 3]) {
 }
 
 #[test]
+fn oversized_ball_cannot_claim_clearance_exemption_beyond_contact_region() {
+    // Exact review regression: R=1.6, standoff=1.555 previously admitted a ball
+    // with a 0.2002 mm model gap outside the 3.0 mm contact-centred region.
+    let mesh = Mesh::new(
+        vec![-30., 30., 30., -30., 0.740, 0.740, 0.839],
+        vec![-30., -30., 30., 30., -0.05, 0.05, 0.0],
+        vec![0., 0., 0., 0., -3.1968, -3.1968, -3.14884],
+        vec![0, 2, 1, 0, 3, 2, 4, 5, 6],
+    )
+    .unwrap();
+    let shift: [f64; 3] =
+        std::array::from_fn(|k| (mesh.bounds().min[k] + mesh.bounds().max[k]) * 0.5);
+    let p = builder(&mesh);
+    let mut tip = candidate(0, 0.0);
+    tip.site = shift.map(|v| -v as f32);
+    tip.ball_r = 1.6;
+    tip.standoff = 1.555;
+    let mut out = Vec::new();
+    p.probe(&[tip], &mut out);
+    assert!(matches!(out[0], Err(Reject::UnknownShape)), "{out:?}");
+    assert_eq!(p.contact_count(), 0);
+}
+
+#[test]
 fn capped_departure_rejects_a_clear_cone_that_returns_below_cap() {
     for x in [0.35, 0.7] {
         let mesh = Mesh::new(

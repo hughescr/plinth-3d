@@ -112,7 +112,20 @@ impl PlanBuilder<Routed> {
             out.extend(proposals.iter().map(|_| Err(Reject::ResourceExhausted)));
             return;
         }
-        let prepared: Vec<_> = proposals.iter().map(|p| self.prepare_member(*p)).collect();
+        let mut prepared: Vec<_> = proposals.iter().map(|p| self.prepare_member(*p)).collect();
+        let braces: Vec<_> = prepared
+            .iter()
+            .filter_map(|q| q.as_ref().ok().and_then(|q| q.brace))
+            .collect();
+        if let Err(e) = self.check_node_spacing(&braces) {
+            // Member batches are committed atomically. Conservatively refuse all
+            // proposed braces in an invalid node layout, but keep column results.
+            for q in &mut prepared {
+                if q.as_ref().is_ok_and(|q| q.brace.is_some()) {
+                    *q = Err(e.clone());
+                }
+            }
+        }
         let solids: Vec<_> = prepared
             .iter()
             .filter_map(|p| p.as_ref().ok())
@@ -325,6 +338,30 @@ impl PlanBuilder<Routed> {
             .find(|c| c.member == id.ix)
             .ok_or(Reject::ForeignHandle)
     }
+    fn check_node_spacing(&self, proposed: &[BraceAnchor]) -> Result<(), Reject> {
+        for column in &self.columns {
+            let mut nodes: Vec<f32> = self
+                .braces
+                .iter()
+                .chain(proposed)
+                .filter_map(|b| {
+                    if b.from == column.contact {
+                        Some(b.from_z)
+                    } else if b.to == column.contact {
+                        Some(b.to_z)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            nodes.sort_by(f32::total_cmp);
+            nodes.dedup_by(|a, b| (*a - *b).abs() < 1e-5);
+            if nodes.windows(2).any(|w| w[1] - w[0] < 4.0) {
+                return Err(Reject::PrintOrder { layer: 0 });
+            }
+        }
+        Ok(())
+    }
     /// Consume a whole member batch or leave the builder unchanged.
     pub fn commit_members(
         &mut self,
@@ -348,6 +385,8 @@ impl PlanBuilder<Routed> {
                 return Err(Reject::NarrowJoin);
             }
         }
+        let braces: Vec<_> = batch.quotes.iter().filter_map(|q| q.brace).collect();
+        self.check_node_spacing(&braces)?;
         for (i, q) in batch.quotes.iter().enumerate() {
             for (part, &role) in self.members.iter().zip(&self.member_roles) {
                 keep_member(q, part, role, self.limits.gap)?;
@@ -356,28 +395,6 @@ impl PlanBuilder<Routed> {
                 for (k, part) in other.parts.iter().enumerate() {
                     keep_member(q, part, other.role(k), self.limits.gap)?;
                 }
-            }
-        }
-        for column in &self.columns {
-            let braces = self
-                .braces
-                .iter()
-                .chain(batch.quotes.iter().filter_map(|q| q.brace.as_ref()));
-            let mut nodes: Vec<f32> = braces
-                .filter_map(|b| {
-                    if b.from == column.contact {
-                        Some(b.from_z)
-                    } else if b.to == column.contact {
-                        Some(b.to_z)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            nodes.sort_by(f32::total_cmp);
-            nodes.dedup_by(|a, b| (*a - *b).abs() < 1e-5);
-            if nodes.windows(2).any(|w| w[1] - w[0] < 4.0) {
-                return Err(Reject::PrintOrder { layer: 0 });
             }
         }
         let mut ids = Vec::new();

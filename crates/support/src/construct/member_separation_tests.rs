@@ -157,6 +157,113 @@ fn lens_fixture(commit_c: bool, offset: f64) -> (PlanBuilder<Routed>, MemberProp
 }
 
 #[test]
+fn only_exact_crossed_x_pair_has_a_brace_brace_join_exemption() {
+    let section = Section::new(0.25).unwrap();
+    let rod =
+        |start, end| NativePart::frustum(PartKind::Rod, start, end, section, section).unwrap();
+    let q = MemberQuote {
+        plan: 0,
+        rev: 0,
+        parts: vec![rod([0., 0., 5.], [8., 0., 13.])],
+        column: None,
+        brace: Some(BraceAnchor {
+            from: 0,
+            to: 1,
+            from_z: 5.,
+            to_z: 13.,
+        }),
+    };
+    for reversed in [false, true] {
+        for (shift, joins) in [(0.0, true), (0.1, false), (-0.1, false)] {
+            let mut a = [0., 0., 13. + shift];
+            let mut b = [8., 0., 5. + shift];
+            let (from, to) = if reversed {
+                std::mem::swap(&mut a, &mut b);
+                (1, 0)
+            } else {
+                (0, 1)
+            };
+            let other = rod(a, b);
+            let role = MemberRole::Brace(BraceAnchor {
+                from,
+                to,
+                from_z: a[2],
+                to_z: b[2],
+            });
+            // Private separation guard test intentionally bypasses the independent
+            // node-spacing guard. Otherwise spacing could hide a loosened join.
+            let result = keep_member(&q, &other, role, 0.32);
+            assert_eq!(
+                result.is_ok(),
+                joins,
+                "shift={shift}, reverse={reversed}: {result:?}"
+            );
+            if !joins {
+                assert!(matches!(result, Err(Reject::GapTooSmall { gap }) if gap == 0.0));
+            }
+        }
+    }
+}
+
+#[test]
+fn node_spacing_is_checked_at_probe_and_atomic_commit() {
+    let (mut plan, first, _) = lens_fixture(false, 0.821);
+    let MemberProposal::Brace {
+        from,
+        to,
+        from_z,
+        to_z,
+        section,
+    } = first
+    else {
+        unreachable!()
+    };
+    // Parallel 45-degree braces are far enough apart to pass member clearance,
+    // but their distinct nodes are only 3 mm apart on each column, not 4 mm.
+    let second = MemberProposal::Brace {
+        from,
+        to,
+        from_z: from_z - 3.0,
+        to_z: to_z - 3.0,
+        section,
+    };
+    let mut quotes = Vec::new();
+    for proposal in [first, second] {
+        let mut out = Vec::new();
+        plan.probe_members(&[proposal], &mut out);
+        quotes.push(out.remove(0).expect("each brace alone is admissible"));
+    }
+    for proposals in [[first, second], [second, first]] {
+        let mut out = Vec::new();
+        plan.probe_members(&proposals, &mut out);
+        assert!(
+            out.iter()
+                .all(|r| matches!(r, Err(Reject::PrintOrder { .. }))),
+            "{out:?}"
+        );
+    }
+    let before = (plan.rev(), plan.members.len(), plan.braces.len());
+    assert!(matches!(
+        plan.commit_members(MemberQuoteBatch { quotes }),
+        Err(Reject::PrintOrder { .. })
+    ));
+    assert_eq!(before, (plan.rev(), plan.members.len(), plan.braces.len()));
+    let mut out = Vec::new();
+    plan.probe_members(&[first], &mut out);
+    plan.commit_members(MemberQuoteBatch::from_results(out).unwrap())
+        .unwrap();
+    let mut out = Vec::new();
+    plan.probe_members(&[second], &mut out);
+    assert!(matches!(out[0], Err(Reject::PrintOrder { .. })), "{out:?}");
+    // A forged private quote isolates the redundant commit-time spacing check.
+    let q = plan.prepare_member(second).unwrap();
+    assert!(matches!(
+        plan.commit_members(MemberQuoteBatch { quotes: vec![q] }),
+        Err(Reject::PrintOrder { .. })
+    ));
+}
+
+#[test]
 fn unrelated_offset_column_lens_is_rejected_in_probe_and_atomic_commit() {
     let (mut plan, brace, _) = lens_fixture(true, 0.49);
     let mut answers = Vec::new();

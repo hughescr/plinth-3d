@@ -8,6 +8,10 @@ use plinth_geom::{
     patch::{self, Ball},
 };
 
+// [S] Upper edge of the §5.4 tip family (largest proposed tip about 0.39–0.42 mm),
+// NOT the checker's wider validation domain. Compare native f32 fields directly.
+const MAX_TIP_BALL_R: f32 = 0.42;
+
 struct Prepared {
     contact: Contact,
     outer: Ball,
@@ -20,6 +24,7 @@ pub(super) fn probe(
     plan: &PlanBuilder<Contacts>,
     cands: &[ContactCandidate],
     out: &mut Vec<Result<Quote, Reject>>,
+    alternatives: bool,
 ) {
     out.clear();
     if cands.len() > 4096 || plan.contacts.len() + cands.len() > 4096 {
@@ -118,7 +123,7 @@ pub(super) fn probe(
                 break;
             }
         }
-        for (j, other) in out[..i].iter().enumerate() {
+        for (j, other) in out[..i].iter().enumerate().filter(|_| !alternatives) {
             if let Ok(other) = other
                 && let Err(e) = pair(&q.contact, &other.contact)
             {
@@ -154,12 +159,11 @@ fn prepare(
     let neck = Section::new(c.neck)?;
     let end = Section::new(c.joint_r / 1.04)?;
     if c.ball_r <= 0.0
+        || c.ball_r > MAX_TIP_BALL_R
         || c.standoff < 0.0
         || c.standoff >= c.ball_r
         || c.joint_r < 0.26
         || c.head_len < 1.5
-        || f64::from(c.head_len + c.joint_r) > 2.95
-        || f64::from(c.head_len + c.joint_r) > plan.limits.region
         || c.neck > c.joint_r / 1.04
     {
         return Err(Reject::UnknownShape);
@@ -191,8 +195,18 @@ fn prepare(
     };
     let cone_solid = cone.solid().ok_or(Reject::UnknownShape)?;
     let joint_solid = joint_ball.solid().ok_or(Reject::UnknownShape)?;
-    if let Solid::Ball(joint_envelope) = joint_solid
-        && norm(sub(outer.centre, joint_envelope.centre)) + joint_envelope.radius > 2.95
+    // Measure from the CONTACT SITE, not the displaced ball centre. These are
+    // enclosures of the rounded fields AND the native mesh, including ENVELOPE.
+    // §5.4's 2.95 mm complete-head maximum is stricter than the 3.0 mm region:
+    // fail closed on a longer ball/cone rather than grant a >0.02 mm exemption to
+    // any tail outside the region. The joint still needs its full 0.32 mm gap.
+    let site = c.site.map(f64::from);
+    if [Solid::Ball(outer), cone_solid, joint_solid]
+        .into_iter()
+        .any(|solid| {
+            let reach = reach_from_site(solid, site);
+            reach > 2.95 || reach > plan.limits.region
+        })
     {
         return Err(Reject::UnknownShape);
     }
@@ -234,6 +248,22 @@ fn prepare(
         cone: cone_solid,
         joint: joint_solid,
     })
+}
+
+fn reach_from_site(solid: Solid, site: [f64; 3]) -> f64 {
+    // A finite frustum is the convex hull of its two end discs. Enclosing both
+    // discs in this site-centred ball encloses their entire hull. This conservative
+    // bound needs no angular sampling; 1e-8 mm encloses arithmetic at <=100 mm.
+    let reach = match solid {
+        Solid::Ball(ball) => norm(sub(ball.centre, site)) + ball.radius,
+        Solid::Frustum {
+            start,
+            end,
+            r_start,
+            r_end,
+        } => (norm(sub(start, site)) + r_start).max(norm(sub(end, site)) + r_end),
+    };
+    reach + 1e-8
 }
 
 fn check_measurements(
