@@ -14,7 +14,7 @@ pub const BREAKING_RATIO: f64 = 25.0;
 /// A layer's centroid farther than this from the spread of the active contacts is outside, mm.
 const OUTSIDE_EPS_MM: f64 = 1e-6;
 /// A rigid-lever residual above this means the layer's load cannot be balanced.
-const LEVER_RESIDUAL_LIMIT: f64 = 0.05;
+const LEVER_RESIDUAL_LIMIT: f64 = super::lever::EQUILIBRIUM_LIMIT;
 /// Load centred farther than this from its contact makes the neck bend, mm **[U]**.
 pub const NECK_OFFSET_MM: f64 = 2.0;
 /// A column longer than this, mm, needs bracing by the owner's Light rule **[O]**.
@@ -62,9 +62,10 @@ pub(super) fn all(
     unsupported(col, stack, &mut out, &mut blocked);
     broken_routes(col, &mut out, &mut blocked);
     breaking(&detail.groups, &mut out, &mut blocked);
-    tributary_over(detail, &blocked, &mut out);
+    sizing_over(detail, &blocked, &mut out);
     sharing_over(detail, layout, &mut out);
     not_assessed(&detail.groups, &blocked, &mut out);
+    local_transfer(&detail.groups, &blocked, &mut out);
     structural_unknowns(detail, layout, &mut out);
     let mut coverage = None;
     if let Some(s) = extras.structure {
@@ -216,7 +217,7 @@ fn component_blocked(blocked: &BTreeSet<(u32, u32)>, comp: Option<u32>, lo: u32,
     comp.is_some_and(|c| blocked.range((c, lo)..=(c, hi)).next().is_some())
 }
 
-fn tributary_over(detail: &LoadDetail, blocked: &BTreeSet<(u32, u32)>, out: &mut Vec<LoadWarning>) {
+fn sizing_over(detail: &LoadDetail, blocked: &BTreeSet<(u32, u32)>, out: &mut Vec<LoadWarning>) {
     for c in detail.contacts.iter().filter(|c| c.layers_over > 0) {
         let (lo, hi) = (c.first_over.unwrap_or(0), c.last_over.unwrap_or(0));
         if component_blocked(blocked, c.component, lo, hi) {
@@ -228,7 +229,7 @@ fn tributary_over(detail: &LoadDetail, blocked: &BTreeSet<(u32, u32)>, out: &mut
             layers_of(&[lo, hi], c.worst_layer),
             vec![c.contact],
             format!(
-                "Contact {}: the tributary ratio reaches {:.1} in layer {} ({:.3} mm² of peel \
+                "Contact {}: the rigid-carrier/additive sizing ratio reaches {:.1} in layer {} ({:.3} mm² of peel \
                  area, centred at ({:.2}, {:.2}) mm), above the design ratio of {}, in {} \
                  layers. It is a sizing result, not a load bound. Add a ChituBox support near \
                  that place, or accept the stated risk.",
@@ -296,8 +297,8 @@ fn sharing_over(detail: &LoadDetail, layout: &LayoutView, out: &mut Vec<LoadWarn
             contacts.clone(),
             format!(
                 "{} contact(s): the section {:?} of contact {} reaches {:.1} in layer {} \
-                 (contact at ({:.2}, {:.2}, {:.2}) mm). This sharing model does not size \
-                 contacts, but a result above {} is an intervention. Add a ChituBox support \
+                 (contact at ({:.2}, {:.2}, {:.2}) mm). Rigid-carrier and additive size contacts; equal-share is a sensitivity \
+                 check. A valid result above {} is an intervention. Add a ChituBox support \
                  near the marked contacts, or accept the stated risk.",
                 contacts.len(),
                 worst.kind,
@@ -317,7 +318,10 @@ fn not_assessed(groups: &[GroupLoad], blocked: &BTreeSet<(u32, u32)>, out: &mut 
     let bad = |g: &&GroupLoad| {
         !g.active.is_empty()
             && !blocked.contains(&(g.component, g.layer))
-            && (g.outside_hull_mm > OUTSIDE_EPS_MM || g.lever_residual > LEVER_RESIDUAL_LIMIT)
+            && (!g.equilibrium_assessed
+                || g.outside_hull_mm > OUTSIDE_EPS_MM
+                || g.force_residual > LEVER_RESIDUAL_LIMIT
+                || g.moment_residual > LEVER_RESIDUAL_LIMIT)
     };
     let comps: BTreeSet<u32> = groups.iter().filter(bad).map(|g| g.component).collect();
     for c in comps {
@@ -347,7 +351,10 @@ fn not_assessed(groups: &[GroupLoad], blocked: &BTreeSet<(u32, u32)>, out: &mut 
                 "Component {c}, {} layers: the load of a layer cannot be balanced by the active \
                  contacts as the model assumes. In layer {} the layer's centre ({:.2}, {:.2}) mm \
                  is {:.2} mm outside the spread of its {} active contacts (rigid-lever residual \
-                 {:.2}); {} layers have the centre outside. What is unknown: how the load \
+                 {:.2}); {} layers have the centre outside. Conditioning at that layer: {} \
+                 (limit 1e6 [S]); relative force residual {}, normalised moment residual {} \
+                 (limits 1e-6 [S]). Singular, ill-conditioned or unbalanced solves are unresolved, \
+                 NOT a low-ratio pass; any provisional area-weighted forces only guide search. What is unknown: how the load \
                  really reaches the contacts and which of them take the moment. Add a support \
                  near the layer's centre or accept the stated risk.",
                 layers.len(),
@@ -357,9 +364,37 @@ fn not_assessed(groups: &[GroupLoad], blocked: &BTreeSet<(u32, u32)>, out: &mut 
                 worst.outside_hull_mm,
                 worst.active.len(),
                 worst.lever_residual,
-                outside
+                outside,
+                worst.condition,
+                worst.force_residual,
+                worst.moment_residual
             ),
         ));
+    }
+}
+
+fn local_transfer(
+    groups: &[GroupLoad],
+    blocked: &BTreeSet<(u32, u32)>,
+    out: &mut Vec<LoadWarning>,
+) {
+    // No local bending/stiffness solver exists. Be conservative: global rigid
+    // sharing cannot certify ANY newly growing edge or narrow island connection.
+    // Locate these unknowns per printed component, never silently pool an island.
+    let comps: BTreeSet<_> = groups.iter().map(|g| g.component).collect();
+    for c in comps {
+        let rows: Vec<_> = groups
+            .iter()
+            .filter(|g| g.component == c && !blocked.contains(&(c, g.layer)))
+            .collect();
+        let Some(w) = rows.iter().max_by(|a, b| a.area_mm2.total_cmp(&b.area_mm2)) else {
+            continue;
+        };
+        let layers: Vec<_> = rows.iter().map(|g| g.layer).collect();
+        out.push(warn(WarningClass::Intervention, "local load path not assessed",
+            layers_of(&layers, w.layer), w.active.clone(), format!(
+                "Component {c}, growing layers {} to {}: local load transfer through the newly printed edge and any narrow connection is not assessed. Marker 07/12, layer {}, source centre ({:.2}, {:.2}) mm; contacts {:?}. Global rigid-carrier ratios do not certify this local response. Add support at the growing edge or accept this explicitly unmeasured transfer; no absence of a material route is claimed.",
+                layers[0], layers[layers.len()-1], w.layer, w.centroid_xy[0], w.centroid_xy[1], w.active)));
     }
 }
 

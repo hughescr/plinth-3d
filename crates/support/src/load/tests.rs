@@ -111,6 +111,7 @@ fn layout(cs: Vec<ContactView>, neck: f64, column: f64) -> LayoutView {
     LayoutView {
         contacts: cs,
         chains,
+        patch_history: Vec::new(),
     }
 }
 
@@ -570,7 +571,11 @@ fn synthetic_round25_layout(ml: &ModelLayers, needs: &NeedsMap, spacing: f64) ->
             ],
         });
     }
-    LayoutView { contacts, chains }
+    LayoutView {
+        contacts,
+        chains,
+        patch_history: Vec::new(),
+    }
 }
 
 #[test]

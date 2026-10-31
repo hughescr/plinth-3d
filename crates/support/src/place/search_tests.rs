@@ -52,6 +52,7 @@ fn fixture() -> (PlanBuilder<Contacts>, Vec<Chosen>) {
             quote,
             column,
             site,
+            patch_history: Vec::new(),
         }],
     )
 }
@@ -88,7 +89,7 @@ fn failed_size_search_keeps_the_contact_and_never_bans_its_site() {
         load: 1200.,
         anchor: false,
         grow: false,
-        ring: None,
+        sharing: false,
     };
     cache.select(
         vec![(target, Some(chosen[0].site))],
@@ -157,6 +158,9 @@ fn overloaded_seed_grows_before_any_sharing_neighbour_despite_capped_column_enve
     cache
         .load_envelope
         .insert(site_key(chosen[0].site.xyz), 1200.0);
+    // A placement retry may block another target's site key, but that must
+    // never forbid sizing an already retained coverage/anchoring contact.
+    cache.blocked.insert(site_key(chosen[0].site.xyz));
     let capped = cache.grow_tips(&builder, &mut chosen, &before);
     assert_eq!(chosen.len(), 1, "growth never adds a neighbour");
     assert!(chosen[0].candidate.ball_r > old_radius);
@@ -172,8 +176,10 @@ fn overloaded_seed_grows_before_any_sharing_neighbour_despite_capped_column_enve
         layers: 1,
     };
     assert!(
-        load_targets(&after, &chosen, 1.9, &capped, &grid, 5.0).is_empty(),
-        "the actual sharing-target path must not add neighbours in the growth round"
+        load_targets(&after, &chosen, &capped, &grid, 5.0)
+            .iter()
+            .all(|t| t.sharing),
+        "unresolved equilibrium may request a spread trial; retention still needs complete replay"
     );
     assert!(after.contacts[0].ratio < before.contacts[0].ratio);
     assert!(
@@ -187,14 +193,73 @@ fn overloaded_seed_grows_before_any_sharing_neighbour_despite_capped_column_enve
         "only now can the capped seed request neighbours"
     );
     assert_eq!(
-        load_targets(&after, &chosen, 1.9, &capped, &grid, 5.0).len(),
-        16,
-        "a capped overload now exercises both eight-direction sharing rings"
+        load_targets(&after, &chosen, &capped, &grid, 5.0).len(),
+        1,
+        "one component-directed spread target, not sixteen ring targets"
     );
 }
 
 #[test]
-fn load_sharing_search_never_leaves_the_one_to_two_point_five_mm_ring() {
+fn coverage_selection_cannot_claim_a_nearby_search_site_outside_the_actual_reach() {
+    let (_builder, mut measured) = fixture();
+    let q = measured.pop().unwrap();
+    let p = q.site;
+    let mut cache = Cache::default();
+    cache.available.push(q);
+    let mut chosen = Vec::new();
+    cache.select(
+        vec![(
+            Target {
+                xyz: [4., 0., 0.],
+                deadline: 1.,
+                load: 0.,
+                anchor: false,
+                grow: false,
+                sharing: false,
+            },
+            None,
+        )],
+        vec![vec![p]],
+        &mut chosen,
+    );
+    assert!(
+        chosen.is_empty(),
+        "search proximity is NOT coverage; the actual ball centre must be within 3 mm"
+    );
+}
+
+#[test]
+fn load_only_keep_rule_requires_improvement_and_refuses_a_worse_violation_elsewhere() {
+    let (_, chosen) = fixture();
+    let mut before = seed_load(&chosen);
+    let mut second = before.groups[0].clone();
+    second.layer = 1;
+    before.groups.push(second);
+    assert!(
+        !replay_improves(&before, &before),
+        "no-op load additions are discarded"
+    );
+    let mut after = before.clone();
+    after.groups[0].x_group *= 0.8;
+    assert!(
+        replay_improves(&before, &after),
+        "genuine additive improvement is measured"
+    );
+    after.groups[1].x_group *= 1.1;
+    assert!(
+        !replay_improves(&before, &after),
+        "a better parent cannot hide a worse other layer"
+    );
+    after.groups[1].x_group = before.groups[1].x_group;
+    before.groups[1].equilibrium_assessed = true;
+    assert!(
+        !replay_improves(&before, &after),
+        "newly unresolved equilibrium is not a low-ratio pass"
+    );
+}
+
+#[test]
+fn load_sharing_search_has_no_mandatory_neighbour_ring() {
     let cache = Cache::default();
     let sites: Vec<_> = [
         [0.1, 0., 0.],
@@ -220,14 +285,12 @@ fn load_sharing_search_never_leaves_the_one_to_two_point_five_mm_ring() {
         load: 2.,
         anchor: false,
         grow: false,
-        ring: Some([0.; 3]),
+        sharing: true,
     };
     let near = cache.near(target, None, &sites, 0., &[]);
-    assert_eq!(near.len(), 4);
-    assert!(
-        near.iter()
-            .all(|p| (1.0..=6.25).contains(&d2(p.xyz, [0.; 3])))
-    );
+    assert_eq!(near.len(), 6);
+    assert!(near.iter().any(|p| p.xyz[0] > 2.5));
+    assert!(near.iter().any(|p| p.xyz[0] < 1.0 && p.xyz[0] > 0.0));
     assert!(near.iter().any(|p| p.xyz[1] > 0.));
     assert!(near.iter().any(|p| p.xyz[1] < 0.));
     assert!(near.iter().any(|p| p.xyz[0] < 0.));

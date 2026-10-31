@@ -639,7 +639,7 @@ fn p06_worst_contact(c: &Ctx<'_>) -> Picture {
     let cv = &ld.layout.contacts[w.contact as usize];
     let patch_r = (cv.patch_lower_mm2 / std::f64::consts::PI).sqrt();
     let cap = format!(
-        "Contact {} has the largest tributary ratio, {:.1}, in layer {}. Patch lower bound {:.3} mm2 (drawn as a disc of the same area; the checker's area interval is not part of this data, unverified). The ring is the 3.0 mm contact-surrounding region. The smallest gap outside the regions is {} mm.",
+        "Contact {} has the largest rigid-carrier/additive sizing ratio, {:.1}, in layer {}. Patch lower bound {:.3} mm2 (drawn as a disc of the same area; the checker's area interval is not part of this data, unverified). The ring is the 3.0 mm contact-surrounding region. The smallest gap outside the regions is {} mm.",
         w.contact,
         w.ratio,
         w.worst_layer,
@@ -716,7 +716,7 @@ fn p07_worst_load(c: &Ctx<'_>) -> Picture {
     };
     let peak = ld.detail.peak;
     let cap = format!(
-        "(a) Peel area of each layer against plate height, with the design ratio times the active section capacity; the worst layer is marked. (b) The peeling layer {}: each square is a source area element, coloured by the contact it goes to; the label is assigned area / section = ratio (sizing heuristic, not a load bound). (c) Side view, supports coloured by their largest tributary ratio.",
+        "(a) Layer peel and 12 x active sections; capacity alone does not prove equilibrium. (b) Layer {}: source colours are nearest-3D TRIBUTARY DIAGNOSTIC ONLY. Labels show spring reaction / available section (provisional when unresolved), NOT the coloured source assignment. (c) Rigid-carrier/additive sizing ratios; colour never clears unresolved equilibrium or local transfer. See FR-21 markers 07/12 and activation histories.",
         peak.map_or_else(
             || "(none)".to_owned(),
             |p| format!(

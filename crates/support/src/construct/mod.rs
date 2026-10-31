@@ -226,6 +226,10 @@ impl Contact {
     pub fn patch(&self) -> &PatchBound {
         &self.patch.0
     }
+    /// A sphere certified inside the written native contact mesh, for layer-clipped patches.
+    pub fn inner_ball(&self) -> Result<plinth_geom::patch::Ball, Reject> {
+        self.parts[0].ball_inner()
+    }
     /// Exact checked native parts.
     pub fn parts(&self) -> &[NativePart] {
         &self.parts
@@ -301,6 +305,10 @@ impl<S> PlanBuilder<S> {
     /// The immutable frozen model; sites use its local frame.
     pub fn model(&self) -> &PosedModel {
         &self.model
+    }
+    /// Explicit worker allocation for stage-level geometry batches.
+    pub fn workers(&self) -> usize {
+        self.workers
     }
     /// Current revision.
     pub fn rev(&self) -> u64 {

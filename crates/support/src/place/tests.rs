@@ -16,12 +16,6 @@ fn search_settings_pin_owner_process_and_starting_values() {
     let s = PlanSettings::default();
     assert_eq!(s.max_rounds, 8);
     assert!((s.coverage_reach_mm - 3.).abs() < 1e-12);
-    assert!(
-        s.ring_mm
-            .iter()
-            .zip([1., 2.5])
-            .all(|(a, b)| (a - b).abs() < 1e-12)
-    );
     assert!((load::DESIGN_RATIO - 12.).abs() < 1e-12);
 }
 
@@ -52,7 +46,10 @@ fn column_sizing_uses_the_later_maximum_not_the_early_worst_ratio() {
                 tributary: (1000., 1),
                 additive: (0., 0),
                 equal_share: (0., 0),
-                rigid_lever: (0., 0),
+                rigid_lever: (22.5, 10),
+                sizing: (22.5, 10),
+                at_worst: load::Sharing::default(),
+                load_mm2: 0.0,
             },
             load::SectionDetail {
                 chain: 0,
@@ -63,7 +60,10 @@ fn column_sizing_uses_the_later_maximum_not_the_early_worst_ratio() {
                 tributary: (80., 10),
                 additive: (0., 0),
                 equal_share: (0., 0),
-                rigid_lever: (0., 0),
+                rigid_lever: (22.5, 10),
+                sizing: (22.5, 10),
+                at_worst: load::Sharing::default(),
+                load_mm2: 0.0,
             },
             load::SectionDetail {
                 chain: 0,
@@ -74,7 +74,10 @@ fn column_sizing_uses_the_later_maximum_not_the_early_worst_ratio() {
                 tributary: (22.5, 10),
                 additive: (0., 0),
                 equal_share: (0., 0),
-                rigid_lever: (0., 0),
+                rigid_lever: (22.5, 10),
+                sizing: (22.5, 10),
+                at_worst: load::Sharing::default(),
+                load_mm2: 0.0,
             },
         ],
         groups: vec![],
@@ -201,11 +204,11 @@ fn e2e_round25_private_planner_reports_exhaustion_honestly() {
         .load
         .sections
         .iter()
-        .map(|s| s.ratios.tributary)
+        .map(|s| s.ratios.rigid_lever.max(s.ratios.additive))
         .fold(0.0, f64::max);
     assert!(
         p.load.sections.iter().all(|s| {
-            s.ratios.tributary <= 12.0
+            s.ratios.rigid_lever.max(s.ratios.additive) <= 12.0
                 || p.load.warnings.iter().any(|w| {
                     w.class != load::WarningClass::Information
                         && (w.kind.contains("load") || w.kind.contains("ratio"))

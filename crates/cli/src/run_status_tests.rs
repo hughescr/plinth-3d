@@ -78,6 +78,7 @@ fn json_status_uses_the_same_measured_gate_not_publication_alone() {
                 parallel: None,
                 supported: true,
                 planning_blockers: blocked,
+                fr21: None,
                 outcome: Outcome::Published {
                     path: "out/file.chitubox".into(),
                     bytes: 1,

@@ -338,6 +338,12 @@ pub fn check_coverage(
             missed.push(p);
         }
     }
+    // Every missed sample is located, not just the first. This complete list is
+    // carried into both FR-21 and run.json, with triangle and exposure layer.
+    let locations = missed.iter().enumerate().map(|(i, p)| format!(
+        "Coverage marker C{}: triangle {}, layer {}, ({:.4}, {:.4}, {:.4}) mm; add a support here.",
+        i + 1, p.triangle, stack_layer(stack, p.xyz[2]), p.xyz[0], p.xyz[1], p.xyz[2]
+    )).collect::<Vec<_>>().join(" ");
     let warning = missed.first().map(|first| LoadWarning {
         class: WarningClass::Intervention,
         kind: "overhang without a contact within 3.0 mm".to_owned(),
@@ -346,7 +352,7 @@ pub fn check_coverage(
         message: format!(
             "{} of {} sub-45 degree samples ({:.2} mm² of {:.2} mm²) have no contact within \
                  {COVER_REACH_MM} mm that is printed by their layer. The first is at \
-                 ({:.2}, {:.2}, {:.2}) mm. Add a ChituBox support at the marked place.",
+                 ({:.2}, {:.2}, {:.2}) mm. Each remaining point is a located intervention. {locations}",
             missed.len(),
             cov.needing,
             cov.uncovered_mm2,

@@ -220,6 +220,15 @@ fn patch_triangles(
     ball: Ball,
     triangles: impl IntoIterator<Item = usize>,
 ) -> Measure<AreaBounds> {
+    patch_below(mesh, ball, triangles, f64::INFINITY)
+}
+
+fn patch_below(
+    mesh: &Mesh,
+    ball: Ball,
+    triangles: impl IntoIterator<Item = usize>,
+    z_top: f64,
+) -> Measure<AreaBounds> {
     if ball
         .centre
         .iter()
@@ -260,7 +269,21 @@ fn patch_triangles(
             if nodes > MAX_NODES {
                 return Measure::Unverified("patch subdivision budget exhausted");
             }
-            match classify(t, ball) {
+            let class = if z_top.is_finite() {
+                let min_z = t.iter().map(|p| p[2]).fold(f64::INFINITY, f64::min);
+                let max_z = t.iter().map(|p| p[2]).fold(f64::NEG_INFINITY, f64::max);
+                if min_z - POSITION_ERROR >= z_top {
+                    -1
+                } else {
+                    match classify(t, ball) {
+                        1 if max_z + POSITION_ERROR > z_top => 0,
+                        c => c,
+                    }
+                }
+            } else {
+                classify(t, ball)
+            };
+            match class {
                 -1 => continue,
                 1 => {
                     lo = (lo + area.0).next_down().max(0.0);
@@ -319,6 +342,31 @@ pub fn ball_patches_with_workers(
     let jobs: Vec<_> = balls.iter().zip(&candidates).collect();
     map_batch(&jobs, out, workers, |(b, triangles)| {
         patch_triangles(bvh.mesh(), **b, triangles.iter().map(|&t| t as usize))
+    });
+}
+
+/// Certified patch areas in the half-space already printed at each exposure.
+/// One batch for all (in-sphere, layer-top) queries; unresolved boundary triangles
+/// contribute no lower area. Future patch area can never hold an earlier layer.
+pub fn ball_patches_below_with_workers(
+    bvh: &Bvh<'_>,
+    queries: &[(Ball, f64)],
+    out: &mut Vec<Measure<AreaBounds>>,
+    workers: usize,
+) {
+    crate::counters::record(crate::counters::Op::BallPatches, queries.len());
+    let balls: Vec<_> = queries
+        .iter()
+        .map(|(b, _)| Ball {
+            radius: b.radius + 4.0 * POSITION_ERROR,
+            ..*b
+        })
+        .collect();
+    let mut candidates = Vec::new();
+    bvh.ball_candidates(&balls, &mut candidates);
+    let jobs: Vec<_> = queries.iter().zip(&candidates).collect();
+    map_batch(&jobs, out, workers, |((ball, z), triangles)| {
+        patch_below(bvh.mesh(), *ball, triangles.iter().map(|&t| t as usize), *z)
     });
 }
 
@@ -490,6 +538,33 @@ mod tests {
             .expect("thin facets must not exhaust the subdivision budget");
         assert!(b.lo <= truth && b.hi >= truth, "{b:?} truth={truth}");
         assert!(b.hi - b.lo < 0.001);
+    }
+
+    #[test]
+    fn layer_clipped_patch_never_borrows_the_future_half() {
+        let mesh = Mesh::new(
+            vec![-2., 2., 2., -2.],
+            vec![-2., -2., 2., 2.],
+            vec![-2., -2., 2., 2.],
+            vec![0, 1, 2, 0, 2, 3],
+        )
+        .unwrap();
+        let ball = Ball {
+            centre: [0.; 3],
+            radius: 0.4,
+        };
+        let queries = [(ball, -1.0), (ball, 0.0), (ball, 1.0)];
+        let mut out = Vec::new();
+        ball_patches_below_with_workers(&Bvh::build(&mesh).unwrap(), &queries, &mut out, 1);
+        let areas: Vec<_> = out.iter().map(|a| a.known().unwrap()).collect();
+        let half = std::f64::consts::PI * 0.4_f64.powi(2) * 0.5;
+        assert!(areas[0].lo.abs() < 1e-30 && areas[0].hi.abs() < 1e-30);
+        assert!(areas[1].lo <= half && areas[1].hi >= half, "{:?}", areas[1]);
+        assert!(areas[2].lo > areas[1].hi * 1.99);
+        assert!(
+            areas[1].lo > 0.99 * half,
+            "a useful early capacity certificate, not zero"
+        );
     }
 
     #[test]

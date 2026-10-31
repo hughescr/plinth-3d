@@ -135,6 +135,21 @@ pub struct ReportData {
     pub run: RunData,
     /// All warnings, by class (a copy of the load warnings plus the placement ones).
     pub warnings: Vec<LoadWarning>,
+    /// Measurements decoded from the exact emitted bytes (not planning counts).
+    pub written_metrics: Option<WrittenMetrics>,
+}
+
+/// Written contact sizes and column-spacing/bracing measurements.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WrittenMetrics {
+    /// Ball radius and count, exact f32 values promoted to f64.
+    pub radius_histogram: Vec<(f64, u32)>,
+    /// Per-column nearest-neighbour XY distances, each column counted once.
+    pub nearest_column_mm: Vec<f64>,
+    /// Long (>4 mm) columns; each tuple is (native record, length, braced).
+    pub long_columns: Vec<(u32, f64, bool)>,
+    /// Actual written brace diagonals, not proposals.
+    pub braces: u32,
 }
 
 /// What the overhang samples say, in surface and plan-view area (the design's section 0 lists

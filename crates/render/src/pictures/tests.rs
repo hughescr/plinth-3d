@@ -140,7 +140,14 @@ fn stand_in(
             contact: None,
         });
     }
-    (LayoutView { contacts, chains }, parts)
+    (
+        LayoutView {
+            contacts,
+            chains,
+            patch_history: Vec::new(),
+        },
+        parts,
+    )
 }
 
 #[test]

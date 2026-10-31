@@ -87,6 +87,8 @@ pub struct ModelRun {
     pub supported: bool,
     /// Unresolved placement, load or representation measurement.
     pub planning_blockers: bool,
+    /// FR-21 emitted-file evidence also embedded in run.json.
+    pub fr21: Option<crate::json::Json>,
     /// The result.
     pub outcome: Outcome,
 }
@@ -167,6 +169,11 @@ pub fn collect_report_data(
                     .contacts
                     .get(s.chain as usize)
                     .is_some_and(|c| s.area_mm2 < c.patch_lower_mm2 - 1e-9)
+                && ld
+                    .layout
+                    .patch_history
+                    .get(s.chain as usize)
+                    .is_none_or(Vec::is_empty)
         })
         .collect();
     if !partial.is_empty() {
@@ -280,6 +287,41 @@ fn proposal_diagnostic(
     )
 }
 
+#[allow(clippy::float_cmp)] // Exact equality binds certificates to decoded f32 geometry.
+fn checked_decode(
+    bytes: &[u8],
+    project: &plinth_chitubox::Project,
+) -> Result<plinth_chitubox::Project, Failure> {
+    let decoded = plinth_chitubox::parse(bytes).map_err(|e| ("replay", e.to_string()))?;
+    let same = decoded.models.len() == project.models.len()
+        && decoded.models.iter().zip(&project.models).all(|(a, b)| {
+            a.mesh == b.mesh
+                && a.translate == b.translate
+                && a.supports
+                    .as_ref()
+                    .zip(b.supports.as_ref())
+                    .is_some_and(|(a, b)| {
+                        a.records.len() == b.records.len()
+                            && a.records.iter().zip(&b.records).all(|(a, b)| {
+                                a.mesh == b.mesh
+                                    && a.record_type == b.record_type
+                                    && a.start == b.start
+                                    && a.end == b.end
+                                    && a.r1 == b.r1
+                                    && a.r2 == b.r2
+                            })
+                    })
+        });
+    if !same {
+        return Err((
+            "replay",
+            "Decoded geometry differs from the fully certified proposal; no load result is claimed"
+                .into(),
+        ));
+    }
+    Ok(decoded)
+}
+
 fn supported(cfg: &Config, mesh: &Mesh, m: &mut ModelRun) -> Result<Built, Failure> {
     let fail = |e: c::Reject| {
         (
@@ -369,7 +411,18 @@ fn supported(cfg: &Config, mesh: &Mesh, m: &mut ModelRun) -> Result<Built, Failu
     .map_err(|e| ("emit", format!("{e:?}")))?;
     let bytes = timed(&mut m.steps, "serialize", || project.to_bytes())
         .map_err(|e| ("serialize", e.to_string()))?;
-    let mut data = collect_report_data(&plan, layers, proposal);
+    // Bind the complete replay and all producer certificates to the bytes that
+    // will be written. No rounded descriptor or mesh may differ after decoding.
+    let decoded = timed(&mut m.steps, "decode-replay", || {
+        checked_decode(&bytes, &project)
+    })?;
+    let mut data = timed(&mut m.steps, "load-replay", || {
+        collect_report_data(&plan, layers, proposal)
+    });
+    data.written_metrics = decoded
+        .models
+        .first()
+        .map(crate::load_report::measure_written);
     data.identity.generated_sha256 = crate::sha256::hex(&bytes);
     // These are producer certificates, not checker measurements. Keep checker
     // summary fields unset until independent measurements are available.
@@ -702,6 +755,7 @@ fn run_model(cfg: &Config, named: &Named, fault: Fault) -> ModelRun {
         parallel: None,
         supported: false,
         planning_blockers: false,
+        fr21: None,
         outcome: Outcome::Failed {
             stage: "read",
             message: String::new(),
@@ -719,7 +773,9 @@ fn run_model(cfg: &Config, named: &Named, fault: Fault) -> ModelRun {
             .report
             .as_mut()
             .map(|data| (data, built.producer_patch_upper));
-        write_check_publish(cfg, named, &built.bytes, fault, review, &mut m)
+        let result = write_check_publish(cfg, named, &built.bytes, fault, review, &mut m);
+        m.fr21 = built.report.as_ref().map(crate::report::fr21_json);
+        result
     });
     m.outcome = result.unwrap_or_else(|(stage, message)| Outcome::Failed {
         stage,

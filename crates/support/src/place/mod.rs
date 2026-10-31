@@ -19,11 +19,20 @@ pub use layout::{add_members, layout_from_contacts};
 #[must_use]
 pub fn routing_loads(detail: &load::LoadDetail) -> Vec<f64> {
     let mut loads = vec![0.0_f64; detail.contacts.len()];
+    for g in &detail.groups {
+        for s in &g.states {
+            if let Some(load) = loads.get_mut(s.contact as usize) {
+                *load = load.max(s.load_mm2);
+            }
+        }
+    }
+    // Fixed sections retain their own maximum over all exposures. Tributary
+    // is never used to size a column (including when equilibrium is unresolved).
     for s in &detail.sections {
         if s.kind != load::PartKind::Patch
             && let Some(load) = loads.get_mut(s.chain as usize)
         {
-            *load = load.max(s.tributary.0 * s.area_mm2);
+            *load = load.max(s.rigid_lever.0 * s.area_mm2);
         }
     }
     loads
@@ -36,15 +45,12 @@ pub struct PlanSettings {
     pub max_rounds: u32,
     /// Maximum distance to an earlier contact, mm.
     pub coverage_reach_mm: f64,
-    /// Inner and outer radii for load additions, mm.
-    pub ring_mm: [f64; 2],
 }
 impl Default for PlanSettings {
     fn default() -> Self {
         Self {
             max_rounds: 8,
             coverage_reach_mm: 3.0,
-            ring_mm: [1.0, 2.5],
         }
     }
 }

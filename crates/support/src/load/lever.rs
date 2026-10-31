@@ -23,7 +23,20 @@ pub struct Lever {
     /// Relative residual of the three equilibrium equations (force, two moments). Near 0
     /// when the resultant is balanced; of order 1 when it is not.
     pub residual: f64,
+    /// Relative force imbalance, assessed separately from conditioning.
+    pub force_residual: f64,
+    /// Moment imbalance divided by load and the contact spread (minimum 1 mm).
+    pub moment_residual: f64,
+    /// Ratio of the two principal in-plane stiffnesses; infinity for a row.
+    pub condition: f64,
+    /// Both equilibrium and conditioning passed. Invalid forces are provisional only.
+    pub valid: bool,
 }
+
+/// Pre-run numerical thresholds [S], not physical evidence.
+pub const CONDITION_LIMIT: f64 = 1e6;
+/// Relative force and normalised moment tolerances [S].
+pub const EQUILIBRIUM_LIMIT: f64 = 1e-6;
 
 fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
     let mut m = [
@@ -59,6 +72,9 @@ pub fn rigid_lever(springs: &[Spring], load: f64, centroid: [f64; 2]) -> Lever {
     let n = springs.len();
     let mut on = vec![true; n];
     let mut force = vec![0.0; n];
+    let mut condition = f64::INFINITY;
+    let mut scale = 1.0_f64;
+    let mut solved = false;
     for _ in 0..=n {
         let idx: Vec<usize> = (0..n).filter(|&i| on[i]).collect();
         force.iter_mut().for_each(|f| *f = 0.0);
@@ -86,12 +102,30 @@ pub fn rigid_lever(springs: &[Spring], load: f64, centroid: [f64; 2]) -> Lever {
                 }
             }
         }
-        // Resultant about the spring centroid.
-        let b = [load, load * (centroid[0] - cx), load * (centroid[1] - cy)];
-        let trace = a[0][0] + a[1][1] + a[2][2];
-        for (d, row) in a.iter_mut().enumerate() {
-            row[d] += 1e-9 * trace;
+        if ksum <= 0.0 || !ksum.is_finite() {
+            break;
         }
+        // Centring removes the translation/tilt coupling. Condition the two
+        // tilt modes without adding a fictitious regularising spring. Compute
+        // the small eigenvalue via the determinant to avoid cancellation.
+        let trace = a[1][1] + a[2][2];
+        let large = 0.5 * (trace + (a[1][1] - a[2][2]).hypot(2.0 * a[1][2]));
+        let small = (a[1][1] * a[2][2] - a[1][2].powi(2)).max(0.0) / large;
+        condition = if small > 0.0 {
+            large / small
+        } else {
+            f64::INFINITY
+        };
+        scale = (trace / ksum).sqrt().max(1.0);
+        // A provisional area-weighted load may guide further construction. It
+        // NEVER clears an unresolved equilibrium/conditioning assessment.
+        if condition > CONDITION_LIMIT || !condition.is_finite() {
+            for &i in &idx {
+                force[i] = load * springs[i].k / ksum;
+            }
+            break;
+        }
+        let b = [load, load * (centroid[0] - cx), load * (centroid[1] - cy)];
         let Some([c0, c1, c2]) = solve3(a, b) else {
             break;
         };
@@ -105,11 +139,43 @@ pub fn rigid_lever(springs: &[Spring], load: f64, centroid: [f64; 2]) -> Lever {
             .min_by(|&i, &j| force[i].total_cmp(&force[j]));
         match worst {
             Some(w) if force[w] < -1e-12 * load.abs().max(1e-30) => on[w] = false,
-            _ => break,
+            _ => {
+                solved = true;
+                break;
+            }
         }
     }
     let residual = residual_of(springs, &force, load, centroid);
-    Lever { force, residual }
+    let force_residual = if load > 0.0 {
+        (force.iter().sum::<f64>() / load - 1.0).abs()
+    } else {
+        0.0
+    };
+    let moment_residual = springs
+        .iter()
+        .zip(&force)
+        .fold([0.0_f64; 2], |mut m, (s, f)| {
+            for a in 0..2 {
+                m[a] += f * (s.xy[a] - centroid[a]);
+            }
+            m
+        })
+        .into_iter()
+        .map(|m| m.abs() / load.max(1e-30) / scale)
+        .fold(0.0, f64::max);
+    let valid = solved
+        && condition <= CONDITION_LIMIT
+        && force_residual <= EQUILIBRIUM_LIMIT
+        && moment_residual <= EQUILIBRIUM_LIMIT
+        && force.iter().all(|&f| f >= -1e-12 * load.abs().max(1e-30));
+    Lever {
+        force,
+        residual,
+        force_residual,
+        moment_residual,
+        condition,
+        valid,
+    }
 }
 
 fn residual_of(springs: &[Spring], force: &[f64], load: f64, centroid: [f64; 2]) -> f64 {

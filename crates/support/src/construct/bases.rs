@@ -7,6 +7,34 @@ use plinth_geom::patch::plane_distance_bounds;
 
 const JOIN_RADIUS: f64 = 0.052; // 0.104 mm diameter, above the 0.102 mm build width.
 
+#[cfg(test)]
+mod alternatives_tests {
+    use super::*;
+    #[test]
+    fn raft_selection_uses_only_pre_certified_edge_alternatives() {
+        let pads = vec![
+            NativePart::pad([0., 0.], 0.2),
+            NativePart::pad([3., 0.], 0.2),
+            NativePart::pad([0., 1.8], 0.2),
+        ];
+        let bad = bridge_offset([0., 0.], [3., 0.], 0.2, 0.8).unwrap();
+        let good = bridge_offset([0., 0.], [3., 0.], 0.2, 0.95).unwrap();
+        let mut first: Vec<_> = pads.iter().map(NativePart::copy_exact).collect();
+        first.push(bad.copy_exact());
+        assert!(
+            admit_bridges(&first, &[]).is_err(),
+            "the first candidate really has an incidental thin join"
+        );
+        let mut selected = select_bridges(&pads, vec![vec![bad, good]], &[]).unwrap();
+        assert_eq!(selected.len(), 1);
+        selected.extend(pads);
+        assert!(
+            admit_bridges(&selected, &[]).is_ok(),
+            "selection cannot bypass the unchanged width certificate"
+        );
+    }
+}
+
 /// A ball inside every inward face half-space of a native convex part is inside
 /// its solid. Test actual written faces, not just field radii. The interior axis
 /// point fixes the sign independently of triangle winding; the plane-distance
@@ -28,13 +56,23 @@ fn contains_ball(part: &NativePart, centre: [f64; 3], interior: [f64; 3]) -> boo
 /// and its far corners can graze a third base. Certify both endpoint joins from
 /// the written meshes, before this bridge enters the raft.
 pub(super) fn bridge(a: [f32; 2], b: [f32; 2], top: f32) -> Result<NativePart, Reject> {
+    bridge_offset(a, b, top, 0.8)
+}
+
+/// Alternative private raft construction; endpoint overlap is certified afresh.
+pub(super) fn bridge_offset(
+    a: [f32; 2],
+    b: [f32; 2],
+    top: f32,
+    offset: f64,
+) -> Result<NativePart, Reject> {
     let d = (f64::from(a[0]) - f64::from(b[0])).hypot(f64::from(a[1]) - f64::from(b[1]));
     if d <= 2.2 + 2.0 * ENVELOPE {
         return Err(Reject::NarrowJoin);
     }
     let axis: [f64; 2] = std::array::from_fn(|k| (f64::from(b[k]) - f64::from(a[k])) / d);
-    let start = std::array::from_fn(|k| (f64::from(a[k]) + 0.8 * axis[k]) as f32);
-    let end = std::array::from_fn(|k| (f64::from(b[k]) - 0.8 * axis[k]) as f32);
+    let start = std::array::from_fn(|k| (f64::from(a[k]) + offset * axis[k]) as f32);
+    let end = std::array::from_fn(|k| (f64::from(b[k]) - offset * axis[k]) as f32);
     let bridge = NativePart::bridge(start, end, top);
     for (pad, centre, sign) in [(a, start, 1.), (b, end, -1.)] {
         let witness = [
@@ -170,47 +208,118 @@ pub(super) fn admit_bridges(raft: &[NativePart], members: &[NativePart]) -> Resu
         .collect();
     for (i, a) in parts.iter().enumerate() {
         for b in &parts[..i] {
-            if a.part.kind() != PartKind::RaftBridge && b.part.kind() != PartKind::RaftBridge {
-                continue; // Pad/flare pairs were already certified at column admission.
-            }
-            if a.apart(b) {
-                continue;
-            }
-            let lo: [f64; 3] = std::array::from_fn(|k| a.lo[k].max(b.lo[k]));
-            let hi: [f64; 3] = std::array::from_fn(|k| a.hi[k].min(b.hi[k]));
-            let (flare, raft) = if a.part.kind() == PartKind::BaseFlare {
-                (a, b)
-            } else {
-                (b, a)
-            };
-            let mut wide = false;
-            // Search witnesses only; the face inequalities, not this resolution,
-            // establish width. A missed witness fails closed.
-            for x in [0.25, 0.5, 0.75] {
-                for y in [0.25, 0.5, 0.75] {
-                    let p = [
-                        lo[0] + x * (hi[0] - lo[0]),
-                        lo[1] + y * (hi[1] - lo[1]),
-                        (lo[2] + hi[2]) * 0.5,
-                    ];
-                    wide |= (a.contains(p) && b.contains(p))
-                        || (flare.part.kind() == PartKind::BaseFlare
-                            && flare.covers_half(p, true)
-                            && raft.covers_half(p, false));
-                    if wide {
-                        break;
-                    }
-                }
-                if wide {
-                    break;
-                }
-            }
-            if !wide {
+            if !bridge_pair(a, b) {
                 return Err(Reject::NarrowJoin);
             }
         }
     }
     Ok(())
+}
+
+fn bridge_pair(a: &Convex<'_>, b: &Convex<'_>) -> bool {
+    if (a.part.kind() != PartKind::RaftBridge && b.part.kind() != PartKind::RaftBridge)
+        || a.apart(b)
+    {
+        return true;
+    }
+    let lo: [f64; 3] = std::array::from_fn(|k| a.lo[k].max(b.lo[k]));
+    let hi: [f64; 3] = std::array::from_fn(|k| a.hi[k].min(b.hi[k]));
+    let (flare, raft) = if a.part.kind() == PartKind::BaseFlare {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    for x in [0.25, 0.5, 0.75] {
+        for y in [0.25, 0.5, 0.75] {
+            let p = [
+                lo[0] + x * (hi[0] - lo[0]),
+                lo[1] + y * (hi[1] - lo[1]),
+                (lo[2] + hi[2]) * 0.5,
+            ];
+            if (a.contains(p) && b.contains(p))
+                || (flare.part.kind() == PartKind::BaseFlare
+                    && flare.covers_half(p, true)
+                    && raft.covers_half(p, false))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Batch-certify immutable per-edge raft alternatives, then search the cached
+/// compatibility graph. The MST and native widths never change. Search exhaustion
+/// rejects the private raft, rather than repairing an admitted thin join.
+pub(super) fn select_bridges(
+    pads: &[NativePart],
+    groups: Vec<Vec<NativePart>>,
+    members: &[NativePart],
+) -> Result<Vec<NativePart>, Reject> {
+    let mut ranges = Vec::new();
+    let mut flat = Vec::new();
+    for g in groups {
+        let start = flat.len();
+        flat.extend(g);
+        ranges.push(start..flat.len());
+    }
+    let selected = {
+        let fixed: Vec<_> = pads
+            .iter()
+            .chain(members.iter().filter(|p| p.kind() == PartKind::BaseFlare))
+            .map(Convex::new)
+            .collect();
+        let candidates: Vec<_> = flat.iter().map(Convex::new).collect();
+        let valid: Vec<_> = candidates
+            .iter()
+            .map(|a| fixed.iter().all(|b| bridge_pair(a, b)))
+            .collect();
+        let n = candidates.len();
+        let mut pairs = vec![true; n * n];
+        for i in 0..n {
+            for j in 0..i {
+                let ok = !valid[i] || !valid[j] || bridge_pair(&candidates[i], &candidates[j]);
+                pairs[i * n + j] = ok;
+                pairs[j * n + i] = ok;
+            }
+        }
+        fn search(
+            ranges: &[std::ops::Range<usize>],
+            valid: &[bool],
+            pairs: &[bool],
+            chosen: &mut Vec<usize>,
+            budget: &mut usize,
+        ) -> bool {
+            if chosen.len() == ranges.len() {
+                return true;
+            }
+            if *budget == 0 {
+                return false;
+            }
+            *budget -= 1;
+            let n = valid.len();
+            for i in ranges[chosen.len()].clone() {
+                if valid[i] && chosen.iter().all(|&j| pairs[i * n + j]) {
+                    chosen.push(i);
+                    if search(ranges, valid, pairs, chosen, budget) {
+                        return true;
+                    }
+                    chosen.pop();
+                }
+            }
+            false
+        }
+        let mut selected = Vec::new();
+        if !search(&ranges, &valid, &pairs, &mut selected, &mut 4096) {
+            return Err(Reject::NarrowJoin);
+        }
+        selected
+    };
+    Ok(flat
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, p)| selected.contains(&i).then_some(p))
+        .collect())
 }
 
 /// Either prove the complete flares AND their pads disjoint in plan view, or

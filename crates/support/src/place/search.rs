@@ -72,6 +72,7 @@ struct Chosen {
     quote: Quote,
     column: ColumnCheck,
     site: NeedPoint,
+    patch_history: Vec<(u32, f64)>,
 }
 fn view(chosen: &[Chosen], layers: &ModelLayers, shift: f64) -> LayoutView {
     let contacts: Vec<_> = chosen.iter().map(|x| x.quote.contact()).collect();
@@ -84,6 +85,7 @@ fn view(chosen: &[Chosen], layers: &ModelLayers, shift: f64) -> LayoutView {
             .floor()
             .max(0.) as u32;
     }
+    v.patch_history = chosen.iter().map(|x| x.patch_history.clone()).collect();
     v
 }
 #[derive(Clone, Copy)]
@@ -93,11 +95,12 @@ struct Target {
     load: f64,
     anchor: bool,
     grow: bool,
-    ring: Option<V3>,
+    sharing: bool,
 }
 fn covered(t: Target, chosen: &[Chosen], reach: f64, shift: f64) -> bool {
     chosen.iter().any(|x| {
-        x.site.xyz[2] + shift <= t.deadline + 1e-8 && d2(x.site.xyz, t.xyz) <= reach * reach
+        let centre = x.quote.contact().centre().map(f64::from);
+        x.site.xyz[2] + shift < t.deadline + 1e-8 && d2(centre, t.xyz) <= reach * reach
     })
 }
 fn needs_targets(
@@ -122,7 +125,7 @@ fn needs_targets(
                 load: 0.,
                 anchor: true,
                 grow: false,
-                ring: None,
+                sharing: false,
             });
         }
     }
@@ -143,11 +146,15 @@ fn needs_targets(
     for p in hidden {
         let t = Target {
             xyz: p.xyz,
-            deadline: p.xyz[2] + shift + 0.05,
+            deadline: layers.grid.z_top(
+                ((p.xyz[2] + shift - layers.grid.origin) / layers.grid.height)
+                    .floor()
+                    .max(0.0) as u32,
+            ) - 1e-7,
             load: 3.0,
             anchor: false,
             grow: false,
-            ring: None,
+            sharing: false,
         };
         if !covered(t, chosen, pitch, shift)
             && !seeds.iter().any(|s| d2(s.xyz, t.xyz) < pitch * pitch)
@@ -155,26 +162,34 @@ fn needs_targets(
             seeds.push(t);
         }
     }
-    targets.extend(seeds);
+    // Coverage precedes optional carrier seeds; neither shares a budget with
+    // load-sharing candidates. Earlier samples precede later samples.
     // Automatic rim contacts are mandatory too, but hidden sites have priority.
     for tag in [SiteTag::Hidden, SiteTag::PartlyVisible] {
         let mut region: Vec<Target> = Vec::new();
-        for p in sites
+        let mut region_sites: Vec<_> = sites
             .iter()
             .filter(|p| p.class == tag && p.angle_deg < 45. && p.area_mm2 > 0.)
-        {
+            .collect();
+        region_sites.sort_by(|a, b| a.xyz[2].total_cmp(&b.xyz[2]));
+        for p in region_sites {
             let t = Target {
                 xyz: p.xyz,
-                deadline: p.xyz[2] + shift + 0.05,
+                deadline: layers.grid.z_top(
+                    ((p.xyz[2] + shift - layers.grid.origin) / layers.grid.height)
+                        .floor()
+                        .max(0.0) as u32,
+                ) - 1e-7,
                 load: 0.,
                 anchor: false,
                 grow: false,
-                ring: None,
+                sharing: false,
             };
             if !covered(t, chosen, settings.coverage_reach_mm, shift)
-                && !region
-                    .iter()
-                    .any(|q| d2(q.xyz, t.xyz) < settings.coverage_reach_mm.powi(2))
+                && !region.iter().any(|q| {
+                    q.deadline <= t.deadline
+                        && d2(q.xyz, t.xyz) < settings.coverage_reach_mm.powi(2)
+                })
             {
                 region.push(t);
             }
@@ -192,72 +207,58 @@ fn needs_targets(
             load: 0.,
             anchor: false,
             grow: false,
-            ring: None,
+            sharing: false,
         };
         if !covered(t, chosen, 2.13, shift) {
             targets.push(t);
         }
     }
+    targets.extend(seeds);
     targets
 }
 fn load_targets(
     detail: &load::LoadDetail,
     chosen: &[Chosen],
-    radius: f64,
     capped: &BTreeSet<[u32; 3]>,
     grid: &plinth_geom::slice::LayerGrid,
     shift: f64,
 ) -> Vec<Target> {
-    let mut out = Vec::new();
-    for (c, x) in detail
-        .contacts
+    // No distance ring. Target the actual component's load centroid, with its
+    // exposure deadline. Additive deficits take precedence over spread search.
+    let mut rows: Vec<_> = detail
+        .groups
         .iter()
-        .zip(chosen)
-        .filter(|(c, x)| c.ratio > 12.0 && capped.contains(&site_key(x.site.xyz)))
-    {
-        // Keep the early-layer neighbour search AND the largest-load region.
-        // An early partial-patch overload must not pin all future additions to
-        // the very first layer while a later strip still has one carrier.
-        let first = c.first_over.unwrap_or(c.worst_layer);
-        for layer in [first, c.worst_layer] {
-            let deadline = grid.z_top(layer);
-            let n = x.site.normal;
-            let length = n[0].hypot(n[1]);
-            let u = if length > 1e-8 {
-                [-n[1] / length, n[0] / length, 0.]
-            } else {
-                [1., 0., 0.]
-            };
-            let v = [
-                n[1] * u[2] - n[2] * u[1],
-                n[2] * u[0] - n[0] * u[2],
-                n[0] * u[1] - n[1] * u[0],
-            ];
-            let delta = [
-                c.tributary_xy[0] - x.site.xyz[0],
-                c.tributary_xy[1] - x.site.xyz[1],
-                deadline - shift - x.site.xyz[2],
-            ];
-            let project = |a: V3| (0..3).map(|k| a[k] * delta[k]).sum::<f64>();
-            let towards = project(v).atan2(project(u));
-            // All sides of the contact, with the most-loaded direction first.
-            // The ring describes search targets, not permission to move the site.
-            for step in [0, 1, -1, 2, -2, 3, -3, 4] {
-                let angle = towards + f64::from(step) * std::f64::consts::FRAC_PI_4;
-                out.push(Target {
-                    xyz: std::array::from_fn(|k| {
-                        x.site.xyz[k] + radius * (u[k] * angle.cos() + v[k] * angle.sin())
-                    }),
-                    deadline,
-                    load: (c.load_mm2 * 0.5).clamp(0.25, 12.0),
-                    anchor: false,
-                    grow: false,
-                    ring: Some(x.site.xyz),
-                });
-            }
-        }
-    }
-    out
+        .filter(|g| {
+            g.x_group > 12.0
+                || (!g.equilibrium_assessed && !g.active.is_empty())
+                || g.states.iter().any(|s| {
+                    s.ratios.rigid_lever > 12.0
+                        && capped.contains(&site_key(chosen[s.contact as usize].site.xyz))
+                })
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        b.x_group
+            .total_cmp(&a.x_group)
+            .then(b.outside_hull_mm.total_cmp(&a.outside_hull_mm))
+            .then(a.layer.cmp(&b.layer))
+    });
+    let mut components = BTreeSet::new();
+    rows.into_iter()
+        .filter(|g| components.insert(g.component))
+        .map(|g| Target {
+            xyz: [
+                g.centroid_xy[0],
+                g.centroid_xy[1],
+                grid.z_top(g.layer) - shift - 1e-6,
+            ],
+            deadline: grid.z_top(g.layer) - 1e-6,
+            load: (g.area_mm2 / (g.active.len() + 1) as f64).clamp(0.25, 5.0),
+            anchor: false,
+            grow: false,
+            sharing: true,
+        })
+        .collect()
 }
 #[derive(Default)]
 struct Cache {
@@ -269,8 +270,73 @@ struct Cache {
     load_envelope: BTreeMap<[u32; 3], f64>,
     pairs: BTreeMap<(CandId, CandId), bool>,
     growth_searched: BTreeSet<[u32; 3]>,
+    sharing_tried: BTreeSet<[u32; 3]>,
+    patch_curves: BTreeMap<Vec<u32>, Vec<(u32, f64)>>,
 }
 impl Cache {
+    fn certify_selected(
+        &mut self,
+        builder: &PlanBuilder<Contacts>,
+        layers: &ModelLayers,
+        chosen: &mut [Chosen],
+        shift: f64,
+    ) {
+        let mut queries = Vec::new();
+        let mut owners = Vec::new();
+        for (i, x) in chosen.iter_mut().enumerate() {
+            if !x.patch_history.is_empty() {
+                continue;
+            }
+            let key = geometry_key(&x.candidate);
+            if let Some(h) = self.patch_curves.get(&key) {
+                x.patch_history = h.clone();
+                continue;
+            }
+            let Ok(ball) = x.quote.contact().inner_ball() else {
+                x.patch_history = vec![(0, 0.0)];
+                continue;
+            };
+            let first = ((x.site.xyz[2] + shift - layers.grid.origin) / layers.grid.height)
+                .floor()
+                .max(0.0) as u32;
+            let last = ((ball.centre[2] + ball.radius + shift - layers.grid.origin)
+                / layers.grid.height)
+                .ceil()
+                .max(f64::from(first)) as u32;
+            for k in first..=last {
+                queries.push((ball, layers.grid.z_top(k) - shift));
+                owners.push((i, k));
+            }
+        }
+        if !queries.is_empty() {
+            let mut bounds = Vec::new();
+            if let Ok(bvh) = plinth_geom::Bvh::build(builder.model().mesh()) {
+                plinth_geom::patch::ball_patches_below_with_workers(
+                    &bvh,
+                    &queries,
+                    &mut bounds,
+                    builder.workers(),
+                );
+            }
+            for ((i, k), area) in owners.into_iter().zip(bounds) {
+                let x = &mut chosen[i];
+                // Measurement exhaustion is zero available certified area, not
+                // permission to use the whole future patch or an analytic disc.
+                let lo = area
+                    .known()
+                    .map_or(0.0, |a| a.lo)
+                    .min(x.quote.contact().patch().lower());
+                x.patch_history.push((k, lo));
+            }
+        }
+        for x in chosen {
+            if x.patch_history.is_empty() {
+                x.patch_history.push((0, 0.0));
+            }
+            self.patch_curves
+                .insert(geometry_key(&x.candidate), x.patch_history.clone());
+        }
+    }
     fn near(
         &self,
         target: Target,
@@ -286,14 +352,13 @@ impl Cache {
                     .copied()
                     .filter(|p| {
                         p.xyz[2] + shift < target.deadline
-                            && target
-                                .ring
-                                .is_none_or(|centre| (1.0..=6.25).contains(&d2(centre, p.xyz)))
+                            && (!target.sharing || d2(p.xyz, target.xyz) <= 25.0)
                             && (!target.anchor || p.xyz[2] + shift >= target.deadline - 0.05)
                             && chosen
                                 .iter()
-                                .all(|c| d2(c.site.xyz, p.xyz) > 1.5_f64.powi(2))
+                                .all(|c| d2(c.site.xyz, p.xyz) > 0.85_f64.powi(2))
                             && !self.blocked.contains(&site_key(p.xyz))
+                            && (!target.sharing || !self.sharing_tried.contains(&site_key(p.xyz)))
                     })
                     .collect::<Vec<_>>()
             },
@@ -301,7 +366,15 @@ impl Cache {
         );
         let score = |p: &NeedPoint| {
             d2(p.xyz, target.xyz)
-                + if target.anchor && p.class != SiteTag::Hidden {
+                - if target.sharing {
+                    1.2 * chosen
+                        .iter()
+                        .map(|c| d2(c.site.xyz, p.xyz))
+                        .fold(25.0, f64::min)
+                } else {
+                    0.0
+                }
+                + if (target.anchor || target.sharing) && p.class != SiteTag::Hidden {
                     10000.
                 } else {
                     0.
@@ -351,9 +424,20 @@ impl Cache {
                 // Growth gets the SAME complete fan x length domain as column
                 // sizing, before a single load-sharing neighbour is proposed.
                 // Never call a budget-skipped search a geometric cap.
-                let fans: &[f64] = if target.grow { &FANS } else { &[20., 0.] };
-                let reaches: &[f32] = if target.grow { &REACHES } else { &[2.6] };
+                let fans: &[f64] = if target.grow || target.sharing {
+                    &FANS
+                } else {
+                    &[20., 0.]
+                };
+                let reaches: &[f32] = if target.grow || target.sharing {
+                    &REACHES
+                } else {
+                    &[2.6]
+                };
                 let mut sizes = vec![proposed];
+                if target.sharing && proposed > 0.25 {
+                    sizes.push(0.25);
+                }
                 if target.grow && fallback {
                     let current = chosen
                         .iter()
@@ -427,6 +511,7 @@ impl Cache {
                     quote,
                     column,
                     site,
+                    patch_history: Vec::new(),
                 }),
                 Err(e) => {
                     *self
@@ -519,6 +604,7 @@ impl Cache {
                         site,
                         quote,
                         column,
+                        patch_history: Vec::new(),
                     };
                     resized.insert(owner);
                 }
@@ -534,6 +620,7 @@ impl Cache {
                         quote,
                         column,
                         site: chosen[owner].site,
+                        patch_history: Vec::new(),
                     });
                 }
             }
@@ -574,7 +661,7 @@ impl Cache {
                     load,
                     anchor: false,
                     grow: true,
-                    ring: None,
+                    sharing: false,
                 },
                 Some(x.site),
             ));
@@ -624,9 +711,14 @@ impl Cache {
                 .enumerate()
                 .filter(|(_, q)| {
                     near.iter().any(|p| d2(q.site.xyz, p.xyz) < 1e-12)
-                        && !self
-                            .blocked
-                            .contains(&site_key(q.candidate.site.map(f64::from)))
+                        && (old.is_some()
+                            || target.sharing
+                            || d2(q.quote.contact().centre().map(f64::from), target.xyz)
+                                <= 3.0_f64.powi(2))
+                        && (old.is_some()
+                            || !self
+                                .blocked
+                                .contains(&site_key(q.candidate.site.map(f64::from))))
                         && if target.grow {
                             replacing.is_some_and(|i| {
                                 q.candidate.ball_r > chosen[i].candidate.ball_r
@@ -678,10 +770,118 @@ impl Cache {
                 } else {
                     chosen.push(replacement);
                 }
+            } else if old.is_none() {
+                // Move the bounded search on from measured but pair-incompatible
+                // sites. Otherwise the same nearest-32 window repeats forever.
+                for p in near {
+                    if self.available.iter().any(|q| d2(q.site.xyz, p.xyz) < 1e-12) {
+                        self.blocked.insert(site_key(p.xyz));
+                    }
+                }
             }
         }
     }
 }
+/// Replay the exact routed members, including self-peel and braces, at ALL
+/// layers/components. A routing failure cannot retain a load-only candidate.
+fn complete_replay(
+    builder: &PlanBuilder<Contacts>,
+    layers: &ModelLayers,
+    chosen: &[Chosen],
+    shift: f64,
+) -> Option<load::LoadDetail> {
+    let mut layout = view(chosen, layers, shift);
+    let detail = load::analyse_full(&layers.stack, &layout, &load::Extras::default());
+    let refs: Vec<_> = chosen.iter().map(|c| &c.quote).collect();
+    let plan = builder
+        .preview_plan(&refs, &super::routing_loads(&detail))
+        .ok()?;
+    super::add_members(&plan, &mut layout);
+    Some(load::analyse_full(
+        &layers.stack,
+        &layout,
+        &load::Extras::default(),
+    ))
+}
+
+fn replay_improves(before: &load::LoadDetail, after: &load::LoadDetail) -> bool {
+    let mut improvement = false;
+    for (b, a) in before.groups.iter().zip(&after.groups) {
+        if (b.component, b.layer) != (a.component, a.layer) {
+            return false;
+        }
+        let model_max = |g: &load::GroupLoad, rigid: bool| {
+            g.states
+                .iter()
+                .map(|s| {
+                    if rigid {
+                        s.ratios.rigid_lever
+                    } else {
+                        s.ratios.equal_share
+                    }
+                })
+                .fold(0.0, f64::max)
+        };
+        for (old, new, comparable) in [
+            (b.x_group, a.x_group, true),
+            (
+                if b.equilibrium_assessed {
+                    model_max(b, true)
+                } else {
+                    b.x_group
+                },
+                model_max(a, true),
+                b.equilibrium_assessed && a.equilibrium_assessed,
+            ),
+            (model_max(b, false), model_max(a, false), true),
+        ] {
+            if new > old.max(12.0) + 1e-7 {
+                return false;
+            }
+            improvement |= comparable && old > 12.0 && new + 1e-6 < old;
+        }
+        // No previously valid exposure can become unresolved. An existing
+        // unresolved exposure may improve its spread, without worsening another.
+        if b.equilibrium_assessed && !a.equilibrium_assessed {
+            return false;
+        }
+        if !b.equilibrium_assessed {
+            let metric = |g: &load::GroupLoad| {
+                g.outside_hull_mm
+                    + g.force_residual
+                    + g.moment_residual
+                    + g.condition.clamp(1.0, 1e12).log10()
+            };
+            if metric(a) > metric(b) + 1e-7 {
+                return false;
+            }
+            improvement |= a.equilibrium_assessed || metric(a) + 1e-6 < metric(b);
+        }
+        // Check each pre-existing contact too: a lower group maximum cannot
+        // hide a newly overloaded old section elsewhere in the same layer.
+        for old in &b.states {
+            if let Some(new) = a.states.iter().find(|s| s.contact == old.contact) {
+                for (o, n) in [
+                    (
+                        if b.equilibrium_assessed {
+                            old.ratios.rigid_lever
+                        } else {
+                            b.x_group
+                        },
+                        new.ratios.rigid_lever,
+                    ),
+                    (old.ratios.equal_share, new.ratios.equal_share),
+                ] {
+                    if n > o.max(12.0) + 1e-7 {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    improvement && before.groups.len() == after.groups.len()
+}
+
 pub(super) fn run(
     builder: &PlanBuilder<Contacts>,
     layers: &ModelLayers,
@@ -694,9 +894,7 @@ pub(super) fn run(
     let mut cache = Cache::default();
     let valid = !unavailable(&layers.stack)
         && settings.coverage_reach_mm.is_finite()
-        && settings.coverage_reach_mm > 0.
-        && settings.ring_mm[0] > 0.
-        && settings.ring_mm[1] >= settings.ring_mm[0];
+        && settings.coverage_reach_mm > 0.;
     let mut termination = Termination::NotBuilt;
     for round in 0..settings.max_rounds.min(8) {
         if !valid {
@@ -707,58 +905,62 @@ pub(super) fn run(
         // [O] Load grows tips first. Only a completed, unsuccessful growth search
         // (or a tip already at the search cap) can request load-sharing neighbours.
         let capped = cache.grow_tips(builder, &mut chosen, &detail);
+        cache.certify_selected(builder, layers, &mut chosen, shift);
         let detail = load::analyse_full(
             &layers.stack,
             &view(&chosen, layers, shift),
             &load::Extras::default(),
         );
-        let mut targets = needs_targets(layers, sites, &chosen, settings, shift);
-        targets.extend(load_targets(
-            &detail,
-            &chosen,
-            (1.9 + 0.1 * f64::from(round % 3)).clamp(settings.ring_mm[0], settings.ring_mm[1]),
-            &capped,
-            &layers.grid,
-            shift,
-        ));
-        let sizing_loads = super::routing_loads(&detail);
-        let mut tasks: Vec<_> = chosen
-            .iter()
-            .zip(&sizing_loads)
-            .zip(&detail.contacts)
-            .filter(|(_, c)| c.ratio <= 12.0)
-            .map(|((x, &load), _)| {
-                let envelope = cache.load_envelope.entry(site_key(x.site.xyz)).or_default();
-                *envelope = envelope.max(load);
-                let load = *envelope;
-                (
-                    Target {
-                        xyz: x.site.xyz,
-                        deadline: f64::INFINITY,
-                        load,
-                        anchor: false,
-                        grow: false,
-                        ring: None,
-                    },
-                    Some(x.site),
-                )
-            })
-            .collect();
-        tasks.extend(targets.into_iter().map(|t| (t, None)));
-        // Every target participates. When the per-round geometric budget fills,
-        // rotate the order next time so late targets are not starved by retries.
-        if !tasks.is_empty() {
-            let start = (round as usize * 17) % tasks.len();
-            tasks.rotate_left(start);
-        }
+        // Mandatory anchoring/coverage has a separate batch. The old rotation
+        // mixed replacements and 16 ring tasks per capped tip into this same
+        // 384-alternative budget, starving coverage. Never do that again.
+        let targets = needs_targets(layers, sites, &chosen, settings, shift);
+        let tasks: Vec<_> = targets.into_iter().map(|t| (t, None)).collect();
         let near = cache.measure(builder, &tasks, (sites, shift), &chosen, false);
         cache.select(tasks, near, &mut chosen);
+        cache.certify_selected(builder, layers, &mut chosen, shift);
+        // One load-only proposal per round [S], not a contact-count target.
+        // Its complete routed geometry must improve the replay before retention.
+        let targets = load_targets(&detail, &chosen, &capped, &layers.grid, shift);
+        let tasks: Vec<_> = targets.into_iter().take(1).map(|t| (t, None)).collect();
+        if !tasks.is_empty() {
+            let before = complete_replay(builder, layers, &chosen, shift);
+            let count = chosen.len();
+            let near = cache.measure(builder, &tasks, (sites, shift), &chosen, false);
+            cache.select(tasks, near, &mut chosen);
+            cache.certify_selected(builder, layers, &mut chosen, shift);
+            if chosen.len() > count {
+                let key = site_key(chosen.last().expect("added sharing candidate").site.xyz);
+                cache.sharing_tried.insert(key);
+                let after = complete_replay(builder, layers, &chosen, shift);
+                let keep = before
+                    .as_ref()
+                    .zip(after.as_ref())
+                    .is_some_and(|(b, a)| replay_improves(b, a));
+                *cache
+                    .rejected
+                    .entry(
+                        if keep {
+                            "load-only complete replay kept"
+                        } else {
+                            "load-only complete replay dropped"
+                        }
+                        .into(),
+                    )
+                    .or_default() += 1;
+                if !keep {
+                    cache.available.push(chosen.pop().expect("added candidate"));
+                }
+            }
+        }
+        let _ = round;
         let selected = load::analyse_full(
             &layers.stack,
             &view(&chosen, layers, shift),
             &load::Extras::default(),
         );
         cache.size_columns(builder, &mut chosen, &super::routing_loads(&selected));
+        cache.certify_selected(builder, layers, &mut chosen, shift);
         let layout = view(&chosen, layers, shift);
         let detail = load::analyse_full(&layers.stack, &layout, &load::Extras::default());
         // Selected heads/columns already carry pair and model certificates.
@@ -797,7 +999,10 @@ fn finish(
     let refs: Vec<_> = chosen.iter().map(|c| &c.quote).collect();
     let loads = super::routing_loads(&detail);
     let routing = builder.preview_plan(&refs, &loads);
-    let routing_blocker = routing.as_ref().err().map(|e| format!("{:?}", e.reject));
+    let routing_blocker = routing
+        .as_ref()
+        .err()
+        .map(|e| format!("{:?}; candidates {:?}", e.reject, e.candidates));
     let mut full_layout = layout.clone();
     if let Ok(plan) = &routing {
         super::add_members(plan, &mut full_layout);
