@@ -52,13 +52,33 @@ pub struct MemberQuote {
     column: Option<ColumnAnchor>,
     brace: Option<BraceAnchor>,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(super) struct BraceAnchor {
     from: usize,
     to: usize,
     from_z: f32,
     to_z: f32,
 }
+#[derive(Debug, Clone, Copy)]
+pub(super) enum MemberRole {
+    Column(usize),
+    Flare,
+    Brace(BraceAnchor),
+}
+impl MemberQuote {
+    fn role(&self, part: usize) -> MemberRole {
+        if let Some(c) = &self.column {
+            if part == 0 {
+                MemberRole::Column(c.contact)
+            } else {
+                MemberRole::Flare
+            }
+        } else {
+            MemberRole::Brace(self.brace.expect("prepared brace"))
+        }
+    }
+}
+
 /// All-or-nothing member batch.
 #[derive(Debug)]
 pub struct MemberQuoteBatch {
@@ -122,11 +142,40 @@ impl PlanBuilder<Routed> {
                 }
             }
         }
+        // Symmetric pair failures: neither input order can choose a winner.
+        let mut rejected = vec![None; out.len()];
+        for (i, result) in out.iter().enumerate() {
+            let Ok(q) = result else {
+                continue;
+            };
+            for (part, &role) in self.members.iter().zip(&self.member_roles) {
+                if let Err(e) = keep_member(q, part, role, self.limits.gap) {
+                    rejected[i] = Some(e);
+                    break;
+                }
+            }
+            for (j, other) in out[..i].iter().enumerate() {
+                let Ok(other) = other else {
+                    continue;
+                };
+                for (k, part) in other.parts.iter().enumerate() {
+                    if let Err(e) = keep_member(q, part, other.role(k), self.limits.gap) {
+                        rejected[i] = Some(e.clone());
+                        rejected[j] = Some(e);
+                    }
+                }
+            }
+        }
+        for (answer, reject) in out.iter_mut().zip(rejected) {
+            if let Some(e) = reject {
+                *answer = Err(e);
+            }
+        }
     }
     // Reserve the same enclosing balls used by contact::pair, for ALL chains.
     // A full frustum is inside its axis segment swept by its maximum radius.
-    // Disjoint envelopes therefore protect patches, cones, joints and regions in
-    // both native representations, not just the member's centreline. This is
+    // Envelopes keep the full 0.32 mm build gap to every other head reservation,
+    // protecting patches, cones and joints in both native representations. This is
     // conservative: some harmless members can be refused. The only exception is
     // a column's own certified centre-to-centre joint connection, made below.
     fn keep_heads(&self, quote: &MemberQuote) -> Result<(), Reject> {
@@ -147,7 +196,8 @@ impl PlanBuilder<Routed> {
                 // cap-plane separation also keeps the wide plate flares usable.
                 if start[0].to_bits() == end[0].to_bits()
                     && start[1].to_bits() == end[1].to_bits()
-                    && f64::from(start[2].max(end[2])) + ENVELOPE < centre[2] - radius
+                    && f64::from(start[2].max(end[2])) + ENVELOPE + self.limits.gap
+                        < centre[2] - radius
                 {
                     continue;
                 }
@@ -157,7 +207,9 @@ impl PlanBuilder<Routed> {
                 let nearest = std::array::from_fn(|i| a[i] + t * delta[i]);
                 // Field coordinates are bounded by 100 mm; the 1e-8 mm arithmetic
                 // enclosure exceeds rounding of this non-degenerate segment solve.
-                if norm(sub(centre, nearest)) - f64::from(r1.max(r2)) - radius < 1e-8 {
+                if norm(sub(centre, nearest)) - f64::from(r1.max(r2)) - radius
+                    < self.limits.gap + ENVELOPE + 1e-8
+                {
                     return Err(Reject::RegionBlocked { by: head.cand });
                 }
             }
@@ -296,6 +348,16 @@ impl PlanBuilder<Routed> {
                 return Err(Reject::NarrowJoin);
             }
         }
+        for (i, q) in batch.quotes.iter().enumerate() {
+            for (part, &role) in self.members.iter().zip(&self.member_roles) {
+                keep_member(q, part, role, self.limits.gap)?;
+            }
+            for other in &batch.quotes[..i] {
+                for (k, part) in other.parts.iter().enumerate() {
+                    keep_member(q, part, other.role(k), self.limits.gap)?;
+                }
+            }
+        }
         for column in &self.columns {
             let braces = self
                 .braces
@@ -321,6 +383,8 @@ impl PlanBuilder<Routed> {
         let mut ids = Vec::new();
         for mut q in batch.quotes {
             let ix = self.members.len();
+            self.member_roles
+                .extend((0..q.parts.len()).map(|k| q.role(k)));
             ids.push(MemberId { plan: self.id, ix });
             if let Some(mut c) = q.column.take() {
                 c.member = ix;
@@ -508,9 +572,122 @@ impl PlanBuilder<Routed> {
         })
     }
 }
+fn designated_join(a: MemberRole, b: MemberRole) -> bool {
+    match (a, b) {
+        (MemberRole::Column(c), MemberRole::Brace(b))
+        | (MemberRole::Brace(b), MemberRole::Column(c)) => b.from == c || b.to == c,
+        (MemberRole::Brace(a), MemberRole::Brace(b)) => {
+            let (lo, hi) = if a.from == b.from && a.to == b.to {
+                (b.from_z, b.to_z)
+            } else if a.from == b.to && a.to == b.from {
+                (b.to_z, b.from_z)
+            } else {
+                return false;
+            };
+            // The ONLY brace/brace join is the exact crossed X-pair, not a near lens.
+            a.from_z.to_bits() == hi.to_bits() && a.to_z.to_bits() == lo.to_bits()
+        }
+        _ => false,
+    }
+}
+
+fn segment_distance(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) -> f64 {
+    let u = sub(b, a);
+    let v = sub(d, c);
+    let w = sub(a, c);
+    let aa = dot(u, u);
+    let bb = dot(u, v);
+    let cc = dot(v, v);
+    let dd = dot(u, w);
+    let ee = dot(v, w);
+    let project = |p, x, delta, length: f64| {
+        let t = (dot(sub(p, x), delta) / length).clamp(0.0, 1.0);
+        std::array::from_fn(|k| x[k] + t * delta[k])
+    };
+    let mut directions = vec![
+        sub(a, project(a, c, v, cc)),
+        sub(b, project(b, c, v, cc)),
+        sub(project(c, a, u, aa), c),
+        sub(project(d, a, u, aa), d),
+    ];
+    let det = aa * cc - bb * bb;
+    if det > 1e-12 * aa * cc {
+        let s = (bb * ee - cc * dd) / det;
+        let t = (aa * ee - bb * dd) / det;
+        directions.push(std::array::from_fn(|k| w[k] + s * u[k] - t * v[k]));
+    }
+    // Directions are merely proposals. Only separating support planes establish
+    // lower bounds; even an inaccurate/ill-conditioned closest-point solve cannot
+    // produce a false pass. Parallel and intersecting axes are covered as well.
+    directions
+        .into_iter()
+        .filter_map(|n| {
+            let length = norm(n);
+            if length < 1e-12 {
+                return None;
+            }
+            let n = n.map(|v| v / length);
+            let lower = dot(sub(a, c), n)
+                .min(dot(sub(b, c), n))
+                .min(dot(sub(a, d), n))
+                .min(dot(sub(b, d), n));
+            Some((lower - 1e-7).max(0.0))
+        })
+        .fold(0.0, f64::max)
+}
+
+fn keep_member(
+    q: &MemberQuote,
+    other: &NativePart,
+    role: MemberRole,
+    gap: f64,
+) -> Result<(), Reject> {
+    let PartFields::Frustum {
+        start: c,
+        end: d,
+        r1: cr,
+        r2: dr,
+    } = other.fields()
+    else {
+        return Err(Reject::UnknownShape);
+    };
+    for (k, part) in q.parts.iter().enumerate() {
+        if designated_join(q.role(k), role) {
+            continue;
+        }
+        let PartFields::Frustum {
+            start: a,
+            end: b,
+            r1: ar,
+            r2: br,
+        } = part.fields()
+        else {
+            return Err(Reject::UnknownShape);
+        };
+        let lower = segment_distance(
+            a.map(f64::from),
+            b.map(f64::from),
+            c.map(f64::from),
+            d.map(f64::from),
+        ) - f64::from(ar.max(br))
+            - f64::from(cr.max(dr))
+            - 2.0 * ENVELOPE;
+        if lower < gap {
+            return Err(Reject::GapTooSmall {
+                gap: lower.max(0.0),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn xy_distance(a: &ColumnAnchor, b: &ColumnAnchor) -> f64 {
     (f64::from(a.top[0] - b.top[0]).powi(2) + f64::from(a.top[1] - b.top[1]).powi(2)).sqrt()
 }
+
+#[cfg(test)]
+#[path = "member_separation_tests.rs"]
+mod separation_tests;
 
 #[cfg(test)]
 mod tests {

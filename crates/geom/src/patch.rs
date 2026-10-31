@@ -211,6 +211,14 @@ fn classify(t: [[f64; 3]; 3], ball: Ball) -> i8 {
 /// upper bound, never dropped. A work-budget failure returns Unverified.
 #[must_use]
 pub fn ball_patch_reference(mesh: &Mesh, ball: Ball) -> Measure<AreaBounds> {
+    patch_triangles(mesh, ball, 0..mesh.triangle_count())
+}
+
+fn patch_triangles(
+    mesh: &Mesh,
+    ball: Ball,
+    triangles: impl IntoIterator<Item = usize>,
+) -> Measure<AreaBounds> {
     if ball
         .centre
         .iter()
@@ -231,12 +239,27 @@ pub fn ball_patch_reference(mesh: &Mesh, ball: Ball) -> Measure<AreaBounds> {
     let mut hi = 0.0_f64;
     let mut nodes = 0;
     let mut stack = Vec::with_capacity(64);
-    for i in 0..mesh.triangle_count() {
+    for i in triangles {
         let t = triangle(mesh, i);
+        if plane_distance_bounds(ball.centre, t).is_some_and(|d| d.lo > ball.radius) {
+            continue;
+        }
+        if classify(t, ball) == -1 {
+            continue;
+        }
         let area = triangle_area(t);
         if area.0 <= 0.0 {
             return Measure::Unverified("degenerate patch triangle");
         }
+        // Refinement controls precision, not soundness. Short triangles need not
+        // pay sixteen levels: every unresolved boundary still contributes to U.
+        let longest = (0..3)
+            .map(|k| {
+                let d = sub(t[k], t[(k + 1) % 3]);
+                dot(d, d).sqrt()
+            })
+            .fold(0.0, f64::max);
+        let depth_limit = ((longest / 0.00025).log2().ceil().max(0.0) as u32).min(MAX_DEPTH);
         stack.push((t, area, 0));
         while let Some((t, area, depth)) = stack.pop() {
             nodes += 1;
@@ -249,7 +272,7 @@ pub fn ball_patch_reference(mesh: &Mesh, ball: Ball) -> Measure<AreaBounds> {
                     lo = (lo + area.0).next_down().max(0.0);
                     hi = (hi + area.1).next_up();
                 }
-                _ if depth == MAX_DEPTH => hi = (hi + area.1).next_up(),
+                _ if depth == depth_limit => hi = (hi + area.1).next_up(),
                 _ => {
                     let midpoint =
                         |a: [f64; 3], b: [f64; 3]| std::array::from_fn(|k| (a[k] + b[k]) * 0.5);
@@ -282,8 +305,19 @@ pub fn ball_patches_with_workers(
     workers: usize,
 ) {
     crate::counters::record(crate::counters::Op::BallPatches, balls.len());
-    map_batch(balls, out, workers, |b| {
-        ball_patch_reference(bvh.mesh(), *b)
+    let mut candidates = Vec::new();
+    // Inflate by the subdivision position enclosure as well as BVH prune slack.
+    let queries: Vec<_> = balls
+        .iter()
+        .map(|b| Ball {
+            radius: b.radius + 4.0 * POSITION_ERROR,
+            ..*b
+        })
+        .collect();
+    bvh.ball_candidates(&queries, &mut candidates);
+    let jobs: Vec<_> = balls.iter().zip(&candidates).collect();
+    map_batch(&jobs, out, workers, |(b, triangles)| {
+        patch_triangles(bvh.mesh(), **b, triangles.iter().map(|&t| t as usize))
     });
 }
 
@@ -328,61 +362,111 @@ pub(crate) fn map_batch<T: Sync, U: Send>(
 /// Connected touched-triangle sets per ball. Non-welded seams can cause a
 /// conservative rejection, never a false single-sheet certificate.
 pub fn ball_patch_components(bvh: &Bvh<'_>, balls: &[Ball], out: &mut Vec<usize>) {
+    let mut candidates = Vec::new();
+    bvh.ball_candidates(balls, &mut candidates);
     out.clear();
     let mesh = bvh.mesh();
-    for ball in balls {
-        let touched: Vec<_> = (0..mesh.triangle_count())
-            .filter(|&i| {
-                let [a, b, c] = triangle(mesh, i);
-                crate::tri::dist2(
-                    ball.centre,
-                    crate::tri::closest_on_triangle(ball.centre, a, b, c),
-                ) < ball.radius.powi(2)
-            })
-            .collect();
-        let mut parent: Vec<_> = (0..touched.len()).collect();
-        let mut edges = std::collections::BTreeMap::<(u32, u32), usize>::new();
-        let root = |parent: &[usize], mut i: usize| {
-            while parent[i] != i {
-                i = parent[i];
-            }
-            i
-        };
-        let vertex = |ix: u32| {
-            let ix = ix as usize;
-            [mesh.xs()[ix], mesh.ys()[ix], mesh.zs()[ix]]
-        };
-        for (at, &i) in touched.iter().enumerate() {
-            let indices = &mesh.indices()[3 * i..3 * i + 3];
-            for k in 0..3 {
-                let a = indices[k];
-                let b = indices[(k + 1) % 3];
-                let p = vertex(a);
-                let q = vertex(b);
-                let d = sub(q, p);
-                let len2 = dot(d, d);
-                if len2 < 1e-20 {
-                    continue;
-                }
-                let t = (dot(sub(ball.centre, p), d) / len2).clamp(0.0, 1.0);
-                let nearest = std::array::from_fn(|k| p[k] + t * d[k]);
-                if crate::tri::dist2(nearest, ball.centre) >= ball.radius.powi(2) - 1e-12 {
-                    continue;
-                }
-                if let Some(other) = edges.insert((a.min(b), a.max(b)), at) {
-                    let x = root(&parent, at);
-                    let y = root(&parent, other);
-                    parent[x] = y;
-                }
-            }
-        }
-        out.push((0..parent.len()).filter(|&i| root(&parent, i) == i).count());
+    for (ball, candidates) in balls.iter().zip(candidates) {
+        out.push(patch_components(
+            mesh,
+            *ball,
+            candidates.into_iter().map(|t| t as usize),
+        ));
     }
+}
+
+/// Brute-force connectivity reference, independent of BVH enumeration.
+#[must_use]
+pub fn ball_patch_components_reference(mesh: &Mesh, ball: Ball) -> usize {
+    patch_components(mesh, ball, 0..mesh.triangle_count())
+}
+
+fn patch_components(mesh: &Mesh, ball: Ball, triangles: impl IntoIterator<Item = usize>) -> usize {
+    let touched: Vec<_> = triangles
+        .into_iter()
+        .filter(|&i| {
+            let [a, b, c] = triangle(mesh, i);
+            crate::tri::dist2(
+                ball.centre,
+                crate::tri::closest_on_triangle(ball.centre, a, b, c),
+            ) < ball.radius.powi(2)
+        })
+        .collect();
+    let mut parent: Vec<_> = (0..touched.len()).collect();
+    let mut edges = Vec::<((u32, u32), usize)>::new();
+    let root = |parent: &[usize], mut i: usize| {
+        while parent[i] != i {
+            i = parent[i];
+        }
+        i
+    };
+    let vertex = |ix: u32| {
+        let ix = ix as usize;
+        [mesh.xs()[ix], mesh.ys()[ix], mesh.zs()[ix]]
+    };
+    for (at, &i) in touched.iter().enumerate() {
+        let indices = &mesh.indices()[3 * i..3 * i + 3];
+        for k in 0..3 {
+            let a = indices[k];
+            let b = indices[(k + 1) % 3];
+            let p = vertex(a);
+            let q = vertex(b);
+            let d = sub(q, p);
+            let len2 = dot(d, d);
+            if len2 < 1e-20 {
+                continue;
+            }
+            let t = (dot(sub(ball.centre, p), d) / len2).clamp(0.0, 1.0);
+            let nearest = std::array::from_fn(|k| p[k] + t * d[k]);
+            if crate::tri::dist2(nearest, ball.centre) >= ball.radius.powi(2) - 1e-12 {
+                continue;
+            }
+            edges.push(((a.min(b), a.max(b)), at));
+        }
+    }
+    edges.sort_unstable();
+    for pair in edges.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            let x = root(&parent, pair[0].1);
+            let y = root(&parent, pair[1].1);
+            parent[x] = y;
+        }
+    }
+    (0..parent.len()).filter(|&i| root(&parent, i) == i).count()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn randomized_bvh_areas_and_components_match_brute_force() {
+        let m = crate::bvh::query_test_mesh();
+        let bvh = Bvh::build(&m).unwrap();
+        let mut seed = 0x12345678_u64;
+        let balls: Vec<_> = (0..64)
+            .map(|_| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let i = (seed >> 32) as usize % 100;
+                let offset = (seed & 65535) as f64 / 65535.0;
+                Ball {
+                    centre: [
+                        (i % 10) as f64 * 4.0 + offset,
+                        (i / 10) as f64 * 4.0 + 0.5,
+                        i as f64 * 0.01 + 0.1,
+                    ],
+                    radius: 0.15 + offset * 0.1,
+                }
+            })
+            .collect();
+        let (mut areas, mut components) = (Vec::new(), Vec::new());
+        ball_patches(&bvh, &balls, &mut areas);
+        ball_patch_components(&bvh, &balls, &mut components);
+        for (i, &ball) in balls.iter().enumerate() {
+            assert_eq!(areas[i], ball_patch_reference(&m, ball));
+            assert_eq!(components[i], ball_patch_components_reference(&m, ball));
+        }
+    }
+
     #[test]
     fn disc_truth_and_batch_reference() {
         let m = Mesh::new(

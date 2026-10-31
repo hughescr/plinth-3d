@@ -164,6 +164,76 @@ impl<'m> Bvh<'m> {
         self.nodes.len()
     }
 
+    /// Conservative triangle supersets for a whole ball batch. Outward node bounds
+    /// and arithmetic slack mean no triangle intersecting a ball can be omitted.
+    pub fn ball_candidates(&self, balls: &[crate::patch::Ball], out: &mut Vec<Vec<u32>>) {
+        out.clear();
+        out.extend(balls.iter().map(|ball| {
+            let mut triangles = Vec::new();
+            self.visit_bounds(
+                |lo, hi| {
+                    let d: f64 = (0..3)
+                        .map(|k| {
+                            let x = (lo[k] - ball.centre[k])
+                                .max(ball.centre[k] - hi[k])
+                                .max(0.0);
+                            x * x
+                        })
+                        .sum();
+                    d <= ball.radius * ball.radius + PRUNE_ABS + PRUNE_REL * d
+                },
+                |t| triangles.push(t),
+            );
+            triangles.sort_unstable();
+            triangles
+        }));
+    }
+
+    /// Conservative AABB/triangle supersets in input order. Leaf boxes may return
+    /// extra triangles, never omit a triangle intersecting the closed query box.
+    pub fn aabb_candidates(&self, boxes: &[crate::Aabb], out: &mut Vec<Vec<u32>>) {
+        out.clear();
+        out.extend(boxes.iter().map(|query| {
+            let mut triangles = Vec::new();
+            self.visit_bounds(
+                |lo, hi| {
+                    (0..3).all(|k| lo[k] <= query.max[k] + 1e-9 && hi[k] >= query.min[k] - 1e-9)
+                },
+                |t| triangles.push(t),
+            );
+            triangles.sort_unstable();
+            triangles
+        }));
+    }
+
+    /// Traverse only nodes accepted by a conservative bounding-box predicate.
+    /// Leaves are supersets; the caller performs its triangle narrow phase.
+    pub(crate) fn visit_bounds(
+        &self,
+        mut accepts: impl FnMut(V3, V3) -> bool,
+        mut triangle: impl FnMut(u32),
+    ) {
+        let mut stack = [0_u32; STACK];
+        let mut top = 1;
+        while top > 0 {
+            top -= 1;
+            let i = stack[top] as usize;
+            let n = &self.nodes[i];
+            if !accepts(n.min.map(f64::from), n.max.map(f64::from)) {
+                continue;
+            }
+            if n.b > 0 {
+                for t in n.a..n.a + n.b {
+                    triangle(t);
+                }
+            } else {
+                stack[top] = n.a;
+                stack[top + 1] = (i + 1) as u32;
+                top += 2;
+            }
+        }
+    }
+
     fn corners(&self, t: usize) -> [V3; 3] {
         let m = self.mesh;
         let at = |k: usize| {
@@ -222,9 +292,97 @@ impl<'m> Bvh<'m> {
 }
 
 #[cfg(test)]
+pub(crate) fn query_test_mesh() -> Mesh {
+    let (mut xs, mut ys, mut zs, mut indices) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for i in 0..100 {
+        let x = (i % 10) as f64 * 4.0;
+        let y = (i / 10) as f64 * 4.0;
+        let at = xs.len() as u32;
+        xs.extend([x, x + 1.0, x + 1.0, x]);
+        ys.extend([y, y, y + 1.0, y + 1.0]);
+        zs.extend([i as f64 * 0.01; 4]);
+        indices.extend([at, at + 1, at + 2, at, at + 2, at + 3]);
+    }
+    Mesh::new(xs, ys, zs, indices).unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::testutil::{assert_pt, cube_soup, plate_soup};
+
+    #[test]
+    fn ball_supersets_cover_randomized_tangencies_and_prune_distant_triangles() {
+        let m = query_test_mesh();
+        let bvh = Bvh::build(&m).unwrap();
+        let mut seed = 17_u64;
+        let balls: Vec<_> = (0..64)
+            .map(|_| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let i = (seed >> 32) as usize % 100;
+                crate::patch::Ball {
+                    centre: [
+                        (i % 10) as f64 * 4.0 + 0.5,
+                        (i / 10) as f64 * 4.0 + 0.5,
+                        i as f64 * 0.01 + 0.2,
+                    ],
+                    radius: 0.4,
+                }
+            })
+            .collect();
+        let mut out = Vec::new();
+        bvh.ball_candidates(&balls, &mut out);
+        let mut enumerated = 0;
+        for (ball, candidates) in balls.iter().zip(&out) {
+            enumerated += candidates.len();
+            for i in 0..m.triangle_count() {
+                let [a, b, c] = bvh.corners(i);
+                if dist2(ball.centre, closest_on_triangle(ball.centre, a, b, c))
+                    <= ball.radius.powi(2)
+                {
+                    assert!(candidates.contains(&(i as u32)));
+                }
+            }
+        }
+        assert!(
+            enumerated < balls.len() * m.triangle_count() / 4,
+            "BVH did not prune: {enumerated}"
+        );
+        let boxes: Vec<_> = balls
+            .iter()
+            .map(|b| crate::Aabb {
+                min: b.centre.map(|x| x - b.radius),
+                max: b.centre.map(|x| x + b.radius),
+            })
+            .collect();
+        let mut boxed = Vec::new();
+        bvh.aabb_candidates(&boxes, &mut boxed);
+        for (query, candidates) in boxes.iter().zip(boxed) {
+            for i in 0..m.triangle_count() {
+                let t = bvh.corners(i);
+                let overlaps = (0..3).all(|k| {
+                    let lo = t.iter().map(|p| p[k]).fold(f64::INFINITY, f64::min);
+                    let hi = t.iter().map(|p| p[k]).fold(f64::NEG_INFINITY, f64::max);
+                    lo <= query.max[k] && hi >= query.min[k]
+                });
+                if overlaps {
+                    assert!(candidates.contains(&(i as u32)));
+                }
+            }
+        }
+        let tangencies = [
+            crate::patch::Ball {
+                centre: [0.5, 0.5, 0.2],
+                radius: 0.2,
+            },
+            crate::patch::Ball {
+                centre: [0.5, 0.5, 0.2_f64.next_down()],
+                radius: 0.2,
+            },
+        ];
+        bvh.ball_candidates(&tangencies, &mut out);
+        assert!(out.iter().all(|c| c.contains(&0) && c.contains(&1)));
+    }
 
     #[test]
     fn nodes_are_32_bytes_and_cover_every_triangle_once() {

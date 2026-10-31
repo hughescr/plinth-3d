@@ -176,10 +176,9 @@ fn geometric_pole_cover_rejects_a_downward_but_shallow_head() {
 }
 
 #[test]
-fn departure_rejects_a_concave_recess() {
-    // A connected stepped recess: the flat contact face joins a vertical wall
-    // and lower apron at shared edges. The wall and apron touch no head part;
-    // only the global supporting-plane departure proof rejects this approach.
+fn departure_certifies_a_concave_recess() {
+    // A connected stepped recess. Distant wall and apron triangles need not lie
+    // behind a global supporting plane; the local all-triangle certificate suffices.
     let recess = Mesh::new(
         vec![-30., -30., 5., 5., 5., 5., 30., 30.],
         vec![-30., 30., -30., 30., -30., 30., -30., 30.],
@@ -191,22 +190,18 @@ fn departure_rejects_a_concave_recess() {
     let mut c = candidate(0, 0.);
     c.site[2] = 0.5; // Frozen local plane, after bounding-box centring.
     let recess_result = quotes(&p, &[c]).remove(0);
-    assert!(
-        matches!(recess_result, Err(Reject::DepartureNotMonotone)),
-        "{recess_result:?}"
-    );
+    assert!(recess_result.is_ok(), "{:?}", recess_result.as_ref().err());
 }
 
 #[test]
-fn departure_rejects_a_nearby_boundary_edge() {
+fn departure_certifies_a_nearby_boundary_edge() {
     let p = builder(&plate());
-    // The ball has positive certified area but the cone's projected radius
-    // extends past the finite face boundary. Disabling certify_planar_departure
-    // admits this head even though the monotone-plane proof no longer applies.
+    // Finite edges are measured, not forbidden by a single-flat-face restriction.
     let boundary_result = quotes(&p, &[candidate(0, 29.8)]).remove(0);
     assert!(
-        matches!(boundary_result, Err(Reject::DepartureNotMonotone)),
-        "{boundary_result:?}"
+        boundary_result.is_ok(),
+        "{:?}",
+        boundary_result.as_ref().err()
     );
 }
 
@@ -662,8 +657,8 @@ fn second_sheet_measurement_exhaustion_and_resource_guards_fire() {
             .map(Result::unwrap_err),
     );
     let mesh = Mesh::new(
-        vec![-30., 30., 30., -30., 20.],
-        vec![-30., -30., 30., 30., 20.],
+        vec![-30., 30., 30., -30., 0.],
+        vec![-30., -30., 30., 30., 0.],
         vec![0.; 5],
         vec![0, 2, 1, 0, 3, 2, 4, 4, 4],
     )

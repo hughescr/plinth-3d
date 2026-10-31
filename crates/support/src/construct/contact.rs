@@ -14,9 +14,6 @@ struct Prepared {
     inner: Ball,
     cone: Solid,
     joint: Solid,
-    normal: [f64; 3],
-    site: [f64; 3],
-    axis: [f64; 3],
 }
 
 pub(super) fn probe(
@@ -71,12 +68,17 @@ pub(super) fn probe(
     let mut gaps = Vec::new();
     patch::ball_patches_with_workers(&bvh, &balls, &mut areas, plan.workers);
     clearance::solid_gaps_with_workers(&bvh, &solids, &mut gaps, plan.workers);
+    let cones: Vec<_> = valid.iter().map(|p| p.cone).collect();
+    let mut departures = Vec::new();
+    clearance::capped_departures(&bvh, &cones, &mut departures);
     let mut at = 0;
     for result in prepared {
         match result {
             Err(e) => out.push(Err(e)),
             Ok(mut p) => {
-                let measured = if components[at] != 1 {
+                let measured = if areas[at].is_unverified() || areas[at + 1].is_unverified() {
+                    Err(Reject::MeasureExhausted)
+                } else if components[at] != 1 {
                     Err(Reject::SecondSheet)
                 } else {
                     check_measurements(
@@ -88,6 +90,11 @@ pub(super) fn probe(
                         &gaps[at + 1],
                     )
                 };
+                let measured = measured.and_then(|patch| match departures[at / 2].known() {
+                    Some(true) => Ok(patch),
+                    Some(false) => Err(Reject::DepartureNotMonotone),
+                    None => Err(Reject::MeasureExhausted),
+                });
                 at += 2;
                 out.push(measured.map(|patch| {
                     p.contact.patch = patch;
@@ -201,6 +208,17 @@ fn prepare(
     {
         return Err(Reject::PoleUncovered);
     }
+    // Fan between outward normal and vertical, at most 35 degrees from normal.
+    // Rounded geometry, not this directional guard, establishes clearance.
+    let vertical = [0.0, 0.0, -1.0];
+    if !plan.model.orientation_valid
+        || dot(axis, n) < 35.0_f64.to_radians().cos() - 1e-6
+        || axis[2] > n[2] + 1e-6
+        || axis[0] * n[0] + axis[1] * n[1] < -1e-6
+        || dot(axis, cross(n, vertical)).abs() > 1e-6
+    {
+        return Err(Reject::DepartureNotMonotone);
+    }
     Ok(Prepared {
         contact: Contact {
             cand: c.id,
@@ -215,11 +233,6 @@ fn prepare(
         inner,
         cone: cone_solid,
         joint: joint_solid,
-        normal: n,
-        site: std::array::from_fn(|i| {
-            f64::from(c.site[i]) - n[i] * dot(sub(c.site.map(f64::from), t[0]), n)
-        }),
-        axis,
     })
 }
 
@@ -251,75 +264,7 @@ fn check_measurements(
     if cone.lo - ENVELOPE <= 0.02 {
         return Err(Reject::HeadTouchesModel);
     }
-    // Phase-one certified approach domain: normal departure from a global supporting
-    // plane. Non-normal/concave approaches are refused, not approximated by a centreline.
-    if norm(sub(p.axis, p.normal)) > 1e-6 {
-        return Err(Reject::DepartureNotMonotone);
-    }
-    let mesh = plan.model.mesh();
-    for i in 0..mesh.vertex_count() {
-        let v = [mesh.xs()[i], mesh.ys()[i], mesh.zs()[i]];
-        if dot(sub(v, p.site), p.normal) > 1e-6 {
-            return Err(Reject::DepartureNotMonotone);
-        }
-    }
-    certify_planar_departure(plan, p)?;
     Ok(patch)
-}
-fn certify_planar_departure(plan: &PlanBuilder<Contacts>, p: &Prepared) -> Result<(), Reject> {
-    let mesh = plan.model.mesh();
-    let mut edges = std::collections::BTreeMap::<(u32, u32), u32>::new();
-    let at = |ix: u32| {
-        let i = ix as usize;
-        [mesh.xs()[i], mesh.ys()[i], mesh.zs()[i]]
-    };
-    for tri in mesh.indices().chunks_exact(3) {
-        if tri
-            .iter()
-            .all(|&ix| dot(sub(at(ix), p.site), p.normal).abs() < 1e-7)
-        {
-            for k in 0..3 {
-                let a = tri[k];
-                let b = tri[(k + 1) % 3];
-                *edges.entry((a.min(b), a.max(b))).or_default() += 1;
-            }
-        }
-    }
-    if edges.is_empty() {
-        return Err(Reject::DepartureNotMonotone);
-    }
-    let PartFields::Frustum { r1, r2, start, end } = p.contact.parts[1].fields() else {
-        return Err(Reject::UnknownShape);
-    };
-    let displacement = sub(end.map(f64::from), start.map(f64::from));
-    let along = dot(displacement, p.normal);
-    let lateral = norm(std::array::from_fn(|i| {
-        displacement[i] - along * p.normal[i]
-    }));
-    let required = f64::from(r1.max(r2)) + lateral + 2.0 * ENVELOPE;
-    // The entire projected cone fits within the flat face union: no finite edge
-    // or hole can become its nearest surface instead of the supporting plane.
-    for ((a, b), count) in edges {
-        if count > 2 {
-            return Err(Reject::PatchUnverified);
-        }
-        if count == 2 {
-            continue;
-        }
-        let a = at(a);
-        let b = at(b);
-        let d = sub(b, a);
-        let len2 = dot(d, d);
-        if len2 < 1e-20 {
-            return Err(Reject::PatchUnverified);
-        }
-        let t = (dot(sub(p.site, a), d) / len2).clamp(0.0, 1.0);
-        let nearest = std::array::from_fn(|i| a[i] + t * d[i]);
-        if norm(sub(nearest, p.site)) < required {
-            return Err(Reject::DepartureNotMonotone);
-        }
-    }
-    Ok(())
 }
 fn section_capacity(p: &Prepared) -> f64 {
     p.contact.parts[1]

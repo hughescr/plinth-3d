@@ -50,6 +50,8 @@
 //! ```
 
 mod contact;
+#[cfg(test)]
+mod local_tests;
 mod members;
 mod native;
 #[cfg(test)]
@@ -238,6 +240,7 @@ pub struct PlanBuilder<S> {
     process: ProcessRecord,
     contacts: Vec<Contact>,
     members: Vec<NativePart>,
+    member_roles: Vec<members::MemberRole>,
     columns: Vec<members::ColumnAnchor>,
     braces: Vec<members::BraceAnchor>,
     raft: bool,
@@ -272,6 +275,7 @@ impl PlanBuilder<Contacts> {
             process,
             contacts: Vec::new(),
             members: Vec::new(),
+            member_roles: Vec::new(),
             columns: Vec::new(),
             braces: Vec::new(),
             raft: false,
@@ -332,6 +336,7 @@ impl PlanBuilder<Contacts> {
             process: self.process,
             contacts: self.contacts,
             members: self.members,
+            member_roles: self.member_roles,
             columns: self.columns,
             braces: self.braces,
             raft: self.raft,

@@ -79,6 +79,7 @@ pub struct PosedModel {
     triangles: Vec<Triangle>,
     translate: [f32; 3],
     keep: KeepUpRecord,
+    pub(super) orientation_valid: bool,
     pub(super) plate: f32,
 }
 impl PosedModel {
@@ -126,12 +127,33 @@ impl PosedModel {
                 })
             })
             .collect();
+        // One frozen-model pass, never a per-candidate scan. A closed reversed shell
+        // must not turn inward surface normals into an exterior departure certificate.
+        let mut edges = Vec::with_capacity(mesh.indices().len());
+        let mut volume6 = 0.0;
+        for tri in mesh.indices().chunks_exact(3) {
+            let v: [[f64; 3]; 3] = std::array::from_fn(|k| {
+                let i = tri[k] as usize;
+                [mesh.xs()[i], mesh.ys()[i], mesh.zs()[i]]
+            });
+            volume6 += super::native::dot(v[0], super::native::cross(v[1], v[2]));
+            for k in 0..3 {
+                let a = tri[k];
+                let b = tri[(k + 1) % 3];
+                edges.push((a.min(b), a.max(b)));
+            }
+        }
+        edges.sort_unstable();
+        let closed =
+            edges.chunks_exact(2).all(|p| p[0] == p[1]) && edges.windows(3).all(|p| p[0] != p[2]);
+        let orientation_valid = !closed || volume6 > 0.0;
         let plate = mesh.bounds().min[2] as f32 - limits.lift;
         Ok(Self {
             mesh,
             triangles,
             translate: [0.0, 0.0, limits.lift],
             keep: keep.clone(),
+            orientation_valid,
             plate,
         })
     }
