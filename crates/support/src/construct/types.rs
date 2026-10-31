@@ -135,6 +135,10 @@ impl PosedModel {
             plate,
         })
     }
+    #[cfg(test)]
+    pub(super) fn mesh_for_member_gap_test(&mut self, mesh: Mesh) {
+        self.mesh = mesh;
+    }
     /// Query geometry, bit-identical to the native model.
     pub fn mesh(&self) -> &Mesh {
         &self.mesh
@@ -228,5 +232,31 @@ impl Section {
     /// 16-gon perpendicular section, mm² (not contact area).
     pub fn area(self) -> f64 {
         8.0 * f64::from(self.r).powi(2) * (std::f64::consts::PI / 8.0).sin()
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+    use crate::construct::{NativePart, PartKind};
+
+    #[test]
+    fn section_and_native_frustum_protect_h9_build_reserve_independently() {
+        let r = 0.0515;
+        let across = 2.0 * f64::from(r) * (std::f64::consts::PI / 16.0).cos();
+        assert!((across - 0.10102).abs() < 0.00001);
+        assert!(matches!(Section::new(r), Err(Reject::TooThin { .. })));
+        // PRIVATE fault injection is essential here: using Section::new would
+        // stop at the first guard and never witness the native-mesh width guard.
+        let thin = Section { r };
+        let out = NativePart::frustum(PartKind::Rod, [0.; 3], [0., 0., 1.], thin, thin);
+        assert!(
+            matches!(out, Err(Reject::TooThin { across })
+            if across > 0.1009 && across < 0.1011),
+            "width rejection missing: {:?}",
+            out.as_ref().err()
+        );
+        let good = Section::new(0.052).unwrap();
+        assert!(NativePart::frustum(PartKind::Rod, [0.; 3], [0., 0., 1.], good, good).is_ok());
     }
 }

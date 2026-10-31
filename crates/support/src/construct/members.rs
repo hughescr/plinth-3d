@@ -1,4 +1,4 @@
-use super::native::ENVELOPE;
+use super::native::{ENVELOPE, distance, dot, norm, sub};
 use super::*;
 use plinth_geom::{Bvh, clearance};
 
@@ -79,8 +79,9 @@ pub struct RaftId {
 }
 
 impl PlanBuilder<Routed> {
-    /// Probe all fixed-size members against the model in one kernel batch. Earlier
-    /// columns may carry braces, but a sibling quote cannot be its carrier.
+    /// Probe fixed-size members against the model in one kernel batch, then keep
+    /// every admitted head's reservation. Earlier columns may carry braces, but a
+    /// sibling quote cannot be its carrier.
     pub fn probe_members(
         &self,
         proposals: &[MemberProposal],
@@ -117,10 +118,51 @@ impl PlanBuilder<Routed> {
                         _ => None,
                     });
                     at += count;
-                    out.push(reject.map_or(Ok(q), Err));
+                    out.push(reject.map_or_else(|| self.keep_heads(&q).map(|()| q), Err));
                 }
             }
         }
+    }
+    // Reserve the same enclosing balls used by contact::pair, for ALL chains.
+    // A full frustum is inside its axis segment swept by its maximum radius.
+    // Disjoint envelopes therefore protect patches, cones, joints and regions in
+    // both native representations, not just the member's centreline. This is
+    // conservative: some harmless members can be refused. The only exception is
+    // a column's own certified centre-to-centre joint connection, made below.
+    fn keep_heads(&self, quote: &MemberQuote) -> Result<(), Reject> {
+        for (ix, head) in self.contacts.iter().enumerate() {
+            let own_column = quote.column.as_ref().is_some_and(|c| c.contact == ix);
+            let radius = distance(head.centre, head.joint)
+                + f64::from(head.joint_radius.max(head.radius))
+                + 2.0 * ENVELOPE;
+            let centre = head.centre.map(f64::from);
+            for part in &quote.parts {
+                if own_column && part.kind() == PartKind::Rod {
+                    continue; // Same-chain joint connection, never a base exemption.
+                }
+                let PartFields::Frustum { start, end, r1, r2 } = part.fields() else {
+                    return Err(Reject::UnknownShape);
+                };
+                // A vertical finite frustum has no radial Z extent. This exact
+                // cap-plane separation also keeps the wide plate flares usable.
+                if start[0].to_bits() == end[0].to_bits()
+                    && start[1].to_bits() == end[1].to_bits()
+                    && f64::from(start[2].max(end[2])) + ENVELOPE < centre[2] - radius
+                {
+                    continue;
+                }
+                let a = start.map(f64::from);
+                let delta = sub(end.map(f64::from), a);
+                let t = (dot(sub(centre, a), delta) / dot(delta, delta)).clamp(0.0, 1.0);
+                let nearest = std::array::from_fn(|i| a[i] + t * delta[i]);
+                // Field coordinates are bounded by 100 mm; the 1e-8 mm arithmetic
+                // enclosure exceeds rounding of this non-degenerate segment solve.
+                if norm(sub(centre, nearest)) - f64::from(r1.max(r2)) - radius < 1e-8 {
+                    return Err(Reject::RegionBlocked { by: head.cand });
+                }
+            }
+        }
+        Ok(())
     }
     fn prepare_member(&self, proposal: MemberProposal) -> Result<MemberQuote, Reject> {
         let (parts, column, brace) = match proposal {
@@ -304,6 +346,16 @@ impl PlanBuilder<Routed> {
         if self.model.mesh().bounds().min[2] - f64::from(top) < self.limits.gap + ENVELOPE {
             return Err(Reject::RaftTouchesModel);
         }
+        // Pads and bridges lie below top. Keep even the conservative complete-head
+        // reservations above them; the model-only gap does not prove this fact.
+        for head in &self.contacts {
+            let radius = distance(head.centre, head.joint)
+                + f64::from(head.joint_radius.max(head.radius))
+                + 2.0 * ENVELOPE;
+            if f64::from(head.centre[2]) - radius <= f64::from(top) + ENVELOPE {
+                return Err(Reject::RegionBlocked { by: head.cand });
+            }
+        }
         let mut centres: Vec<_> = self.columns.iter().map(|c| [c.top[0], c.top[1]]).collect();
         centres.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
         centres.dedup_by(|a, b| {
@@ -464,6 +516,50 @@ fn xy_distance(a: &ColumnAnchor, b: &ColumnAnchor) -> f64 {
 mod tests {
     use super::*;
     use crate::construct::tests::{builder, candidate, plate};
+    #[test]
+    fn member_gap_straddles_h6_build_reserve() {
+        for gap in [0.31f64, 0.33] {
+            let mut p = builder(&plate());
+            let mut out = Vec::new();
+            p.probe(&[candidate(0, 0.)], &mut out);
+            let contacts = p.commit(QuoteBatch::from_results(out).unwrap()).unwrap();
+            let mut p = p.into_routing();
+            // PRIVATE fixture isolates member admission from the still-restricted
+            // contact departure domain. Add a finite vertical sheet beside the rod
+            // after creating the carrier. No production model-mutation API exists.
+            // The sheet is below the joint and above the flare; analytic rod gap
+            // is x - 0.25. These are not whole-plan/concave-admission controls.
+            let x = 0.25 + gap;
+            let mesh = plinth_geom::Mesh::new(
+                vec![-30., 30., 30., -30., x, x, x, x],
+                vec![-30., -30., 30., 30., -0.1, 0.1, 0.1, -0.1],
+                vec![0., 0., 0., 0., -3.35, -3.35, -3.25, -3.25],
+                vec![0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7],
+            )
+            .unwrap();
+            // Preserve coordinates and plate so only this routing guard changes.
+            p.model.mesh_for_member_gap_test(mesh);
+            let proposals = [MemberProposal::Column {
+                contact: contacts[0],
+                section: Section::new(0.25).unwrap(),
+            }];
+            let mut out = Vec::new();
+            p.probe_members(&proposals, &mut out);
+            if gap < 0.32 {
+                assert!(
+                    matches!(&out[0], Err(Reject::GapTooSmall { gap })
+                    if (gap - 0.31).abs() < 0.0001),
+                    "gap rejection missing: {:?}",
+                    out[0].as_ref().err()
+                );
+            } else {
+                p.commit_members(MemberQuoteBatch::from_results(out).unwrap())
+                    .unwrap();
+                assert_eq!(p.columns.len(), 1);
+            }
+        }
+    }
+
     #[test]
     fn member_rejections_and_private_raft_fault_injection_have_witnesses() {
         let mut p = builder(&plate());

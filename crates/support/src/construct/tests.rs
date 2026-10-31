@@ -144,6 +144,28 @@ fn joint_second_sheet_is_gap_too_small_before_commit() {
     assert_eq!(p.contact_count(), 0);
 }
 #[test]
+fn joint_gap_straddles_h6_build_reserve() {
+    for gap in [0.31f32, 0.33] {
+        let mut p = builder(&plate());
+        let mut c = candidate(0, 0.);
+        c.head_len = 1.5;
+        c.joint_r = c.standoff + c.head_len - gap;
+        let out = quotes(&p, &[c]);
+        if gap < 0.32 {
+            assert!(
+                matches!(&out[0], Err(Reject::GapTooSmall { gap })
+                if (gap - 0.31).abs() < 0.0001),
+                "gap rejection missing: {:?}",
+                out[0].as_ref().err()
+            );
+        } else {
+            p.commit(QuoteBatch::from_results(out).unwrap()).unwrap();
+            assert_eq!(p.contact_count(), 1);
+        }
+    }
+}
+
+#[test]
 fn geometric_pole_cover_rejects_a_downward_but_shallow_head() {
     let p = builder(&plate());
     let mut c = candidate(0, 0.0);
@@ -492,6 +514,68 @@ fn fixed_tilted_heads_and_rooted_x_braces_freeze() {
 }
 
 #[test]
+fn brace_between_a_and_b_cannot_cut_a_third_chains_joint() {
+    let (s, c) = 65f64.to_radians().sin_cos();
+    let mesh = Mesh::new(
+        vec![-30., 30., 30., -30.],
+        vec![-30. * c, -30. * c, 30. * c, 30. * c],
+        vec![-30. * s, -30. * s, 30. * s, 30. * s],
+        vec![0, 2, 1, 0, 3, 2],
+    )
+    .unwrap();
+    let mut p = builder(&mesh);
+    let x = (4.3 * (s * s - c * c).sqrt()) as f32;
+    // C sorts first so the rejection proves the unrelated chain was checked,
+    // not merely a conservative reservation at a brace's carrier endpoint.
+    let tips: Vec<_> = [(0, 0., 0.), (1, -x, -4.3), (2, x, 4.3)]
+        .into_iter()
+        .map(|(id, x, u)| {
+            let mut tip = candidate(id, x);
+            tip.site = [x, (u * c) as f32, (u * s) as f32];
+            tip.axis = [0., s as f32, -c as f32];
+            tip
+        })
+        .collect();
+    let contacts = p
+        .commit(QuoteBatch::from_results(quotes(&p, &tips)).unwrap())
+        .unwrap();
+    let joint = p.get(contacts[0]).unwrap().joint;
+    let mut p = p.into_routing();
+    let columns: Vec<_> = contacts
+        .iter()
+        .map(|&contact| MemberProposal::Column {
+            contact,
+            section: Section::new(0.25).unwrap(),
+        })
+        .collect();
+    let mut out = Vec::new();
+    p.probe_members(&columns, &mut out);
+    let ids = p
+        .commit_members(MemberQuoteBatch::from_results(out).unwrap())
+        .unwrap();
+    let a = p.get(contacts[1]).unwrap().joint;
+    let b = p.get(contacts[2]).unwrap().joint;
+    let brace = MemberProposal::Brace {
+        from: ids[1],
+        to: ids[2],
+        from_z: a[2] - 0.0002,
+        to_z: b[2] - 0.0002,
+        section: Section::new(0.25).unwrap(),
+    };
+    let mid_z = (a[2] + b[2]) * 0.5 - 0.0002;
+    assert!((mid_z - joint[2]).abs() < 0.0003);
+    let before = (p.rev(), p.members.len());
+    let mut out = Vec::new();
+    p.probe_members(&[brace], &mut out);
+    assert!(
+        matches!(out[0], Err(Reject::RegionBlocked { by: CandId(0) })),
+        "third-chain rejection missing: {:?}",
+        out[0].as_ref().err()
+    );
+    assert_eq!((p.rev(), p.members.len()), before);
+}
+
+#[test]
 fn fixed_angle_controls_admit_only_certified_head_approaches() {
     let mut admitted = 0;
     for angle in [0f64, 30., 45., 65., 90.] {
@@ -526,6 +610,30 @@ fn fixed_angle_controls_admit_only_certified_head_approaches() {
     eprintln!(
         "angle controls: 4 admitted normal-departure heads at 0/30/45/65 deg; 1 horizontal-axis rejection at 90 deg; plane-oracle joint gap violations=0"
     );
+}
+
+#[test]
+fn thin_wall_second_sheet_on_model_side_is_not_a_departure_failure() {
+    let mesh = Mesh::new(
+        vec![-30., 30., 30., -30., -30., 30., 30., -30.],
+        vec![-30., -30., 30., 30., -30., -30., 30., 30.],
+        vec![-0.15, -0.15, -0.15, -0.15, 0.15, 0.15, 0.15, 0.15],
+        vec![0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7],
+    )
+    .unwrap();
+    let p = builder(&mesh);
+    let mut tip = candidate(0, 0.);
+    tip.site[2] = -0.15;
+    tip.ball_r = 0.34;
+    tip.standoff = 0.03;
+    // Both planar intersections fit under H1 together: it is sheet multiplicity,
+    // not area or departure, that must refuse this otherwise clear head.
+    let r = f64::from(tip.ball_r);
+    let stand = f64::from(tip.standoff);
+    let truth = std::f64::consts::PI * (2.0 * r * r - stand * stand - (stand + 0.3).powi(2));
+    assert!(truth > 0.0 && truth < 0.48);
+    let out = quotes(&p, &[tip]);
+    assert!(matches!(out[0], Err(Reject::SecondSheet)));
 }
 
 #[test]
