@@ -1,281 +1,371 @@
-//! The sealed construction API (lane A; design `step11-construction.md` section 6).
+//! Sealed fixed-size construction. Geometry only moves forward: contacts → routing →
+//! frozen plan. Quotes are consumed atomically and tied to one builder revision.
 //!
-//! Step 0 holds the shape of the API: the typestate (`Contacts`, `Routed`), the batch
-//! `probe` and the rejection list. Every `probe` answers a rejection that says the check is
-//! not built, so nothing is admitted by accident. Lane A replaces the bodies, seals the types
-//! (private fields, no `Clone` on quotes) and adds the compile-fail tests.
+//! ```compile_fail
+//! use plinth_support::construct::PatchBound;
+//! let b = PatchBound { lo: 0.1, hi: 0.3 };
+//! ```
+//! ```compile_fail
+//! use plinth_support::construct::{CappedPatch, PatchBound};
+//! fn forge(b: PatchBound) { let _ = CappedPatch(b); }
+//! ```
+//! ```compile_fail
+//! use plinth_support::construct::Section;
+//! let s = Section { r: 0.04 };
+//! ```
+//! ```compile_fail
+//! use plinth_support::construct::{PlanBuilder, Contacts, ContactId};
+//! fn edit(p: &mut PlanBuilder<Contacts>, id: ContactId) { p.get_mut(id); }
+//! ```
+//! ```compile_fail
+//! use plinth_support::construct::ContactId;
+//! let id = ContactId { plan: 1, ix: 0 };
+//! ```
+//! ```compile_fail
+//! use plinth_support::construct::Quote;
+//! fn copy(q: Quote) { q.clone(); }
+//! ```
+//! ```compile_fail
+//! use plinth_support::construct::{PlanBuilder, Routed};
+//! fn late(p: &PlanBuilder<Routed>) { p.probe(&[], &mut Vec::new()); }
+//! ```
+//! ```compile_fail,E0308
+//! use plinth_support::construct::{ContactId, MemberProposal, PlanBuilder, Routed};
+//! fn bare(p: &PlanBuilder<Routed>, contact: ContactId) {
+//!     p.probe_members(&[MemberProposal::Column { contact, section: 0.04 }], &mut Vec::new());
+//! }
+//! ```
+//! ```compile_fail
+//! use plinth_support::construct::SupportPlan;
+//! fn edit(p: &mut SupportPlan) { p.parts.clear(); }
+//! ```
+//! ```compile_fail,E0451
+//! use plinth_geom::Mesh;
+//! use plinth_support::construct::{KeepUpRecord, PosedModel};
+//! fn forge(mesh: Mesh, keep: KeepUpRecord) {
+//!     let _ = PosedModel {
+//!         mesh, triangles: Vec::new(), translate: [0.0, 0.0, 4.0], keep, plate: 0.0,
+//!     };
+//! }
+//! ```
 
-use plinth_geom::Mesh;
-use std::marker::PhantomData;
+mod contact;
+mod members;
+mod native;
+#[cfg(test)]
+mod tests;
+mod types;
 
-/// A candidate's id within one batch.
+pub use contact::require_capacity;
+pub use members::{Anchor, MemberId, MemberProposal, MemberQuote, MemberQuoteBatch, RaftId};
+pub use native::{NativePart, PartFields, PartKind};
+pub use types::{
+    CappedPatch, KeepUpRecord, Limits, PatchBound, PoseError, PosedModel, ProcessRecord, Section,
+};
+
+use plinth_geom::shapes::Triangle;
+use std::{
+    marker::PhantomData,
+    sync::atomic::{AtomicU64, Ordering},
+};
+static NEXT_PLAN: AtomicU64 = AtomicU64::new(1);
+
+/// Candidate id, scoped to a plan; duplicate ids are refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CandId(pub u32);
-
-/// Why a candidate was refused (design section 6.1).
+/// Contact handle. No public constructor or mutable lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContactId {
+    plan: u64,
+    ix: usize,
+}
+/// Admission failures. No rejection is a favourable measurement.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reject {
-    /// The patch upper bound is over the admission bound.
-    AreaOverLimit {
-        /// Patch upper bound, mm².
-        hi: f64,
-        /// The bound, mm².
-        max: f64,
-    },
-    /// The patch cannot be bounded on the written mesh.
+    /// H1 upper bound exceeds the build maximum, mm².
+    AreaOverLimit { hi: f64, max: f64 },
+    /// Geometry cannot certify a patch.
     PatchUnverified,
-    /// The head makes a second patch on another model sheet.
+    /// More than one model sheet is touched.
     SecondSheet,
-    /// The patch would fuse with another within the separation.
-    WouldFuse {
-        /// The other candidate.
-        with: CandId,
-    },
-    /// The head region overlaps a reserved region.
-    RegionBlocked {
-        /// The candidate whose region it is.
-        by: CandId,
-    },
-    /// The neck or cone touches the model inside the region.
+    /// Patch envelopes could fuse.
+    WouldFuse { with: CandId },
+    /// Reserved head regions conflict.
+    RegionBlocked { by: CandId },
+    /// Cone touches model outside the ball.
     HeadTouchesModel,
-    /// The gap to the model decreases along the head.
+    /// Departure cannot be certified monotone.
     DepartureNotMonotone,
-    /// The ball's lowest point is not covered by the cone or joint.
+    /// Bottom ball cap has no earlier carrier.
     PoleUncovered,
-    /// A part outside the region is closer than the build gap.
-    GapTooSmall {
-        /// Certified gap lower bound, mm.
-        gap: f64,
-    },
-    /// A part would print before its carrier.
-    PrintOrder {
-        /// The layer where it breaks.
-        layer: u32,
-    },
-    /// A section is thinner than the construction minimum.
-    TooThin {
-        /// Width across flats, mm.
-        across: f64,
-    },
-    /// A join is narrower than the construction minimum.
+    /// Outside-region gap is insufficient, mm.
+    GapTooSmall { gap: f64 },
+    /// Member is earlier than its carrier.
+    PrintOrder { layer: u32 },
+    /// Width across flats, mm, is too small.
+    TooThin { across: f64 },
+    /// Rod ends do not reach a containing joint centre.
     NarrowJoin,
-    /// The raft touches the model.
+    /// Raft cannot keep the model gap.
     RaftTouchesModel,
-    /// The contact's certified capacity does not carry its load.
+    /// Certified lower section does not carry requested load.
     InsufficientCapacity,
-    /// A value is not finite.
+    /// A numeric field is not finite or outside the bounded domain.
     NonFinite,
-    /// The plan changed since the quote was made.
+    /// Consumed quote was for an earlier revision.
     Stale,
-    /// The handle belongs to another plan.
+    /// Quote or handle belongs to another plan.
     ForeignHandle,
-    /// The shape is not one the native files reproduce.
+    /// No certified native shape exists.
     UnknownShape,
-    /// The measurement did not reach the required width within its work budget.
+    /// Geometric bound could not be established.
     MeasureExhausted,
-    /// A search or memory budget ran out.
+    /// Bounded work or storage limit exceeded.
     ResourceExhausted,
-    /// The check is not built yet (step 0 stub).
+    /// This operation is not built.
     NotBuilt,
 }
-
-/// Why a pose cannot be made.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PoseError {
-    /// The pose step is not built yet (step 0 stub).
-    NotBuilt,
-}
-
-/// The recorded keep-up rotation of the approved STL.
-#[derive(Debug, Clone, PartialEq)]
-pub struct KeepUpRecord {
-    /// Rotation about X from the original, degrees (115 for the Round bases).
-    pub rotation_x_deg: f64,
-    /// SHA-256 of the approved STL.
-    pub approved_sha256: String,
-}
-
-/// The hard limits and build values, parsed from `limits.toml` and the design.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Limits {
-    /// H1 admission bound for the patch upper bound, mm².
-    pub h1_admission_mm2: f64,
-    /// H4 minimum lift of the lowest model point, mm.
-    pub h4_lift_mm: f64,
-    /// H6 build gap outside the contact regions, mm.
-    pub h6_build_gap_mm: f64,
-    /// H9 construction minimum width across flats, mm.
-    pub h9_across_flats_mm: f64,
-    /// The contact-surrounding region length, mm.
-    pub region_length_mm: f64,
-}
-
-/// The posed model: the f32 mesh that will be written, its lift and hash.
-#[derive(Debug)]
-pub struct PosedModel {
-    _private: (),
-}
-
-impl PosedModel {
-    /// Centre and lift `input` so the lowest written vertex is at the H4 lift.
-    ///
-    /// # Errors
-    /// [`PoseError`] when the pose cannot be made.
-    pub fn new(input: &Mesh, keep_up: &KeepUpRecord, limits: &Limits) -> Result<Self, PoseError> {
-        let _ = (input, keep_up, limits);
-        Err(PoseError::NotBuilt)
-    }
-}
-
-/// The layer profile and process record a plan is made under.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ProcessRecord {
-    /// Layer height, mm.
-    pub layer_height_mm: f64,
-    /// Layer origin, mm.
-    pub layer_origin_mm: f64,
-}
-
-/// One proposed contact.
+/// Whole-batch rejection. Failure leaves the builder unchanged.
+pub type BatchReject = Reject;
+/// Freeze failed; no partially frozen plan escapes.
+pub type IncompletePlan = Reject;
+/// Proposed fields, already at native f32 precision. Site is in the posed model's
+/// local frame. The outward normal is recovered from the frozen surface, not supplied.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ContactCandidate {
-    /// Id within the batch.
+    /// Stable candidate id.
     pub id: CandId,
-    /// Surface point the ball touches, mm.
+    /// Surface point, mm.
     pub site: [f32; 3],
     /// Ball radius, mm.
     pub ball_r: f32,
-    /// Distance of the ball centre outside the surface, mm.
+    /// Outward normal standoff, mm.
     pub standoff: f32,
-    /// Head axis, unit vector from the ball centre toward the joint.
+    /// Direction toward joint; unit vector.
     pub axis: [f32; 3],
-    /// Neck radius, mm.
+    /// Cone start radius (conservatively at least the H9 minimum), mm.
     pub neck: f32,
     /// Joint radius, mm.
     pub joint_r: f32,
-    /// Distance from ball centre to joint centre, mm.
+    /// Ball-to-joint centre distance, mm.
     pub head_len: f32,
 }
-
-/// An admitted-to-be contact, bound to one plan state. Not `Clone`.
+/// An admitted contact, immutable even before freeze.
 #[derive(Debug)]
-pub struct Quote {
+pub struct Contact {
     cand: CandId,
-    rev: u64,
+    centre: [f32; 3],
+    radius: f32,
+    joint: [f32; 3],
+    joint_radius: f32,
+    patch: CappedPatch,
+    parts: Vec<NativePart>,
 }
-
-impl Quote {
-    /// The candidate this quote answers.
-    #[must_use]
-    pub fn cand(&self) -> CandId {
+impl Contact {
+    /// Candidate identity.
+    pub fn candidate_id(&self) -> CandId {
         self.cand
     }
-
-    /// The plan revision it was made at.
-    #[must_use]
+    /// Rounded ball centre.
+    pub fn centre(&self) -> [f32; 3] {
+        self.centre
+    }
+    /// Rounded joint centre.
+    pub fn joint(&self) -> [f32; 3] {
+        self.joint
+    }
+    /// Joint radius, mm.
+    pub fn joint_radius(&self) -> f32 {
+        self.joint_radius
+    }
+    /// Certified patch interval, mm².
+    pub fn patch(&self) -> &PatchBound {
+        &self.patch.0
+    }
+    /// Exact checked native parts.
+    pub fn parts(&self) -> &[NativePart] {
+        &self.parts
+    }
+}
+/// Uncopyable contact quote, bound to exact model, process, limits and revision by plan id.
+#[derive(Debug)]
+pub struct Quote {
+    plan: u64,
+    rev: u64,
+    contact: Contact,
+}
+impl Quote {
+    /// Candidate id.
+    pub fn cand(&self) -> CandId {
+        self.contact.cand
+    }
+    /// Plan revision.
     pub fn rev(&self) -> u64 {
         self.rev
     }
+    /// Certified lower-bound capacity at full patch (not early-layer capacity), mm² of peel.
+    pub fn full_capacity(&self) -> f64 {
+        self.contact.patch.0.lo * 12.0
+    }
 }
-
-/// Typestate: contacts may still be admitted.
+/// Uncopyable all-or-nothing contact batch.
+#[derive(Debug)]
+pub struct QuoteBatch {
+    quotes: Vec<Quote>,
+}
+impl QuoteBatch {
+    /// Collect every answer; any rejection consumes and refuses the entire batch.
+    pub fn from_results(results: Vec<Result<Quote, Reject>>) -> Result<Self, Reject> {
+        Ok(Self {
+            quotes: results.into_iter().collect::<Result<_, _>>()?,
+        })
+    }
+}
+/// Contacts may still be admitted.
 #[derive(Debug)]
 pub struct Contacts;
-/// Typestate: contacts are final; members are admitted.
+/// Contacts are final; rooted members may now be admitted.
 #[derive(Debug)]
 pub struct Routed;
-
-/// The plan under construction. The type parameter is the typestate.
+/// Stateful builder. No mutable views, removals, or contact edits.
 #[derive(Debug)]
 pub struct PlanBuilder<S> {
+    id: u64,
     rev: u64,
+    workers: usize,
+    model: PosedModel,
+    limits: Limits,
+    process: ProcessRecord,
+    contacts: Vec<Contact>,
+    members: Vec<NativePart>,
+    columns: Vec<members::ColumnAnchor>,
+    braces: Vec<members::BraceAnchor>,
+    raft: bool,
     _state: PhantomData<S>,
 }
-
-impl PlanBuilder<Contacts> {
-    /// Start a plan on a posed model.
-    #[must_use]
-    pub fn new(model: PosedModel, limits: Limits, process: ProcessRecord) -> Self {
-        let _ = (model, limits, process);
-        Self {
-            rev: 0,
-            _state: PhantomData,
-        }
-    }
-
-    /// The revision a quote made now would be bound to.
-    #[must_use]
+impl<S> PlanBuilder<S> {
+    /// Current revision.
     pub fn rev(&self) -> u64 {
         self.rev
     }
-
-    /// Check a batch of candidates, in parallel and purely, including against each other.
-    ///
-    /// `out` is cleared and refilled with exactly one answer per candidate.
-    pub fn probe(&self, cands: &[ContactCandidate], out: &mut Vec<Result<Quote, Reject>>) {
-        out.clear();
-        out.extend(cands.iter().map(|_| Err(Reject::NotBuilt)));
+    /// Read-only contact lookup, rejecting foreign handles before indexing.
+    pub fn get(&self, id: ContactId) -> Result<&Contact, Reject> {
+        if id.plan != self.id {
+            return Err(Reject::ForeignHandle);
+        }
+        self.contacts.get(id.ix).ok_or(Reject::ForeignHandle)
     }
-
-    /// Move to the routing state. No contact can be admitted afterwards.
-    #[must_use]
+    /// Number of committed contacts, not records or printable sites.
+    pub fn contact_count(&self) -> usize {
+        self.contacts.len()
+    }
+}
+impl PlanBuilder<Contacts> {
+    /// Fix model, limits and process identity for the lifetime of the plan.
+    pub fn new(model: PosedModel, limits: Limits, process: ProcessRecord) -> Self {
+        Self {
+            id: NEXT_PLAN.fetch_add(1, Ordering::Relaxed),
+            rev: 0,
+            workers: 1,
+            model,
+            limits,
+            process,
+            contacts: Vec::new(),
+            members: Vec::new(),
+            columns: Vec::new(),
+            braces: Vec::new(),
+            raft: false,
+            _state: PhantomData,
+        }
+    }
+    /// Set this plan's explicit worker allocation before probes. Default is one.
+    pub fn with_workers(mut self, workers: usize) -> Result<Self, Reject> {
+        if !(1..=8).contains(&workers) {
+            return Err(Reject::ResourceExhausted);
+        }
+        self.workers = workers;
+        Ok(self)
+    }
+    /// Pure whole-layout probe; pair conflicts are checked inside this batch too.
+    pub fn probe(&self, cands: &[ContactCandidate], out: &mut Vec<Result<Quote, Reject>>) {
+        contact::probe(self, cands, out);
+    }
+    /// Consume one batch, sorted by candidate id, or change nothing.
+    pub fn commit(&mut self, batch: QuoteBatch) -> Result<Vec<ContactId>, BatchReject> {
+        let mut qs = batch.quotes;
+        for q in &qs {
+            if q.plan != self.id {
+                return Err(Reject::ForeignHandle);
+            }
+            if q.rev != self.rev {
+                return Err(Reject::Stale);
+            }
+        }
+        qs.sort_by_key(Quote::cand);
+        for (i, q) in qs.iter().enumerate() {
+            for old in self
+                .contacts
+                .iter()
+                .chain(qs[..i].iter().map(|q| &q.contact))
+            {
+                contact::pair(&q.contact, old)?;
+            }
+        }
+        let ids = (0..qs.len())
+            .map(|i| ContactId {
+                plan: self.id,
+                ix: self.contacts.len() + i,
+            })
+            .collect();
+        self.contacts.extend(qs.into_iter().map(|q| q.contact));
+        self.rev += 1;
+        Ok(ids)
+    }
+    /// Seal contacts before routing. No contacts can be admitted in this state.
     pub fn into_routing(self) -> PlanBuilder<Routed> {
         PlanBuilder {
+            id: self.id,
             rev: self.rev,
+            workers: self.workers,
+            model: self.model,
+            limits: self.limits,
+            process: self.process,
+            contacts: self.contacts,
+            members: self.members,
+            columns: self.columns,
+            braces: self.braces,
+            raft: self.raft,
             _state: PhantomData,
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_stub_admits_nothing() {
-        let cand = ContactCandidate {
-            id: CandId(0),
-            site: [0.0; 3],
-            ball_r: 0.2,
-            standoff: 0.05,
-            axis: [0.0, 0.0, -1.0],
-            neck: 0.1,
-            joint_r: 0.25,
-            head_len: 2.6,
-        };
-        let limits = Limits {
-            h1_admission_mm2: 0.48,
-            h4_lift_mm: 5.0,
-            h6_build_gap_mm: 0.32,
-            h9_across_flats_mm: 0.102,
-            region_length_mm: 3.0,
-        };
-        let mesh = Mesh::new(
-            vec![0.0, 1.0, 0.0],
-            vec![0.0, 0.0, 1.0],
-            vec![0.0; 3],
-            vec![0, 1, 2],
-        )
-        .unwrap();
-        let keep = KeepUpRecord {
-            rotation_x_deg: 115.0,
-            approved_sha256: String::new(),
-        };
-        assert_eq!(
-            PosedModel::new(&mesh, &keep, &limits).unwrap_err(),
-            PoseError::NotBuilt
-        );
-        let mut out = Vec::new();
-        let plan = PlanBuilder::new(
-            PosedModel { _private: () },
-            limits,
-            ProcessRecord {
-                layer_height_mm: 0.05,
-                layer_origin_mm: 0.0,
-            },
-        );
-        plan.probe(&[cand, cand], &mut out);
-        assert_eq!(out.len(), 2);
-        assert!(out.iter().all(|r| matches!(r, Err(Reject::NotBuilt))));
+/// Frozen immutable construction result, not evidence of print eligibility.
+#[derive(Debug)]
+pub struct SupportPlan {
+    model: PosedModel,
+    parts: Vec<NativePart>,
+    contacts: Vec<Contact>,
+    process: ProcessRecord,
+}
+impl SupportPlan {
+    /// Exact checked record geometry.
+    pub fn parts(&self) -> &[NativePart] {
+        &self.parts
+    }
+    /// Posed model frozen before placement.
+    pub fn model(&self) -> &PosedModel {
+        &self.model
+    }
+    /// Contacts, not record count.
+    pub fn contacts(&self) -> &[Contact] {
+        &self.contacts
+    }
+    /// Process settings, not stored in native files.
+    pub fn process(&self) -> &ProcessRecord {
+        &self.process
+    }
+    /// The native model triangles (not a reconstructed world-space copy).
+    pub fn model_triangles(&self) -> &[Triangle] {
+        self.model.triangles()
     }
 }

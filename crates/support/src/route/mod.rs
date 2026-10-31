@@ -1,58 +1,81 @@
-//! Columns, bracing and bases (lane A; design `step11-construction.md` section 5.7). Step 0
-//! holds the signatures only.
+//! Fixed-size column proposals. Only `construct::probe_members` can admit these
+//! paths with a section, native geometry and rooted carrier certificate.
 
-/// A column with more free length than this gets braces, mm (the owner's Light profile).
+/// Free length above which the owner's Light rule calls for bracing, mm **[O]**.
 pub const BRACE_FREE_LENGTH_MM: f64 = 4.0;
-/// The smallest column radius, mm (the pillar radius of the owner's profiles).
+/// Smallest column radius, mm **[O]**.
 pub const MIN_COLUMN_RADIUS_MM: f64 = 0.25;
-
-/// A request for one column from a joint down to the plate.
+/// Plain routing request, not an admitted member.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ColumnRequest {
-    /// Joint ball centre, mm.
+    /// Joint centre in local coordinates, mm.
     pub joint: [f32; 3],
-    /// Radius the column must have to carry its load, mm.
+    /// Column radius, mm.
     pub radius: f32,
 }
-
-/// One routed column: its two end centres and radius.
+/// Plain path data. Native local plate height must be supplied explicitly.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Column {
-    /// Top end (the joint centre), mm.
+    /// Joint centre.
     pub top: [f32; 3],
-    /// Bottom end (above the flare), mm.
+    /// Flare overlap centre.
     pub bottom: [f32; 3],
     /// Radius, mm.
     pub radius: f32,
 }
-
-/// Why a column could not be routed.
+/// No legal fixed-size path can be proposed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteError {
-    /// Routing is not built yet (step 0 stub).
+    /// Invalid coordinate or radius.
+    Invalid,
+    /// Joint below the flare.
+    TooShort,
+    /// Legacy entrypoint has no plate coordinate.
     NotBuilt,
 }
-
-/// Route one column per request, in one batch. `out` is cleared and refilled with exactly one
-/// answer per request.
+/// Legacy stub cannot infer a local plate height. Use `route_columns_at_plate`.
 pub fn route_columns(requests: &[ColumnRequest], out: &mut Vec<Result<Column, RouteError>>) {
     out.clear();
     out.extend(requests.iter().map(|_| Err(RouteError::NotBuilt)));
 }
-
+/// Route all columns at one known local plate height. This is a proposal only; the
+/// construction API still checks full-solid clearance and joints before admission.
+pub fn route_columns_at_plate(
+    requests: &[ColumnRequest],
+    plate: f32,
+    out: &mut Vec<Result<Column, RouteError>>,
+) {
+    out.clear();
+    out.extend(requests.iter().map(|r| {
+        if !plate.is_finite()
+            || r.joint.iter().any(|v| !v.is_finite())
+            || !r.radius.is_finite()
+            || r.radius < 0.25
+        {
+            return Err(RouteError::Invalid);
+        }
+        let bottom = [r.joint[0], r.joint[1], plate + 1.196];
+        if r.joint[2] <= bottom[2] + 0.05 {
+            return Err(RouteError::TooShort);
+        }
+        Ok(Column {
+            top: r.joint,
+            bottom,
+            radius: r.radius,
+        })
+    }));
+}
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn the_stub_routes_nothing() {
-        let r = ColumnRequest {
-            joint: [0.0; 3],
+    fn local_plate_is_not_inferred_from_zero() {
+        let request = ColumnRequest {
+            joint: [0., 0., 0.],
             radius: 0.25,
         };
         let mut out = Vec::new();
-        route_columns(&[r, r, r], &mut out);
-        assert_eq!(out.len(), 3);
-        assert!(out.iter().all(|c| *c == Err(RouteError::NotBuilt)));
+        route_columns_at_plate(&[request], -5., &mut out);
+        assert!((out[0].unwrap().bottom[2] + 3.804).abs() < 1e-6);
     }
 }

@@ -4,6 +4,7 @@
 //! is a diagnostic file, never a print candidate. Step 10 adds [`shapes`]: the native
 //! support part shapes (balls, cones, rods, raft pads and bridges) built from parameters.
 
+pub mod constructed;
 pub mod loop_canary;
 pub mod shapes;
 pub mod transport;
