@@ -15,9 +15,9 @@ fn native_all_files_round_trip_byte_for_byte() {
         "expected 7 older files, 8 samples and 1 re-save"
     );
     assert!(
-        files
-            .iter()
-            .all(|p| p.file_name().is_some_and(|n| n != crate::common::PLINTH_WRITTEN)),
+        files.iter().all(|p| p
+            .file_name()
+            .is_some_and(|n| n != crate::common::PLINTH_WRITTEN)),
         "the plinth-written file must not be in the native set"
     );
     let mut supported_models = 0;

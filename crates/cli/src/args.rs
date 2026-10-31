@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! plinth [--max-threads N] --out-dir DIR [--report FILE] [--checker FILE] [--limits FILE]
-//!        <input.stl>...
+//!        [--candidate] <input.stl>...
 //! ```
 //!
 //! There is no flag that replaces an existing output file (PRD FR-37).
@@ -17,7 +17,7 @@ pub const DEFAULT_MAX_THREADS: usize = 8;
 pub const MAX_THREADS_LIMIT: usize = 256;
 
 /// The usage line.
-pub const USAGE: &str = "usage: plinth [--max-threads N] --out-dir DIR [--report FILE] [--checker FILE] [--limits FILE] <input.stl>...";
+pub const USAGE: &str = "usage: plinth [--max-threads N] --out-dir DIR [--report FILE] [--checker FILE] [--limits FILE] [--candidate] <input.stl>...";
 
 /// What the command line asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +34,9 @@ pub struct Options {
     pub checker: Option<PathBuf>,
     /// The limits file handed to the checker (`limits.toml` of the checkout when absent).
     pub limits: Option<PathBuf>,
+    /// Offer print candidates only: publish a file only when the checker passed it with no
+    /// applicable rule unverified or violated.
+    pub candidate: bool,
 }
 
 /// Where the checker program and `limits.toml` are, from the path of the running `plinth`
@@ -79,6 +82,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
         report: None,
         checker: None,
         limits: None,
+        candidate: false,
     };
     let mut have_out = false;
     while let Some(arg) = p.next().map_err(|e| e.to_string())? {
@@ -94,6 +98,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
             Long("report") => o.report = Some(value(&mut p)?.into()),
             Long("checker") => o.checker = Some(value(&mut p)?.into()),
             Long("limits") => o.limits = Some(value(&mut p)?.into()),
+            Long("candidate") => o.candidate = true,
             Value(v) => o.inputs.push(v.into()),
             other => return Err(other.unexpected().to_string()),
         }
@@ -129,6 +134,12 @@ mod tests {
         assert_eq!(o.max_threads, 3);
         assert_eq!(o.inputs, [PathBuf::from("x.stl"), PathBuf::from("y.stl")]);
         assert_eq!(parse(a(&["--out-dir=o", "x"])).unwrap().max_threads, 8);
+        assert!(!parse(a(&["--out-dir=o", "x"])).unwrap().candidate);
+        assert!(
+            parse(a(&["--candidate", "--out-dir=o", "x"]))
+                .unwrap()
+                .candidate
+        );
     }
 
     #[test]

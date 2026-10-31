@@ -26,6 +26,10 @@ pub struct Config {
     pub checker: PathBuf,
     /// The limits file handed to the checker.
     pub limits: PathBuf,
+    /// Ask for print-candidate files: a file is published only if the checker passed it with
+    /// no applicable rule unverified or violated. Otherwise (transport mode) a file the
+    /// checker could read is published labelled "not a print candidate".
+    pub candidate: bool,
 }
 
 /// Wall time of one step of one model.
@@ -188,6 +192,20 @@ fn write_check_publish(
         );
         return Ok(Outcome::Failed {
             stage: "check",
+            message,
+            checked: Some(checked),
+        });
+    }
+    let blockers = checked.candidate_blockers();
+    if cfg.candidate && !blockers.is_empty() {
+        let _ = std::fs::remove_file(&temp);
+        let message = format!(
+            "{}: not offered as a print candidate; nothing was published ({})",
+            named.input.display(),
+            blockers.join("; ")
+        );
+        return Ok(Outcome::Failed {
+            stage: "candidate",
             message,
             checked: Some(checked),
         });

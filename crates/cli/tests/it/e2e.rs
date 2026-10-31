@@ -109,10 +109,7 @@ fn plinth(args: &[&str], inputs: &[&Path]) -> Output {
     if !args.contains(&"--checker") {
         cmd.arg("--checker").arg(checker_bin());
     }
-    cmd.args(args)
-        .args(inputs)
-        .output()
-        .expect("start plinth")
+    cmd.args(args).args(inputs).output().expect("start plinth")
 }
 
 fn text(o: &[u8]) -> String {

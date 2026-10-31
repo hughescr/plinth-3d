@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# The merge gate (design dev-loop.md section 9); logic in tools/devloop. Budget 180 s: run it in
+# the background. `scripts/gate --clean` is the Cold level: a fresh copy, fresh build folders.
+exec "$(dirname "$0")/devloop" gate "$@"

@@ -129,6 +129,27 @@ impl Checked {
             .collect()
     }
 
+    /// Everything that forbids offering this file as a print candidate, one line each; empty
+    /// only when the checker passed the file, no applicable rule is unverified or violated,
+    /// and the structure is sound. An unverified rule is a blocker, never a pass (design
+    /// dev-loop.md sections 6 and 10 step 8).
+    #[must_use]
+    pub fn candidate_blockers(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.verdict != Verdict::Pass {
+            out.push(format!("the checker's verdict is {}", self.verdict.name()));
+        }
+        for r in &self.rules {
+            if r.status == "unverified" || r.status == "violation" {
+                out.push(format!("{} is {}: {}", r.id, r.status, r.reason));
+            }
+        }
+        for n in &self.structure_notes {
+            out.push(format!("structure: {n}"));
+        }
+        out
+    }
+
     /// The JSON form for the run report.
     #[must_use]
     pub fn to_json(&self) -> Json {
@@ -511,6 +532,47 @@ mod tests {
         // An unknown status.
         let t = report("unverified", WRITTEN, CLEAN, &rules("maybe", &[]));
         assert!(refused(2, &t).contains("unknown status"));
+    }
+
+    #[test]
+    fn only_a_clean_pass_has_no_candidate_blockers() {
+        let pass = report(
+            "pass",
+            WRITTEN,
+            CLEAN,
+            &rules("pass", &[("H8", "not_applicable")]),
+        );
+        let c = interpret(0, pass.as_bytes(), WRITTEN).unwrap();
+        assert!(c.candidate_blockers().is_empty());
+        // Every rule unverified: nine rule blockers and the verdict.
+        let c = interpret(2, clean_unverified().as_bytes(), WRITTEN).unwrap();
+        assert_eq!(c.candidate_blockers().len(), 10);
+        // One unverified rule among passes blocks.
+        let one = report(
+            "unverified",
+            WRITTEN,
+            CLEAN,
+            &rules("pass", &[("H3", "unverified")]),
+        );
+        let c = interpret(2, one.as_bytes(), WRITTEN).unwrap();
+        assert!(
+            c.candidate_blockers()
+                .iter()
+                .any(|b| b.starts_with("H3 is unverified"))
+        );
+        // One violated rule blocks and is named.
+        let bad = report(
+            "fail",
+            WRITTEN,
+            CLEAN,
+            &rules("pass", &[("H1", "violation")]),
+        );
+        let c = interpret(1, bad.as_bytes(), WRITTEN).unwrap();
+        assert!(
+            c.candidate_blockers()
+                .iter()
+                .any(|b| b.starts_with("H1 is violation"))
+        );
     }
 
     #[test]

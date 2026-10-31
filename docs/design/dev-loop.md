@@ -200,9 +200,11 @@ plinth-3d/
   clippy.toml  rustfmt.toml  loop-budgets.tsv  limits.toml
   .githooks/          pre-commit, pre-push
   scripts/            thin bash shims (≤ 10 lines each, ≤ 400 lines in total): devloop (builds the runner if
-                      stale, then runs it), setup, t, loop-bench, slot, check-independence; later gate
+                      stale, then runs it), setup, t, loop-bench, slot, check-independence, gate,
+                      release-check
   tools/devloop/      SEPARATE workspace: the loop runner, binary `devloop` (subcommands t, loop-bench, slot,
-                      setup, check-independence; later gate). std only, no plinth crate, own Cargo.lock,
+                      setup, check-independence, pre-commit, gate, release-check). std only, no plinth
+                      crate, own Cargo.lock,
                       clippy.toml and target/. Its unit tests run in L0 scale time.
   crates/
     geom/        plinth-geom        mesh core

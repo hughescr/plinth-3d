@@ -17,7 +17,7 @@ use std::process::Command;
 /// checker reports it as not clean (exit 1) but still prints its numbers.
 const MUDSKIPPER: &str = "morel_mudskipper_supports.chitubox";
 
-fn repo_root() -> PathBuf {
+pub(crate) fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
@@ -28,7 +28,7 @@ fn repo_root() -> PathBuf {
     clippy::disallowed_methods,
     reason = "test-only read of the checker path set by scripts/t"
 )]
-fn checker_binary() -> PathBuf {
+pub(crate) fn checker_binary() -> PathBuf {
     let path = std::env::var_os("PLINTH_CHECK_BIN")
         .map(PathBuf::from)
         .expect("run via scripts/t; PLINTH_CHECK_BIN not set");

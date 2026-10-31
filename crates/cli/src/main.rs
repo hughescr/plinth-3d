@@ -49,7 +49,7 @@ fn main() -> ExitCode {
         Ok(c) => c,
         Err(e) => return usage(&e),
     };
-    let mut progress = |m: &run::ModelRun| eprintln!("{}", report::progress_line(m));
+    let mut progress = |m: &run::ModelRun| eprintln!("{}", report::progress_line(cfg.candidate, m));
     let finished = match run::run(&cfg, Faults::default(), &mut progress) {
         Ok(r) => r,
         Err(e) => return usage(&e),

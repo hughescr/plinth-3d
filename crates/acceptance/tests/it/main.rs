@@ -1,5 +1,6 @@
 //! The one integration-test binary of this crate (design section 4.3).
 
+mod broken;
 mod readers_agree;
 
 #[test]

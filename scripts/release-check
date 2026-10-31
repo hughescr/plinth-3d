@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Release-path correctness (design dev-loop.md section 10, step 9); logic in tools/devloop.
+# Builds the transport path in release mode, runs it on the three Round STLs and compares the
+# outputs with the dev profile's, byte for byte. Run it in the background.
+exec "$(dirname "$0")/devloop" release-check "$@"
