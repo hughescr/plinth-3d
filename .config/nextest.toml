@@ -37,6 +37,13 @@ setup = "one-rayon-worker"
 filter = "test(/(^|::)(native|broken)_/)"
 slow-timeout = { period = "10s", terminate-after = 3 }
 
+# Tests that refuse a shape no native file settles (native_unverified_*) print one
+# `PLINTH-UNVERIFIED: kind: reason` line. nextest drops a passing test's output, so keep
+# theirs; scripts/t counts the lines and prints `unverified N` on its verdict line.
+[[profile.default.overrides]]
+filter = "test(/(^|::)native_unverified_/)"
+success-output = "final"
+
 # End-to-end tests: slow after 30 s, killed at 90 s. Each runs alone and may use the
 # slot's whole allocation (NEXTEST_TEST_THREADS, set by scripts/t).
 [[profile.default.overrides]]

@@ -131,6 +131,7 @@ mod tests {
             tests,
             skipped: 0,
             no_tests_msg: false,
+            unverified: 0,
         }
     }
 

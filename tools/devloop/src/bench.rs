@@ -84,6 +84,7 @@ impl Bench {
                 line: e.msg,
                 elapsed: Duration::ZERO,
                 rebuilt: vec![],
+                unverified: 0,
             },
         }
     }
