@@ -24,7 +24,7 @@ fn contains_ball(part: &NativePart, centre: [f64; 3], interior: [f64; 3]) -> boo
 /// instead. Endpoint overlap is still certified before admission.
 pub(super) fn bridge(a: [f32; 2], b: [f32; 2], top: f32) -> Result<NativePart, Reject> {
     let d = (f64::from(a[0]) - f64::from(b[0])).hypot(f64::from(a[1]) - f64::from(b[1]));
-    if d <= 2.2 + 2.0 * ENVELOPE {
+    if d <= 0.0 {
         return Err(Reject::NarrowJoin);
     }
     let axis: [f64; 2] = std::array::from_fn(|k| (f64::from(b[k]) - f64::from(a[k])) / d);
@@ -229,6 +229,8 @@ mod tests {
     #[test]
     fn every_bridge_end_plane_passes_through_its_pad_centre() {
         for (a, b) in [
+            ([0., 0.], [0.4, 0.]),
+            ([0., 0.], [1.9, 0.]),
             ([0., 0.], [2.21, 0.]),
             ([0., 0.], [4., 0.]),
             ([0., 0.], [15., 0.]),

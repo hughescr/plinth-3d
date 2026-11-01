@@ -596,7 +596,13 @@ impl PlanBuilder<Routed> {
                 return Err(Reject::RegionBlocked { by: head.cand });
             }
         }
-        let mut centres: Vec<_> = self.columns.iter().map(|c| [c.top[0], c.top[1]]).collect();
+        // Coincident centres share one pad. Canonicalize signed zero before
+        // exact deduplication so it cannot produce a zero-length MST strip.
+        let mut centres: Vec<_> = self
+            .columns
+            .iter()
+            .map(|c| [c.top[0], c.top[1]].map(|v| if v == 0.0 { 0.0 } else { v }))
+            .collect();
         centres.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
         centres.dedup_by(|a, b| {
             a.iter()
@@ -608,16 +614,12 @@ impl PlanBuilder<Routed> {
         if bridges.len() + 1 != centres.len() {
             return Err(Reject::MeasureExhausted);
         }
-        // Native centre-to-centre edges on the SAME minimum spanning tree.
-        // Never shorten a strip to evade an incidental-join rejection.
+        // Every native MST edge gets a centre-to-centre strip, even when its
+        // pads overlap. Only coincident centres were merged above.
         let mut parts: Vec<_> = centres.iter().map(|&c| NativePart::pad(c, top)).collect();
         for &[a, b] in &bridges {
             let (a, b) = (centres[a as usize], centres[b as usize]);
-            if (f64::from(a[0]) - f64::from(b[0])).hypot(f64::from(a[1]) - f64::from(b[1]))
-                > 2.2 + 2.0 * ENVELOPE
-            {
-                parts.push(super::bases::bridge(a, b, top)?);
-            }
+            parts.push(super::bases::bridge(a, b, top)?);
         }
         super::bases::admit_bridges(&parts, &self.members)?;
         self.members.extend(parts);
@@ -818,6 +820,65 @@ mod separation_tests;
 mod tests {
     use super::*;
     use crate::construct::tests::{builder, candidate, plate};
+    #[test]
+    fn every_pad_is_a_strip_endpoint_including_overlapping_pads() {
+        for count in [1, 2, 3] {
+            let mut plan = builder(&plate());
+            let candidates: Vec<_> = [0., 1.9, 6.]
+                .into_iter()
+                .take(count)
+                .enumerate()
+                .map(|(i, x)| candidate(i as u32, x))
+                .collect();
+            let mut out = Vec::new();
+            plan.probe(&candidates, &mut out);
+            let contacts = plan.commit(QuoteBatch::from_results(out).unwrap()).unwrap();
+            let mut plan = plan.into_routing();
+            plan.model.plate -= 10.0; // Private long-column fixture, as in brace-policy tests.
+            let columns: Vec<_> = contacts
+                .into_iter()
+                .map(|contact| MemberProposal::Column {
+                    contact,
+                    section: Section::new(0.25).unwrap(),
+                })
+                .collect();
+            let mut out = Vec::new();
+            plan.probe_members(&columns, &mut out);
+            plan.commit_members(MemberQuoteBatch::from_results(out).unwrap())
+                .unwrap();
+            plan.raft_connected().unwrap();
+            let frozen = plan.freeze().unwrap();
+            let pads: Vec<_> = frozen
+                .parts()
+                .iter()
+                .filter_map(|p| match p.fields() {
+                    PartFields::Pad { centre, .. } => Some(centre.map(f32::to_bits)),
+                    _ => None,
+                })
+                .collect();
+            let strips: Vec<_> = frozen
+                .parts()
+                .iter()
+                .filter_map(|p| match p.fields() {
+                    PartFields::Bridge { from, to, .. } => {
+                        Some([from.map(f32::to_bits), to.map(f32::to_bits)])
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(pads.len(), count);
+            assert_eq!(strips.len(), count - 1, "every MST edge must have a strip");
+            if count >= 2 {
+                for pad in &pads {
+                    assert!(
+                        strips.iter().any(|edge| edge.contains(pad)),
+                        "pad {pad:?} has no strip"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn member_gap_straddles_h6_build_reserve() {
         for gap in [0.31f64, 0.33] {

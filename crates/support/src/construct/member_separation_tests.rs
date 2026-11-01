@@ -107,8 +107,8 @@ fn dense_long_columns_are_allowed_and_reported_unbraced() {
             .iter()
             .filter(|p| p.kind() == PartKind::RaftBridge)
             .count(),
-        0,
-        "a certified pad overlap already connects this MST edge"
+        1,
+        "native strips include the MST edge between overlapping pads"
     );
 }
 
