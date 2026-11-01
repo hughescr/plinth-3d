@@ -290,6 +290,7 @@ fn validate(
     let Some((canon, written)) = found else {
         return Err(first_error.unwrap_or_else(|| "no canonical mesh".to_owned()));
     };
+    check_canonical_convex(&canon, &written, tris)?;
     let canon_ulps = canon::worst_ulps(&canon, &written);
     // The measured deviation of the written vertices from the canonical mesh rides on the
     // mesh solid, so every bound that reads the mesh can allow for it.
@@ -331,6 +332,29 @@ fn validate(
             rings: [Vec::new(), Vec::new()],
         }),
     }
+}
+
+/// Check the canonical mesh too, using the written topology (including permitted cap
+/// triangulations) with canonical vertices. H9 cannot rely on a primitive name alone.
+fn check_canonical_convex(canon: &Canon, written: &[V], tris: &[Tri]) -> Result<(), String> {
+    let canonical_tris: Option<Vec<Tri>> = tris
+        .iter()
+        .map(|t| {
+            let points: Option<Vec<V>> = t
+                .iter()
+                .map(|p| {
+                    written
+                        .iter()
+                        .position(|v| v.iter().zip(p).all(|(a, b)| a.to_bits() == b.to_bits()))
+                        .map(|i| canon.pos[i])
+                })
+                .collect();
+            points.map(|v| [v[0], v[1], v[2]])
+        })
+        .collect();
+    check_convex(&Solid::polytope(
+        canonical_tris.ok_or("a vertex has no canonical label")?,
+    ))
 }
 
 fn check_convex(poly: &Solid) -> Result<(), String> {
