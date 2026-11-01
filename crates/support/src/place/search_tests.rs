@@ -271,13 +271,13 @@ fn load_only_keep_rule_requires_improvement_and_refuses_a_worse_violation_elsewh
     second.layer = 1;
     before.groups.push(second);
     assert!(
-        !replay_improves(&before, &before),
+        !replay_improves(&before, &before, (0, 0)),
         "no-op load additions are discarded"
     );
     let mut after = before.clone();
     after.groups[0].x_group *= 0.8;
     assert!(
-        replay_improves(&before, &after),
+        replay_improves(&before, &after, (0, 0)),
         "genuine additive improvement is measured"
     );
     before.groups[0].x_group = 29.24;
@@ -285,24 +285,24 @@ fn load_only_keep_rule_requires_improvement_and_refuses_a_worse_violation_elsewh
     before.groups[1].x_group = 18.66;
     after.groups[1].x_group = 20.14;
     assert!(
-        replay_improves(&before, &after),
-        "removing an unprintable island deficit outweighs a larger existing intervention"
+        !replay_improves(&before, &after, (0, 0)),
+        "load-only additions cannot worsen an existing intervention numerically"
     );
     after.groups[1].x_group = 25.1;
     assert!(
-        !replay_improves(&before, &after),
+        !replay_improves(&before, &after, (0, 0)),
         "no new unprintable exposure"
     );
     before.groups[1].x_group = 11.88;
     after.groups[1].x_group = 12.10;
     assert!(
-        !replay_improves(&before, &after),
+        !replay_improves(&before, &after, (0, 0)),
         "no new intervention exposure"
     );
     after.groups[1].x_group = before.groups[1].x_group;
     before.groups[1].equilibrium_assessed = true;
     assert!(
-        !replay_improves(&before, &after),
+        !replay_improves(&before, &after, (0, 0)),
         "newly unresolved equilibrium is not a low-ratio pass"
     );
 }
@@ -322,7 +322,7 @@ fn mandatory_island_capacity_is_not_an_optional_parent_sharing_refinement() {
     after.groups[1].x_group = 12.10;
     after.groups[1].equilibrium_assessed = false;
     assert!(
-        !replay_improves(&before, &after),
+        !replay_improves(&before, &after, (0, 0)),
         "a load-only refinement cannot add a violation"
     );
     assert!(
@@ -343,7 +343,7 @@ fn mandatory_island_capacity_is_not_an_optional_parent_sharing_refinement() {
 }
 
 #[test]
-fn replay_compares_unresolved_measures_by_class_not_incompatible_units() {
+fn replay_refuses_numerically_worse_unresolved_measures_in_their_own_units() {
     let (_, chosen) = fixture();
     let mut before = seed_load(&chosen);
     before.groups[0].condition = 1e8;
@@ -351,24 +351,24 @@ fn replay_compares_unresolved_measures_by_class_not_incompatible_units() {
     let mut after = before.clone();
     after.groups[0].condition = 1e7;
     assert!(
-        replay_improves(&before, &after),
+        replay_improves(&before, &after, (0, 0)),
         "conditioning alone improves"
     );
     after.groups[0].moment_residual = 0.2;
     assert!(
-        replay_improves(&before, &after),
-        "a larger already-unresolved moment is still an intervention, not a new class"
+        !replay_improves(&before, &after, (0, 0)),
+        "a larger already-unresolved moment vetoes a conditioning improvement"
     );
     before.groups[0].moment_residual = 0.0;
     assert!(
-        !replay_improves(&before, &after),
+        !replay_improves(&before, &after, (0, 0)),
         "conditioning improvement cannot hide a newly failed moment assessment"
     );
 }
 
 #[test]
 fn load_sharing_search_has_no_mandatory_neighbour_ring() {
-    let cache = Cache::default();
+    let mut cache = Cache::default();
     let sites: Vec<_> = [
         [0.1, 0., 0.],
         [1.1, 0., 0.],
@@ -403,4 +403,301 @@ fn load_sharing_search_has_no_mandatory_neighbour_ring() {
     assert!(near.iter().any(|p| p.xyz[1] > 0.));
     assert!(near.iter().any(|p| p.xyz[1] < 0.));
     assert!(near.iter().any(|p| p.xyz[0] < 0.));
+}
+
+#[test]
+fn load_targets_rank_all_components_and_distinct_exposure_cohorts() {
+    let (_, chosen) = fixture();
+    let mut detail = seed_load(&chosen);
+    detail.groups[0].x_group = 15.0;
+    for s in &mut detail.groups[0].section_states {
+        s.ratios.rigid_lever = 0.0;
+        s.ratios.equal_share = 0.0;
+    }
+    let mut later = detail.groups[0].clone();
+    later.layer = 5;
+    later.x_group = 18.0;
+    later.active.push(1);
+    let mut island = later.clone();
+    island.component = 1;
+    island.x_group = 20.0;
+    detail.groups.extend([later, island]);
+    let grid = plinth_geom::slice::LayerGrid {
+        origin: 0.0,
+        height: 0.05,
+        layers: 6,
+    };
+    let targets = load_targets(&detail, &chosen, &BTreeSet::new(), &grid, 0.0);
+    assert_eq!(targets.len(), 3);
+    assert_eq!(targets[0].group, Some((1, 5)));
+    assert_eq!(targets[1].group, Some((0, 5)));
+    assert_eq!(targets[2].group, Some((0, 0)));
+}
+
+#[test]
+fn load_only_replay_checks_each_old_section_and_the_requested_exposure() {
+    let (_, chosen) = fixture();
+    let mut before = seed_load(&chosen);
+    before.groups[0].equilibrium_assessed = true;
+    let mut second = before.groups[0].clone();
+    second.layer = 1;
+    before.groups.push(second);
+    let mut after = before.clone();
+    after.groups[1].x_group *= 0.8;
+    assert!(
+        !replay_improves(&before, &after, (0, 0)),
+        "an unrelated improvement cannot retain this target"
+    );
+    after.groups[0].x_group *= 0.8;
+    before.groups[1].section_states[0].ratios.rigid_lever = 13.0;
+    after.groups[1].section_states[0].ratios.rigid_lever = 24.0;
+    assert!(
+        !replay_improves(&before, &after, (0, 0)),
+        "an existing overload cannot rise within the same class"
+    );
+    after.groups[1].section_states[0].ratios.rigid_lever = 13.0;
+    before.groups[1].section_states[0].ratios.equal_share = 14.0;
+    after.groups[1].section_states[0].ratios.equal_share = 15.0;
+    assert!(
+        !replay_improves(&before, &after, (0, 0)),
+        "equal-share violations are numerical too"
+    );
+}
+
+#[test]
+fn spread_search_crosses_the_old_five_mm_sphere_and_spreads_samples() {
+    let mut cache = Cache::default();
+    let sites: Vec<_> = (0..100)
+        .map(|i| NeedPoint {
+            xyz: [f64::from(i) * 0.01, 0.0, 0.0],
+            normal: [0.0, 0.0, -1.0],
+            angle_deg: 0.0,
+            area_mm2: 1.0,
+            triangle: i,
+            class: SiteTag::Hidden,
+        })
+        .chain([NeedPoint {
+            xyz: [8.0, 0.0, 0.0],
+            normal: [0.0, 0.0, -1.0],
+            angle_deg: 0.0,
+            area_mm2: 1.0,
+            triangle: 101,
+            class: SiteTag::Hidden,
+        }])
+        .collect();
+    let target = Target {
+        xyz: [0.0; 3],
+        deadline: 1.0,
+        load: 2.0,
+        anchor: false,
+        grow: false,
+        sharing: true,
+        group: None,
+    };
+    let near = cache.near(target, None, &sites, 0.0, &[]);
+    assert_eq!(
+        near.len(),
+        2,
+        "dense samples cannot consume the whole site window"
+    );
+    assert!(near.iter().any(|p| (p.xyz[0] - 8.0).abs() < 1e-9));
+}
+
+#[test]
+fn resolving_equilibrium_cannot_introduce_a_rigid_overload_on_an_old_section() {
+    let (_, chosen) = fixture();
+    let mut before = seed_load(&chosen);
+    before.groups[0].equilibrium_assessed = false;
+    for s in &mut before.groups[0].section_states {
+        s.ratios.rigid_lever = 0.0;
+        s.ratios.equal_share = 1.0;
+    }
+    let mut after = before.clone();
+    after.groups[0].equilibrium_assessed = true;
+    after.groups[0].section_states[0].ratios.rigid_lever = 30.0;
+    assert!(!replay_improves(&before, &after, (0, 0)));
+    assert!(sharing::replay_blocker(&before, &after).contains("rigid"));
+    after.groups[0].section_states[0].ratios.rigid_lever = 11.0;
+    assert!(replay_improves(&before, &after, (0, 0)));
+}
+
+#[test]
+fn spread_ranking_tracks_target_and_excludes_own_overload_sites() {
+    let mut cache = Cache::default();
+    let sites: Vec<_> = [-8.0, -2.0, 2.0, 8.0]
+        .into_iter()
+        .map(|x| NeedPoint {
+            xyz: [x, 0.0, 0.0],
+            normal: [0.0, 0.0, -1.0],
+            angle_deg: 0.0,
+            area_mm2: 1.0,
+            triangle: 0,
+            class: SiteTag::Hidden,
+        })
+        .collect();
+    let left = Target {
+        xyz: [-2.0, 0.0, 0.0],
+        deadline: 1.0,
+        load: 5.0,
+        anchor: false,
+        grow: false,
+        sharing: true,
+        group: None,
+    };
+    let right = Target {
+        xyz: [2.0, 0.0, 0.0],
+        ..left
+    };
+    assert_eq!(
+        cache.near(left, None, &sites, 0.0, &[])[0]
+            .xyz
+            .map(f64::to_bits),
+        sites[1].xyz.map(f64::to_bits)
+    );
+    assert_eq!(
+        cache.near(right, None, &sites, 0.0, &[])[0]
+            .xyz
+            .map(f64::to_bits),
+        sites[2].xyz.map(f64::to_bits)
+    );
+    cache.sharing_tried.insert(site_key(sites[2].xyz));
+    let near = cache.near(right, None, &sites, 0.0, &[]);
+    assert!(!near.iter().any(|p| d2(p.xyz, sites[2].xyz) < 1e-12));
+    assert_eq!(
+        cache.rejected["sharing C4294967295 L0: new-contact overload at site in this layout"],
+        1
+    );
+}
+
+#[test]
+fn sharing_selection_uses_target_and_largest_legal_head_not_only_spread() {
+    let (builder, _) = fixture();
+    let sites: Vec<_> = [-8.0, -2.0, 2.0, 8.0]
+        .into_iter()
+        .map(|x| NeedPoint {
+            xyz: [x, 0.0, 0.0],
+            normal: [0.0, 0.0, -1.0],
+            angle_deg: 0.0,
+            area_mm2: 1.0,
+            triangle: 0,
+            class: SiteTag::Hidden,
+        })
+        .collect();
+    let mut cache = Cache::default();
+    let mut alternatives = Vec::new();
+    let mut sampled = Vec::new();
+    for p in &sites {
+        for neck in [0.25, MAX_NECK] {
+            alternatives.push(candidate(alternatives.len() as u32, p, neck, 0.0, 5.0));
+            sampled.push(*p);
+        }
+    }
+    let loads = vec![5.0; alternatives.len()];
+    search_measure::probe(&mut cache, &builder, alternatives, sampled, loads, None);
+    assert!(
+        cache.available.len() >= 4,
+        "witness needs certified alternatives"
+    );
+    let left = Target {
+        xyz: [-2.0, 0.0, 0.0],
+        deadline: 1.0,
+        load: 5.0,
+        anchor: false,
+        grow: false,
+        sharing: true,
+        group: Some((0, 0)),
+    };
+    let mut chosen = Vec::new();
+    cache.select(vec![(left, None)], vec![sites.clone()], &mut chosen);
+    assert_eq!(chosen.len(), 1);
+    assert_eq!(
+        chosen[0].site.xyz.map(f64::to_bits),
+        sites[1].xyz.map(f64::to_bits)
+    );
+    assert_eq!(chosen[0].candidate.neck.to_bits(), MAX_NECK.to_bits());
+    cache.available.append(&mut chosen);
+    cache.select(
+        vec![(
+            Target {
+                xyz: [2.0, 0.0, 0.0],
+                ..left
+            },
+            None,
+        )],
+        vec![sites.clone()],
+        &mut chosen,
+    );
+    assert_eq!(chosen.len(), 1);
+    assert_eq!(
+        chosen[0].site.xyz.map(f64::to_bits),
+        sites[2].xyz.map(f64::to_bits)
+    );
+    assert_eq!(chosen[0].candidate.neck.to_bits(), MAX_NECK.to_bits());
+}
+
+#[test]
+fn early_rejection_uses_only_new_fixed_patch_equal_share() {
+    let (_, chosen) = fixture();
+    let mut detail = seed_load(&chosen);
+    let layout = layout_from_contacts(
+        &[chosen[0].quote.contact()],
+        &[SiteClass::HiddenUnderside],
+        &load::LayerStack::default(),
+        5.0,
+    );
+    for s in &mut detail.groups[0].section_states {
+        s.ratios.equal_share = 1.0;
+        s.ratios.rigid_lever = 100.0;
+    }
+    assert!(!spread_search::new_patch_equal_overload(
+        &detail, &layout, 0
+    ));
+    let patch = layout.chains[0]
+        .parts
+        .iter()
+        .position(|p| p.kind == load::PartKind::Patch)
+        .unwrap() as u32;
+    let s = detail.groups[0]
+        .section_states
+        .iter_mut()
+        .find(|s| s.part == patch)
+        .unwrap();
+    s.ratios.equal_share = 13.0;
+    assert!(spread_search::new_patch_equal_overload(&detail, &layout, 0));
+    assert!(
+        !spread_search::new_patch_equal_overload(&detail, &layout, 1),
+        "old sections are not this shortcut's decision"
+    );
+    for s in &mut detail.groups[0].section_states {
+        s.ratios.equal_share = if s.part == patch { 1.0 } else { 100.0 };
+    }
+    assert!(
+        !spread_search::new_patch_equal_overload(&detail, &layout, 0),
+        "no shortcut for columns or provisional rigid reactions"
+    );
+}
+
+#[test]
+fn immutable_head_collisions_skip_columns_but_replacements_still_probe() {
+    let (builder, chosen) = fixture();
+    let mut cache = Cache::default();
+    let mut c = chosen[0].candidate;
+    c.id = CandId(1);
+    let p = chosen[0].site;
+    let heads = search_measure::probe(
+        &mut cache,
+        &builder,
+        vec![c],
+        vec![p],
+        vec![1.0],
+        Some(&chosen),
+    );
+    assert_eq!(heads, 1, "the head itself was certified");
+    assert!(
+        cache.available.is_empty(),
+        "no column probe for a baseline collision"
+    );
+    assert_eq!(cache.rejected["head pair collision before column probe"], 1);
+    search_measure::probe(&mut cache, &builder, vec![c], vec![p], vec![1.0], None);
+    assert_eq!(cache.available.len(), 1, "replacement probes are unchanged");
 }

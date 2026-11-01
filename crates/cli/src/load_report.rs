@@ -1,4 +1,7 @@
 //! Layer-specific FR-21 sharing, conditioning, and critical-location evidence.
+#[cfg(test)]
+#[path = "load_report_tests.rs"]
+mod tests;
 use crate::json::Json;
 use plinth_support::load::{GroupLoad, SectionDetail};
 use plinth_support::report_data::{LoadData, ReportData, WrittenMetrics};
@@ -154,26 +157,73 @@ fn state_json(data: &ReportData, ld: &LoadData, g: &GroupLoad, c: u32) -> Json {
         ),
     ])
 }
-fn locations(ld: &LoadData) -> Vec<(&'static str, u32, u32)> {
+fn worst_in_region<'a>(
+    states: impl Iterator<
+        Item = (
+            &'a GroupLoad,
+            &'a plinth_support::load::analyse::ContactState,
+        ),
+    >,
+) -> Option<(
+    &'a GroupLoad,
+    &'a plinth_support::load::analyse::ContactState,
+)> {
+    let score = |g: &GroupLoad, s: &plinth_support::load::analyse::ContactState| {
+        s.ratios
+            .additive
+            .max(s.ratios.equal_share)
+            // Tributary is a sensitivity diagnostic, not a critical sizing load.
+            .max(if g.equilibrium_assessed {
+                s.ratios.rigid_lever
+            } else {
+                0.0
+            })
+    };
+    states.max_by(|(ga, a), (gb, b)| score(ga, a).total_cmp(&score(gb, b)))
+}
+fn locations(data: &ReportData, ld: &LoadData) -> Vec<(&'static str, u32, u32)> {
     let mut out = Vec::new();
-    if let Some(g) = ld.detail.groups.iter().find(|g| !g.active.is_empty()) {
-        let c = *g.active.first().expect("active");
-        out.push(("bottom lip", c, g.layer));
+    if let Some(first) = ld.detail.groups.iter().find(|g| !g.active.is_empty()) {
+        // Bottom contact band [S]: contacts activated in the first 3 mm of
+        // growth, including the newly active lip heads around layers 35–48.
+        // Examine their WHOLE history, not only their activation exposure.
+        let lip: Vec<_> = ld
+            .layout
+            .contacts
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                f64::from(c.first_layer.saturating_sub(first.layer)) * data.process.layer_height_mm
+                    <= 3.0
+            })
+            .map(|(i, _)| i as u32)
+            .collect();
+        if let Some((g, s)) = worst_in_region(ld.detail.groups.iter().flat_map(|g| {
+            g.states
+                .iter()
+                .filter(|s| lip.contains(&s.contact))
+                .map(move |s| (g, s))
+        })) {
+            out.push((
+                "bottom lip (contacts activated in first 3 mm [S])",
+                s.contact,
+                g.layer,
+            ));
+        }
     }
     if let Some(island) = ld.structure.islands.iter().find(|i| i.first_layer > 0)
-        && let Some(g) = ld
-            .detail
-            .groups
-            .iter()
-            .filter(|g| {
-                g.component == island.component
-                    && island.merged.is_none_or(|(_, k)| g.layer < k)
-                    && !g.active.is_empty()
-            })
-            .max_by(|a, b| a.x_group.total_cmp(&b.x_group))
+        && let Some((g, s)) = worst_in_region(
+            ld.detail
+                .groups
+                .iter()
+                .filter(|g| {
+                    g.component == island.component
+                        && island.merged.is_none_or(|(_, k)| g.layer < k)
+                })
+                .flat_map(|g| g.states.iter().map(move |s| (g, s))),
+        )
     {
-        let c = *g.active.first().expect("active");
-        out.push(("rib island before merger", c, g.layer));
+        out.push(("rib island before merger", s.contact, g.layer));
     }
     if let Some((g, s)) = ld
         .detail
@@ -199,7 +249,7 @@ fn locations(ld: &LoadData) -> Vec<(&'static str, u32, u32)> {
 }
 pub fn critical(data: &ReportData, ld: &LoadData) -> Json {
     Json::Arr(
-        locations(ld)
+        locations(data, ld)
             .into_iter()
             .map(|(name, c, k)| {
                 let g = group_at(ld, c, k).expect("located group");

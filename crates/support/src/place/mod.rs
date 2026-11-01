@@ -61,6 +61,15 @@ pub enum Termination {
     Satisfied,
     /// Samples or rounds exhausted; does not prove impossibility.
     SearchBudgetExhausted,
+    /// No pair-compatible candidate in the finite sampled site/fan/size domain.
+    /// This is NOT a geometric impossibility proof or a continuous-site search.
+    NoLegalSiteLeftInSampledDomain,
+    /// Search filters or measured pair conflicts left no candidate in the
+    /// selected finite batch. This does NOT prove no legal site exists.
+    NoCandidateInFilteredBatch,
+    /// Legal sampled candidates existed, but complete replay rejected the
+    /// selected trial at each exposure cohort. Other combinations are untested.
+    NoImprovingTrialInSelectedBatch,
     /// The final exact route replay failed; not a search-completeness claim.
     RouteFailed,
     /// Search stopped early but the complete final replay still has a load or

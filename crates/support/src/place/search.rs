@@ -1,6 +1,13 @@
+#[path = "search_measure.rs"]
+mod search_measure;
+#[path = "sharing.rs"]
+mod sharing;
+#[path = "spread_search.rs"]
+mod spread_search;
 #[cfg(test)]
 #[path = "search_tests.rs"]
 mod tests;
+use sharing::{load_targets, replay_improves};
 
 use super::{PlanSettings, Proposal, Termination, layout_from_contacts, unavailable};
 use crate::construct::{CandId, ColumnCheck, ContactCandidate, Contacts, PlanBuilder, Quote};
@@ -245,50 +252,11 @@ fn needs_targets(
     targets.extend(seeds);
     targets
 }
-fn load_targets(
-    detail: &load::LoadDetail,
-    chosen: &[Chosen],
-    capped: &BTreeSet<[u32; 3]>,
-    grid: &plinth_geom::slice::LayerGrid,
-    shift: f64,
-) -> Vec<Target> {
-    // No distance ring. Target the actual component's load centroid, with its
-    // exposure deadline. Additive deficits take precedence over spread search.
-    let mut rows: Vec<_> = detail
-        .groups
-        .iter()
-        .filter(|g| {
-            g.x_group > 12.0
-                || (!g.equilibrium_assessed && !g.active.is_empty())
-                || g.states.iter().any(|s| {
-                    s.ratios.rigid_lever > 12.0
-                        && capped.contains(&site_key(chosen[s.contact as usize].site.xyz))
-                })
-        })
-        .collect();
-    rows.sort_by(|a, b| {
-        b.x_group
-            .total_cmp(&a.x_group)
-            .then(b.outside_hull_mm.total_cmp(&a.outside_hull_mm))
-            .then(a.layer.cmp(&b.layer))
-    });
-    let mut components = BTreeSet::new();
-    rows.into_iter()
-        .filter(|g| components.insert(g.component))
-        .map(|g| Target {
-            xyz: [
-                g.centroid_xy[0],
-                g.centroid_xy[1],
-                grid.z_top(g.layer) - shift - 1e-6,
-            ],
-            deadline: grid.z_top(g.layer) - 1e-6,
-            load: (g.area_mm2 / (g.active.len() + 1) as f64).clamp(0.25, 5.0),
-            anchor: false,
-            grow: false,
-            sharing: true,
-            group: Some((g.component, g.layer)),
-        })
-        .collect()
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PairFit {
+    Fits,
+    HeadCollision,
+    ColumnCollision,
 }
 #[derive(Default)]
 struct Cache {
@@ -298,9 +266,16 @@ struct Cache {
     rejected: BTreeMap<String, u64>,
     blocked: BTreeSet<[u32; 3]>,
     load_envelope: BTreeMap<[u32; 3], f64>,
-    pairs: BTreeMap<(CandId, CandId), bool>,
+    pairs: BTreeMap<(CandId, CandId), PairFit>,
     growth_searched: BTreeSet<[u32; 3]>,
     sharing_tried: BTreeSet<[u32; 3]>,
+    sharing_pair_blocked: BTreeSet<[u32; 3]>,
+    sharing_target_tried: BTreeSet<[u32; 3]>,
+    exhausted_targets: BTreeSet<(u32, u32)>,
+    sharing_layout: Vec<CandId>,
+    rejected_legal_trial: bool,
+    island_capacity_target: bool,
+    unsafe_trials: BTreeSet<Vec<Vec<u32>>>,
     patch_curves: BTreeMap<[u64; 7], Vec<(u32, f64)>>,
     site_components: BTreeMap<[u32; 3], u32>,
     mergers: Vec<Option<(u32, u32)>>,
@@ -446,13 +421,16 @@ impl Cache {
         }
     }
     fn near(
-        &self,
+        &mut self,
         target: Target,
         old: Option<NeedPoint>,
         sites: &[NeedPoint],
         shift: f64,
         chosen: &[Chosen],
     ) -> Vec<NeedPoint> {
+        if target.sharing && !self.island_capacity_target {
+            return sharing::spread_sites(self, target, sites, shift, chosen);
+        }
         let mut near = old.map_or_else(
             || {
                 sites
@@ -549,9 +527,17 @@ impl Cache {
                 } else {
                     &[2.6]
                 };
+                // Optional load-only additions try both the seed head and the
+                // maximum head [S], largest certified capacity first in select.
+                // Do not reject a borderline site after trying only a small head.
                 let mut sizes = vec![proposed];
-                if target.sharing && proposed > 0.25 {
-                    sizes.push(0.25);
+                if target.sharing {
+                    if !self.island_capacity_target {
+                        sizes.insert(0, MAX_NECK);
+                        sizes.dedup();
+                    } else if proposed > 0.25 {
+                        sizes.push(0.25);
+                    }
                 }
                 if target.grow && fallback {
                     let current = chosen
@@ -603,48 +589,45 @@ impl Cache {
                 }
             }
         }
-        let mut answers = Vec::new();
-        builder.probe_alternatives(&alternatives, &mut answers);
-        let valid: Vec<_> = answers.iter().filter_map(|q| q.as_ref().ok()).collect();
-        let loads: Vec<_> = answers
-            .iter()
-            .zip(&sample_loads)
-            .filter_map(|(q, &load)| q.is_ok().then_some(load))
-            .collect();
-        let columns = builder.probe_column_alternatives(&valid, &loads);
-        let mut columns = columns.into_iter();
-        for (((candidate, site), _load), answer) in alternatives
-            .into_iter()
-            .zip(sampled)
-            .zip(sample_loads)
-            .zip(answers)
-        {
-            let answer = answer.and_then(|quote| {
-                columns
-                    .next()
-                    .expect("one column per valid quote")
-                    .map(|column| (quote, column))
-            });
-            match answer {
-                Ok((quote, column)) => self.available.push(Chosen {
-                    candidate,
-                    quote,
-                    column,
-                    site,
-                    patch_history: Vec::new(),
-                }),
-                Err(e) => {
-                    *self
-                        .rejected
-                        .entry(
-                            format!("{e:?}")
-                                .split(" {")
-                                .next()
-                                .unwrap_or("unknown")
-                                .to_owned(),
-                        )
-                        .or_default() += 1
-                }
+        let audit = tasks.first().filter(|(t, _)| t.sharing).map(|(t, _)| {
+            (
+                t.group.expect("sharing exposure"),
+                self.rejected.clone(),
+                self.available.len(),
+            )
+        });
+        let count = alternatives.len();
+        let obstacles = (!self.island_capacity_target && tasks.iter().all(|(t, _)| t.sharing))
+            .then_some(chosen);
+        let heads = search_measure::probe(
+            self,
+            builder,
+            alternatives,
+            sampled,
+            sample_loads,
+            obstacles,
+        );
+        if let Some((g, _, _)) = &audit {
+            sharing::record(self, *g, "alternatives measured", count as u64);
+            sharing::record(self, *g, "heads certified", heads as u64);
+        }
+        if let Some((g, before, available)) = audit {
+            let delta: Vec<_> = self
+                .rejected
+                .iter()
+                .filter_map(|(k, v)| {
+                    let d = v - before.get(k).copied().unwrap_or(0);
+                    (d > 0 && !k.starts_with("sharing C")).then_some((k.clone(), d))
+                })
+                .collect();
+            sharing::record(
+                self,
+                g,
+                "routes certified",
+                (self.available.len() - available) as u64,
+            );
+            for (reason, count) in delta {
+                sharing::record(self, g, &format!("admission {reason}"), count);
             }
         }
         task_sites
@@ -879,16 +862,34 @@ impl Cache {
                                         q.candidate.id.max(c.candidate.id),
                                     ))
                                     .or_insert_with(|| {
-                                        separated(&q.quote, &c.quote)
-                                            && q.column.compatible(&c.column)
+                                        if !separated(&q.quote, &c.quote) {
+                                            PairFit::HeadCollision
+                                        } else if !q.column.compatible(&c.column) {
+                                            PairFit::ColumnCollision
+                                        } else {
+                                            PairFit::Fits
+                                        }
                                     })
+                                    == PairFit::Fits
                         })
                 })
                 .map(|(i, _)| i)
                 .collect();
+            if target.sharing {
+                spread_search::audit_selection(self, target, &near, chosen);
+                spread_search::cache_pair_conflicts(self, &near, chosen, &opts);
+            }
             opts.sort_by(|&a, &b| {
                 let a = &self.available[a];
                 let b = &self.available[b];
+                if target.sharing && !self.island_capacity_target {
+                    return sharing::site_score(&a.site, target, chosen)
+                        .total_cmp(&sharing::site_score(&b.site, target, chosen))
+                        // At a given site try the largest certified patch first.
+                        // A smaller head must not consume its only replay trial.
+                        .then(b.quote.full_capacity().total_cmp(&a.quote.full_capacity()))
+                        .then(a.candidate.id.cmp(&b.candidate.id));
+                }
                 if target.sharing {
                     // Rank in the plane of the equilibrium equations, not by
                     // ball size alone. Two largest patches on the same side of
@@ -927,7 +928,7 @@ impl Cache {
                 } else {
                     chosen.push(replacement);
                 }
-            } else if old.is_none() {
+            } else if old.is_none() && (!target.sharing || self.island_capacity_target) {
                 // Move the bounded search on from measured but pair-incompatible
                 // sites. Otherwise the same nearest-32 window repeats forever.
                 for p in near {
@@ -949,131 +950,25 @@ fn complete_replay(
 ) -> Option<load::LoadDetail> {
     let mut layout = view(chosen, layers, shift);
     let detail = load::analyse_full(&layers.stack, &layout, &load::Extras::default());
+    route_replay(builder, layers, chosen, &mut layout, &detail)
+}
+fn route_replay(
+    builder: &PlanBuilder<Contacts>,
+    layers: &ModelLayers,
+    chosen: &[Chosen],
+    layout: &mut LayoutView,
+    detail: &load::LoadDetail,
+) -> Option<load::LoadDetail> {
     let refs: Vec<_> = chosen.iter().map(|c| &c.quote).collect();
     let plan = builder
-        .preview_plan(&refs, &super::routing_loads(&detail))
+        .preview_plan(&refs, &super::routing_loads(detail))
         .ok()?;
-    super::add_members(&plan, &mut layout);
+    super::add_members(&plan, layout);
     Some(load::analyse_full(
         &layers.stack,
-        &layout,
+        layout,
         &load::Extras::default(),
     ))
-}
-
-// Violation classes, not magnitudes within a class, govern retention [O].
-// Removing an unprintable island deficit must not be vetoed by a larger
-// already-reported intervention. A new intervention or unprintable exposure
-// elsewhere still vetoes a load-only trial.
-fn ratio_class(ratio: f64, additive: bool) -> u8 {
-    if additive && ratio > load::warn::BREAKING_RATIO {
-        2
-    } else {
-        u8::from(ratio > 12.0 + 1e-7)
-    }
-}
-fn replay_improves(before: &load::LoadDetail, after: &load::LoadDetail) -> bool {
-    let mut improvement = false;
-    for (b, a) in before.groups.iter().zip(&after.groups) {
-        if (b.component, b.layer) != (a.component, a.layer) {
-            return false;
-        }
-        let model_max = |g: &load::GroupLoad, rigid: bool| {
-            g.section_states
-                .iter()
-                .map(|s| {
-                    if rigid {
-                        s.ratios.rigid_lever
-                    } else {
-                        s.ratios.equal_share
-                    }
-                })
-                .fold(0.0, f64::max)
-        };
-        if ratio_class(a.x_group, true) > ratio_class(b.x_group, true) {
-            return false;
-        }
-        for (old, new, comparable) in [
-            (b.x_group, a.x_group, true),
-            (
-                if b.equilibrium_assessed {
-                    model_max(b, true)
-                } else {
-                    b.x_group
-                },
-                model_max(a, true),
-                b.equilibrium_assessed && a.equilibrium_assessed,
-            ),
-            (model_max(b, false), model_max(a, false), true),
-        ] {
-            if comparable && ratio_class(new, false) > ratio_class(old, false) {
-                return false;
-            }
-            improvement |= comparable && old > 12.0 && new + 1e-6 < old;
-        }
-        // No previously valid exposure can become unresolved. An existing
-        // unresolved exposure may improve its spread, without worsening another.
-        if b.equilibrium_assessed && !a.equilibrium_assessed {
-            return false;
-        }
-        if !b.equilibrium_assessed {
-            // Compare stated thresholds independently, not a sum of unlike
-            // units. An already unresolved measure can change within its class;
-            // a newly failed assessment cannot be hidden by another improvement.
-            for (old, new, limit) in [
-                (b.outside_hull_mm, a.outside_hull_mm, 1e-6),
-                (
-                    b.force_residual,
-                    a.force_residual,
-                    load::lever::EQUILIBRIUM_LIMIT,
-                ),
-                (
-                    b.moment_residual,
-                    a.moment_residual,
-                    load::lever::EQUILIBRIUM_LIMIT,
-                ),
-                (b.condition, a.condition, load::lever::CONDITION_LIMIT),
-                (
-                    b.position_sensitivity,
-                    a.position_sensitivity,
-                    load::lever::SENSITIVITY_LIMIT,
-                ),
-            ] {
-                if old <= limit && new > limit + 1e-7 {
-                    return false;
-                }
-                improvement |= old > limit && new + 1e-6 < old;
-            }
-            improvement |= a.equilibrium_assessed;
-        }
-        // Check each pre-existing contact too: a lower group maximum cannot
-        // hide a newly overloaded old section elsewhere in the same layer.
-        if a.section_states.len() < b.section_states.len() {
-            return false;
-        }
-        // Existing chains keep stable order; additions are a suffix. Compare
-        // their whole section batches, not an O(n²) per-section lookup.
-        for (old, new) in b.section_states.iter().zip(&a.section_states) {
-            if (old.contact, old.part) != (new.contact, new.part) {
-                return false;
-            }
-            {
-                for (o, n, comparable) in [
-                    (
-                        old.ratios.rigid_lever,
-                        new.ratios.rigid_lever,
-                        b.equilibrium_assessed && a.equilibrium_assessed,
-                    ),
-                    (old.ratios.equal_share, new.ratios.equal_share, true),
-                ] {
-                    if comparable && ratio_class(n, false) > ratio_class(o, false) {
-                        return false;
-                    }
-                }
-            }
-        }
-    }
-    improvement && before.groups.len() == after.groups.len()
 }
 
 // Independent island capacity is mandatory, like anchoring and coverage [O].
@@ -1129,6 +1024,7 @@ pub(super) fn run(
         if !valid {
             break;
         }
+        let round_geometry: Vec<_> = chosen.iter().map(|c| c.candidate.id).collect();
         // [O] Load grows tips first. Only a completed, unsuccessful growth search
         // (or a tip already at the search cap) can request load-sharing neighbours.
         let capped = cache.grow_tips(builder, &mut chosen, &detail);
@@ -1147,7 +1043,8 @@ pub(super) fn run(
         let near = cache.measure(builder, &tasks, (sites, shift), &chosen, false);
         cache.select(tasks, near, &mut chosen);
         cache.certify_selected(builder, layers, &mut chosen, shift);
-        // One load-only proposal per round [S], not a contact-count target.
+        // At most one kept sharing batch per round [S], not one attempted
+        // exposure: exhausted targets must not starve the other components.
         // Use the new mandatory contacts, not stale pre-coverage assignments.
         let selected = load::analyse_full(
             &layers.stack,
@@ -1161,89 +1058,15 @@ pub(super) fn run(
             &view(&chosen, layers, shift),
             &load::Extras::default(),
         );
-        // Its complete routed geometry must improve the replay before retention.
-        let mut targets = load_targets(&detail, &chosen, &capped, &layers.grid, shift);
-        // A temporary island has no access to the main carrier's contacts.
-        // Search its independent deficit before main-body spread refinements.
-        targets.sort_by_key(|t| {
-            t.group
-                .is_none_or(|(c, _)| cache.mergers[c as usize].is_none())
-        });
-        let tasks: Vec<_> = targets.into_iter().take(1).map(|t| (t, None)).collect();
-        if !tasks.is_empty() {
-            let capacity_component = tasks[0].0.group.map(|g| g.0).filter(|&c| {
-                cache.mergers[c as usize].is_some()
-                    && detail
-                        .groups
-                        .iter()
-                        .any(|g| g.component == c && g.x_group > 12.0)
-            });
-            let count = chosen.len();
-            let originals: Vec<_> = chosen.iter().map(|c| c.candidate.id).collect();
-            let near = cache.measure(builder, &tasks, (sites, shift), &chosen, false);
-            // A spread proposal can require two springs together: one alone
-            // leaves a singular row and may overload its early equal-share patch.
-            // Treat the set atomically; neither contact survives a failed replay.
-            let pair_tasks: Vec<_> = tasks.iter().copied().cycle().take(2).collect();
-            let pair_near: Vec<_> = near.iter().cloned().cycle().take(2).collect();
-            cache.select(pair_tasks, pair_near, &mut chosen);
-            cache.certify_selected(builder, layers, &mut chosen, shift);
-            if chosen.len() > count {
-                // Do not route an identical baseline when the legal-site batch
-                // could not add anything. Selection only appends here, so the
-                // prefix is still the exact pre-trial geometry.
-                let before = complete_replay(builder, layers, &chosen[..count], shift);
-                let original_envelope = cache.load_envelope.clone();
-                for c in &chosen[count..] {
-                    cache.sharing_tried.insert(site_key(c.site.xyz));
-                }
-                // Placement changes reactions on the old paths too. Re-size
-                // the entire private proposal, then re-solve before comparison.
-                // No admitted geometry is repaired and all changes roll back
-                // together when the complete replay rejects the proposal.
-                let trial = load::analyse_full(
-                    &layers.stack,
-                    &view(&chosen, layers, shift),
-                    &load::Extras::default(),
-                );
-                // Do not enlarge unrelated existing tips during this trial. That
-                // changes their earlier reactions before either new spring is
-                // active and can worsen equilibrium on a different component.
-                // Any new overload rejects this private set; ordinary growth is
-                // a separate construction step, with its own replay next round.
-                cache.size_columns(builder, &mut chosen, &super::routing_loads(&trial));
-                cache.certify_selected(builder, layers, &mut chosen, shift);
-                let after = complete_replay(builder, layers, &chosen, shift);
-                let keep = before.as_ref().zip(after.as_ref()).is_some_and(|(b, a)| {
-                    capacity_component.map_or_else(
-                        || replay_improves(b, a),
-                        |c| island_capacity_improves(b, a, c),
-                    )
-                });
-                *cache
-                    .rejected
-                    .entry(
-                        if keep && capacity_component.is_some() {
-                            "mandatory island capacity complete replay kept"
-                        } else if keep {
-                            "load-only complete replay kept"
-                        } else {
-                            "load-only complete replay dropped"
-                        }
-                        .into(),
-                    )
-                    .or_default() += 1;
-                if keep {
-                    detail = load::analyse_full(
-                        &layers.stack,
-                        &view(&chosen, layers, shift),
-                        &load::Extras::default(),
-                    );
-                } else {
-                    cache.rollback_trial(&mut chosen, original_envelope, originals);
-                }
-            }
+        let stable = round_geometry == chosen.iter().map(|c| c.candidate.id).collect::<Vec<_>>()
+            || round + 1 == settings.max_rounds.min(8);
+        let sharing_changed = spread_search::Search {
+            builder,
+            layers,
+            sites,
+            shift,
         }
+        .refine(&mut cache, &mut chosen, &mut detail, &capped, stable);
         // Columns were already sized after mandatory placement and in any
         // accepted trial. Reuse the matching replay here and next round rather
         // than analysing and resizing identical geometry three more times.
@@ -1262,7 +1085,18 @@ pub(super) fn run(
             termination = Termination::Satisfied;
             break;
         }
-        // No changed==false exit: all eight rounds can open fresh sites.
+        if !sharing_changed && stable {
+            // Each ranked exposure cohort has had up to three distinct private
+            // pairs tested, or no pair-compatible site in its filtered batch.
+            // This does not exhaust every possible pair of measured alternatives.
+            // Growth/coverage budget skips remain separately visible in audit.
+            termination = if cache.rejected_legal_trial {
+                Termination::NoImprovingTrialInSelectedBatch
+            } else {
+                Termination::NoCandidateInFilteredBatch
+            };
+            break;
+        }
         termination = Termination::SearchBudgetExhausted;
     }
     finish(builder, layers, needs, shift, chosen, (cache, termination))
