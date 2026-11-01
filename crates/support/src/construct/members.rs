@@ -608,34 +608,17 @@ impl PlanBuilder<Routed> {
         if bridges.len() + 1 != centres.len() {
             return Err(Reject::MeasureExhausted);
         }
-        // Per-edge private alternatives on the SAME minimum spanning tree.
-        // All endpoint and incidental joins certify before any raft admission.
+        // Native centre-to-centre edges on the SAME minimum spanning tree.
+        // Never shorten a strip to evade an incidental-join rejection.
         let mut parts: Vec<_> = centres.iter().map(|&c| NativePart::pad(c, top)).collect();
-        let mut alternatives = Vec::new();
         for &[a, b] in &bridges {
             let (a, b) = (centres[a as usize], centres[b as usize]);
             if (f64::from(a[0]) - f64::from(b[0])).hypot(f64::from(a[1]) - f64::from(b[1]))
                 > 2.2 + 2.0 * ENVELOPE
             {
-                alternatives.push(
-                    [0.8, 0.9, 0.95, 0.7, 0.5, 0.0, -0.2]
-                        .into_iter()
-                        .filter_map(|offset| {
-                            if (offset - 0.8_f64).abs() < 1e-9 {
-                                super::bases::bridge(a, b, top).ok()
-                            } else {
-                                super::bases::bridge_offset(a, b, top, offset).ok()
-                            }
-                        })
-                        .collect(),
-                );
+                parts.push(super::bases::bridge(a, b, top)?);
             }
         }
-        parts.extend(super::bases::select_bridges(
-            &parts,
-            alternatives,
-            &self.members,
-        )?);
         super::bases::admit_bridges(&parts, &self.members)?;
         self.members.extend(parts);
         self.raft = true;

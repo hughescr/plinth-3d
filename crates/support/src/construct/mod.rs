@@ -55,6 +55,7 @@ mod contact;
 mod local_tests;
 mod members;
 mod native;
+mod raft_union;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -111,6 +112,13 @@ pub enum Reject {
     TooThin { across: f64 },
     /// Rod ends do not reach a containing joint centre.
     NarrowJoin,
+    /// A native raft region failed the union erosion or flare/pad certificate.
+    RaftRegionUnverified {
+        /// Located plan-view bounds [minimum x, minimum y, maximum x, maximum y].
+        bounds: [f64; 4],
+        /// Failed certificate; not a claim of an independently measured violation.
+        reason: &'static str,
+    },
     /// Raft cannot keep the model gap.
     RaftTouchesModel,
     /// Certified lower section does not carry requested load.
