@@ -349,6 +349,7 @@ pub fn check_coverage(
         kind: "overhang without a contact within 3.0 mm".to_owned(),
         layers: vec![stack_layer(stack, first.xyz[2])],
         contacts: Vec::new(),
+        location_mm: Some(first.xyz),
         message: format!(
             "{} of {} sub-45 degree samples ({:.2} mm² of {:.2} mm²) have no contact within \
                  {COVER_REACH_MM} mm that is printed by their layer. The first is at \

@@ -29,12 +29,19 @@ pub struct Lever {
     pub moment_residual: f64,
     /// Ratio of the two principal in-plane stiffnesses; infinity for a row.
     pub condition: f64,
+    /// Largest first-order reaction change for a 0.01 mm resultant displacement,
+    /// divided by the spring's stiffness-proportional share (active set fixed).
+    pub position_sensitivity: f64,
     /// Both equilibrium and conditioning passed. Invalid forces are provisional only.
     pub valid: bool,
 }
 
 /// Pre-run numerical thresholds [S], not physical evidence.
 pub const CONDITION_LIMIT: f64 = 1e6;
+/// Resultant-position perturbation, mm [S]; no claim of printer accuracy.
+pub const POSITION_STEP_MM: f64 = 0.01;
+/// Maximum reaction change relative to stiffness-proportional share [S].
+pub const SENSITIVITY_LIMIT: f64 = 0.25;
 /// Relative force and normalised moment tolerances [S].
 pub const EQUILIBRIUM_LIMIT: f64 = 1e-6;
 
@@ -73,6 +80,7 @@ pub fn rigid_lever(springs: &[Spring], load: f64, centroid: [f64; 2]) -> Lever {
     let mut on = vec![true; n];
     let mut force = vec![0.0; n];
     let mut condition = f64::INFINITY;
+    let mut position_sensitivity = f64::INFINITY;
     let mut scale = 1.0_f64;
     let mut solved = false;
     for _ in 0..=n {
@@ -140,6 +148,20 @@ pub fn rigid_lever(springs: &[Spring], load: f64, centroid: [f64; 2]) -> Lever {
         match worst {
             Some(w) if force[w] < -1e-12 * load.abs().max(1e-30) => on[w] = false,
             _ => {
+                // Exact Jacobian of the three equilibrium equations for the
+                // final tension-only active set. This sees physically narrow
+                // rows even when their dimensionless eigenvalue ratio passes.
+                let det = a[1][1] * a[2][2] - a[1][2].powi(2);
+                position_sensitivity = idx
+                    .iter()
+                    .map(|&i| {
+                        let dx = springs[i].xy[0] - cx;
+                        let dy = springs[i].xy[1] - cy;
+                        let gx = (a[2][2] * dx - a[1][2] * dy) / det;
+                        let gy = (a[1][1] * dy - a[1][2] * dx) / det;
+                        POSITION_STEP_MM * ksum * gx.hypot(gy)
+                    })
+                    .fold(0.0, f64::max);
                 solved = true;
                 break;
             }
@@ -165,6 +187,7 @@ pub fn rigid_lever(springs: &[Spring], load: f64, centroid: [f64; 2]) -> Lever {
         .fold(0.0, f64::max);
     let valid = solved
         && condition <= CONDITION_LIMIT
+        && position_sensitivity <= SENSITIVITY_LIMIT
         && force_residual <= EQUILIBRIUM_LIMIT
         && moment_residual <= EQUILIBRIUM_LIMIT
         && force.iter().all(|&f| f >= -1e-12 * load.abs().max(1e-30));
@@ -174,6 +197,7 @@ pub fn rigid_lever(springs: &[Spring], load: f64, centroid: [f64; 2]) -> Lever {
         force_residual,
         moment_residual,
         condition,
+        position_sensitivity,
         valid,
     }
 }

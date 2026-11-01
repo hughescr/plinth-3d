@@ -139,10 +139,15 @@ pub struct GroupLoad {
     pub moment_residual: f64,
     /// Principal tilt stiffness condition number.
     pub condition: f64,
+    /// Reaction sensitivity to the pre-run 0.01 mm resultant-position probe.
+    pub position_sensitivity: f64,
     /// An unresolved solve must never be called a low-ratio pass.
     pub equilibrium_assessed: bool,
     /// Simultaneous section and patch history at this exposure.
     pub states: Vec<ContactState>,
+    /// Every downstream section at this exposure, not only each contact's worst.
+    /// Complete candidate replay uses this to prevent hiding another violation.
+    pub section_states: Vec<ContactState>,
 }
 
 /// The layer with the most peel area.
@@ -587,8 +592,10 @@ impl Pass<'_> {
                 force_residual: 1.0,
                 moment_residual: f64::INFINITY,
                 condition: f64::INFINITY,
+                position_sensitivity: f64::INFINITY,
                 equilibrium_assessed: false,
                 states: Vec::new(),
+                section_states: Vec::new(),
             });
             return 0.0;
         }
@@ -609,11 +616,15 @@ impl Pass<'_> {
             x_group,
             equal: cs.area / n as f64,
         };
+        let mut section_states = Vec::with_capacity(list.len() * 7);
         let states: Vec<_> = list
             .iter()
             .enumerate()
             .map(|(a, &i)| {
-                self.contact_sections(lyr, i, split[a], (lever.force[a], lever.valid), shares)
+                let (worst, all) =
+                    self.contact_sections(lyr, i, split[a], (lever.force[a], lever.valid), shares);
+                section_states.extend(all);
+                worst
             })
             .collect();
         let contact_sections_mm2 = states.iter().map(|s| [s.load_mm2, s.section_mm2]).collect();
@@ -634,8 +645,10 @@ impl Pass<'_> {
             force_residual: lever.force_residual,
             moment_residual: lever.moment_residual,
             condition: lever.condition,
+            position_sensitivity: lever.position_sensitivity,
             equilibrium_assessed: lever.valid,
             states,
+            section_states,
         });
         bsum
     }
@@ -647,7 +660,7 @@ impl Pass<'_> {
         mine: [f64; 3],
         lever: (f64, bool),
         sh: Shares,
-    ) -> ContactState {
+    ) -> (ContactState, Vec<ContactState>) {
         let (lever_force, valid) = lever;
         let Lyr { k, zb, zt } = lyr;
         let c = &self.ctx[i];
@@ -673,6 +686,7 @@ impl Pass<'_> {
             ratios: Sharing::default(),
         };
         let mut worst_ratio = -1.0_f64;
+        let mut all = Vec::with_capacity(c.parts.len());
         for (j, p) in c.parts.iter().enumerate() {
             upstream += own[j];
             let extra = upstream
@@ -700,17 +714,19 @@ impl Pass<'_> {
             };
             let load = lever_force + extra;
             self.acc[i][j].push(k, s, denom, load);
+            let state = ContactState {
+                contact: i as u32,
+                part: j as u32,
+                patch_mm2: patch_now,
+                section_mm2: denom,
+                load_mm2: load,
+                ratios: s,
+            };
+            all.push(state);
             let r = s.rigid_lever.max(s.additive);
             if r > worst_ratio {
                 worst_ratio = r;
-                worst = ContactState {
-                    contact: i as u32,
-                    part: j as u32,
-                    patch_mm2: patch_now,
-                    section_mm2: denom,
-                    load_mm2: load,
-                    ratios: s,
-                };
+                worst = state;
             }
         }
         let r = worst_ratio;
@@ -734,7 +750,7 @@ impl Pass<'_> {
             cl.tributary_xy = xy;
             cl.offset_mm = (xy[0] - c.centre[0]).hypot(xy[1] - c.centre[1]);
         }
-        worst
+        (worst, all)
     }
 
     fn finish(self) -> (LoadDetail, Collected) {

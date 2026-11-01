@@ -260,6 +260,27 @@ fn mark(
         let text = format!("{i}{}", extra(i));
         img.label(px as i32 + 11, py as i32 - 16, &text, 1, TEXT);
     }
+    for w in c
+        .data
+        .warnings
+        .iter()
+        .filter(|w| w.kind == "local load path not assessed")
+    {
+        if let Some(xyz) = w.location_mm {
+            let (x, y, _) = cam.project(xyz);
+            if x >= 0.0 && y >= 0.0 && x < f64::from(rect.w) && y < f64::from(rect.h) {
+                let (x, y) = (f64::from(rect.x) + x, f64::from(rect.y) + y);
+                img.ring((x, y), 9.0, WARN, 2.0);
+                img.label(
+                    x as i32 + 10,
+                    y as i32,
+                    &format!("local transfer L{}", w.layers[0]),
+                    1,
+                    TEXT,
+                );
+            }
+        }
+    }
 }
 
 fn unverified_page(name: &str, title: &str, why: &str) -> Picture {
@@ -716,7 +737,7 @@ fn p07_worst_load(c: &Ctx<'_>) -> Picture {
     };
     let peak = ld.detail.peak;
     let cap = format!(
-        "(a) Layer peel and 12 x active sections; capacity alone does not prove equilibrium. (b) Layer {}: source colours are nearest-3D TRIBUTARY DIAGNOSTIC ONLY. Labels show spring reaction / available section (provisional when unresolved), NOT the coloured source assignment. (c) Rigid-carrier/additive sizing ratios; colour never clears unresolved equilibrium or local transfer. See FR-21 markers 07/12 and activation histories.",
+        "(a) Layer peel and 12 x active sections; capacity alone does not prove equilibrium. (b) Layer {}: source colours are nearest-3D TRIBUTARY DIAGNOSTIC ONLY. Labels show spring reaction / available section (provisional when unresolved), NOT the coloured source assignment. (c) Rigid-carrier/additive sizing ratios; colour never clears unresolved equilibrium or local transfer. See FR-21 contact numbers in picture 02 (all contacts), picture 04 (rib close-up), and activation histories.",
         peak.map_or_else(
             || "(none)".to_owned(),
             |p| format!(
@@ -1176,6 +1197,9 @@ fn p10_need(c: &Ctx<'_>) -> Picture {
 }
 
 fn warning_centre(w: &LoadWarning, cs: &[plinth_support::load::ContactView]) -> Option<V3> {
+    if let Some(p) = w.location_mm {
+        return Some(p);
+    }
     let pts: Vec<V3> = w
         .contacts
         .iter()

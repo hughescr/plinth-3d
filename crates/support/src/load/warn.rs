@@ -45,6 +45,7 @@ fn warn(
         kind: kind.to_owned(),
         layers,
         contacts,
+        location_mm: None,
         message,
     }
 }
@@ -65,7 +66,7 @@ pub(super) fn all(
     sizing_over(detail, &blocked, &mut out);
     sharing_over(detail, layout, &mut out);
     not_assessed(&detail.groups, &blocked, &mut out);
-    local_transfer(&detail.groups, &blocked, &mut out);
+    local_transfer(&detail.groups, stack, &blocked, &mut out);
     structural_unknowns(detail, layout, &mut out);
     let mut coverage = None;
     if let Some(s) = extras.structure {
@@ -352,7 +353,7 @@ fn not_assessed(groups: &[GroupLoad], blocked: &BTreeSet<(u32, u32)>, out: &mut 
                  contacts as the model assumes. In layer {} the layer's centre ({:.2}, {:.2}) mm \
                  is {:.2} mm outside the spread of its {} active contacts (rigid-lever residual \
                  {:.2}); {} layers have the centre outside. Conditioning at that layer: {} \
-                 (limit 1e6 [S]); relative force residual {}, normalised moment residual {} \
+                 (limit 1e6 [S]); 0.01 mm position sensitivity {} (limit 0.25 of stiffness-proportional share [S]); relative force residual {}, normalised moment residual {} \
                  (limits 1e-6 [S]). Singular, ill-conditioned or unbalanced solves are unresolved, \
                  NOT a low-ratio pass; any provisional area-weighted forces only guide search. What is unknown: how the load \
                  really reaches the contacts and which of them take the moment. Add a support \
@@ -366,6 +367,7 @@ fn not_assessed(groups: &[GroupLoad], blocked: &BTreeSet<(u32, u32)>, out: &mut 
                 worst.lever_residual,
                 outside,
                 worst.condition,
+                worst.position_sensitivity,
                 worst.force_residual,
                 worst.moment_residual
             ),
@@ -375,26 +377,115 @@ fn not_assessed(groups: &[GroupLoad], blocked: &BTreeSet<(u32, u32)>, out: &mut 
 
 fn local_transfer(
     groups: &[GroupLoad],
+    stack: &LayerStack,
     blocked: &BTreeSet<(u32, u32)>,
     out: &mut Vec<LoadWarning>,
 ) {
-    // No local bending/stiffness solver exists. Be conservative: global rigid
-    // sharing cannot certify ANY newly growing edge or narrow island connection.
-    // Locate these unknowns per printed component, never silently pool an island.
-    let comps: BTreeSet<_> = groups.iter().map(|g| g.component).collect();
-    for c in comps {
+    // A geometric locator, NOT a transfer certificate: first four exposures and
+    // source-centre spans <=1 mm [S] identify growing thin edges. Keep separate
+    // contiguous runs; never locate an edge at the whole component's area peak.
+    for (c, info) in stack.components.iter().enumerate() {
+        let c = c as u32;
         let rows: Vec<_> = groups
             .iter()
-            .filter(|g| g.component == c && !blocked.contains(&(c, g.layer)))
+            .filter(|g| {
+                if g.component != c || blocked.contains(&(c, g.layer)) {
+                    return false;
+                }
+                let source = stack
+                    .layers
+                    .get(g.layer as usize)
+                    .and_then(|l| l.components.iter().find(|s| s.component == c));
+                let narrow = source.is_some_and(|s| {
+                    (0..2).any(|axis| {
+                        let (lo, hi) = s
+                            .sources
+                            .iter()
+                            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+                                (lo.min(p.xyz[axis]), hi.max(p.xyz[axis]))
+                            });
+                        hi - lo <= 1.0
+                    })
+                });
+                g.layer < info.first_layer.saturating_add(4) || narrow
+            })
             .collect();
-        let Some(w) = rows.iter().max_by(|a, b| a.area_mm2.total_cmp(&b.area_mm2)) else {
+        let mut start = 0;
+        while start < rows.len() {
+            let mut end = start + 1;
+            while end < rows.len() && rows[end].layer == rows[end - 1].layer + 1 {
+                end += 1;
+            }
+            let g = rows[start];
+            let region = if info.first_layer == 0 {
+                "lip / growing outer edge (picture 03 or 12)"
+            } else {
+                "rib / growing island edge (picture 04)"
+            };
+            let mut w = warn(
+                WarningClass::Intervention,
+                "local load path not assessed",
+                vec![g.layer, rows[end - 1].layer],
+                g.active.clone(),
+                format!(
+                    "Component {c}, {region}, layers {}–{}: local transfer through this thin growing edge is not assessed. Marker local transfer L{} at ({:.2}, {:.2}) mm (source centre, not the largest-area layer). First four exposures or source span <=1 mm [S] trigger this conservative locator, not a stiffness test. Global ratios do not certify local transfer. Add support at this edge or accept the unmeasured transfer; no absent route is claimed.",
+                    g.layer,
+                    rows[end - 1].layer,
+                    g.layer,
+                    g.centroid_xy[0],
+                    g.centroid_xy[1]
+                ),
+            );
+            w.location_mm = Some([
+                g.centroid_xy[0],
+                g.centroid_xy[1],
+                stack.layer_origin_mm + (f64::from(g.layer) + 0.5) * stack.layer_height_mm,
+            ]);
+            out.push(w);
+            start = end;
+        }
+        let Some((parent, at)) = info.merged_into else {
             continue;
         };
-        let layers: Vec<_> = rows.iter().map(|g| g.layer).collect();
-        out.push(warn(WarningClass::Intervention, "local load path not assessed",
-            layers_of(&layers, w.layer), w.active.clone(), format!(
-                "Component {c}, growing layers {} to {}: local load transfer through the newly printed edge and any narrow connection is not assessed. Marker 07/12, layer {}, source centre ({:.2}, {:.2}) mm; contacts {:?}. Global rigid-carrier ratios do not certify this local response. Add support at the growing edge or accept this explicitly unmeasured transfer; no absence of a material route is claimed.",
-                layers[0], layers[layers.len()-1], w.layer, w.centroid_xy[0], w.centroid_xy[1], w.active)));
+        let Some(prior) = at.checked_sub(1).and_then(|k| stack.layers.get(k as usize)) else {
+            continue;
+        };
+        let child = prior.components.iter().find(|s| s.component == c);
+        let carrier = prior.components.iter().find(|s| s.component == parent);
+        let Some((a, b)) = child.zip(carrier).and_then(|(a, b)| {
+            a.sources
+                .iter()
+                .flat_map(|a| b.sources.iter().map(move |b| (a, b)))
+                .min_by(|(a, b), (x, y)| {
+                    let d = |p: &super::data::SourceElement, q: &super::data::SourceElement| {
+                        (p.xyz[0] - q.xyz[0]).hypot(p.xyz[1] - q.xyz[1])
+                    };
+                    d(a, b).total_cmp(&d(x, y))
+                })
+        }) else {
+            continue;
+        };
+        let xyz = [
+            (a.xyz[0] + b.xyz[0]) * 0.5,
+            (a.xyz[1] + b.xyz[1]) * 0.5,
+            stack.layer_origin_mm + (f64::from(at) + 0.5) * stack.layer_height_mm,
+        ];
+        let active = groups
+            .iter()
+            .find(|g| g.component == parent && g.layer == at)
+            .map_or_else(Vec::new, |g| g.active.clone());
+        let mut w = warn(
+            WarningClass::Intervention,
+            "local load path not assessed",
+            vec![at],
+            active,
+            format!(
+                "Rib/island {c} to carrier {parent} connection, marker local transfer L{at}, layer {at}, picture 04: transfer through the newly joined material is not assessed. Join locator ({:.2}, {:.2}, {:.2}) mm is the midpoint of the closest pre-merge source cells, not a measured connection width. Separate island capacity is checked before merger; pooled global ratios after merger do not certify this local join. Add a support at the join or accept this unmeasured transfer.",
+                xyz[0], xyz[1], xyz[2]
+            ),
+        );
+        w.location_mm = Some(xyz);
+        out.push(w);
     }
 }
 

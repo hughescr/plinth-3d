@@ -150,12 +150,13 @@ pub fn collect_report_data(
             kind: "unbraced column".into(),
             layers: vec![ld.layout.contacts[contact as usize].first_layer],
             contacts: vec![contact],
+            location_mm: None,
             message: format!("Column at contact {contact} has no admitted 45-degree X-pair to a carrier 4–15 mm away. Add bracing at this picture marker; stability is unassessed."),
         });
     }
     if proposal.termination != place::Termination::Satisfied {
         data.warnings.push(load::LoadWarning { class:load::WarningClass::Intervention,
-            kind:"construction plan unresolved".into(), layers:vec![], contacts:vec![],
+            kind:"construction plan unresolved".into(), layers:vec![], contacts:vec![], location_mm:None,
             message:format!("Search ended {:?}; unresolved needs remain. This is not a proof that no legal site exists.",proposal.termination) });
     }
     let partial: Vec<_> = ld
@@ -178,7 +179,7 @@ pub fn collect_report_data(
         .collect();
     if !partial.is_empty() {
         data.warnings.push(load::LoadWarning { class:load::WarningClass::Intervention,
-            kind:"early patch growth not certified".into(),
+            kind:"early patch growth not certified".into(), location_mm:None,
             layers:partial.iter().map(|s|s.tributary.1).collect(), contacts:partial.iter().map(|s|s.chain).collect(),
             message:"The limiting early patches use a disc approximation [U], not certified per-layer geometry. P5=18 remains a lower bound, not a second planner run.".into() });
     }
@@ -629,6 +630,30 @@ fn publish_supported(
     Ok(outcome)
 }
 
+fn review_scene(model: &plinth_chitubox::Model) -> plinth_render::Scene {
+    let min_z = model
+        .mesh
+        .iter()
+        .flatten()
+        .map(|v| v[2])
+        .fold(f32::INFINITY, f32::min);
+    let mut scene = crate::report::scene_from_model(model);
+    for tri in scene
+        .model
+        .iter_mut()
+        .chain(scene.parts.iter_mut().flat_map(|p| p.tris.iter_mut()))
+    {
+        for v in tri {
+            // Replay uses local XY / plate Z. Transform model and supports
+            // together to that frame; translating only their markers is wrong.
+            v[0] -= model.translate[0];
+            v[1] -= model.translate[1];
+            v[2] -= min_z;
+        }
+    }
+    scene
+}
+
 fn write_review(
     cfg: &Config,
     named: &Named,
@@ -643,24 +668,7 @@ fn write_review(
         .models
         .first()
         .ok_or(("report", "emitted model missing".into()))?;
-    // scene_from_model accepts a plate-relative mesh. Native Z is instead relative
-    // to the model's minimum. Correct that frame once on the decoded scene.
-    let min_z = model
-        .mesh
-        .iter()
-        .flatten()
-        .map(|v| v[2])
-        .fold(f32::INFINITY, f32::min);
-    let mut scene = crate::report::scene_from_model(model);
-    for tri in scene
-        .model
-        .iter_mut()
-        .chain(scene.parts.iter_mut().flat_map(|p| p.tris.iter_mut()))
-    {
-        for v in tri {
-            v[2] -= min_z;
-        }
-    }
+    let mut scene = review_scene(model);
     for (i, part) in scene.parts.iter_mut().enumerate().take(
         data.supports.contacts.hidden_underside as usize * 3
             + data.supports.contacts.partly_visible_rim as usize * 3,

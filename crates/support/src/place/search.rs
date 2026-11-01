@@ -74,6 +74,18 @@ struct Chosen {
     site: NeedPoint,
     patch_history: Vec<(u32, f64)>,
 }
+fn patch_curve_key(x: &Chosen, first: u32, shift: f64) -> Option<[u64; 7]> {
+    let b = x.quote.contact().inner_ball().ok()?;
+    Some([
+        b.centre[0].to_bits(),
+        b.centre[1].to_bits(),
+        b.centre[2].to_bits(),
+        b.radius.to_bits(),
+        u64::from(first),
+        x.quote.contact().patch().lower().to_bits(),
+        shift.to_bits(),
+    ])
+}
 fn view(chosen: &[Chosen], layers: &ModelLayers, shift: f64) -> LayoutView {
     let contacts: Vec<_> = chosen.iter().map(|x| x.quote.contact()).collect();
     let classes: Vec<_> = chosen.iter().map(|x| class(&x.site)).collect();
@@ -96,6 +108,19 @@ struct Target {
     anchor: bool,
     grow: bool,
     sharing: bool,
+    // Restrict load-only search to the printed component at this exposure.
+    group: Option<(u32, u32)>,
+}
+// An initial search estimate only; exposure-specific replay certifies sizing.
+fn seed_load(target: Target, replacing: bool) -> (f64, f32) {
+    let load = if replacing {
+        target.load
+    } else {
+        target.load.max(3.0)
+    };
+    let neck = (((load / 12. / 2.85).sqrt() * 1000.0).ceil() / 1000.0)
+        .clamp(0.053, f64::from(MAX_NECK)) as f32;
+    (load, neck)
 }
 fn covered(t: Target, chosen: &[Chosen], reach: f64, shift: f64) -> bool {
     chosen.iter().any(|x| {
@@ -126,6 +151,7 @@ fn needs_targets(
                 anchor: true,
                 grow: false,
                 sharing: false,
+                group: None,
             });
         }
     }
@@ -155,6 +181,7 @@ fn needs_targets(
             anchor: false,
             grow: false,
             sharing: false,
+            group: None,
         };
         if !covered(t, chosen, pitch, shift)
             && !seeds.iter().any(|s| d2(s.xyz, t.xyz) < pitch * pitch)
@@ -184,11 +211,12 @@ fn needs_targets(
                 anchor: false,
                 grow: false,
                 sharing: false,
+                group: None,
             };
             if !covered(t, chosen, settings.coverage_reach_mm, shift)
                 && !region.iter().any(|q| {
                     q.deadline <= t.deadline
-                        && d2(q.xyz, t.xyz) < settings.coverage_reach_mm.powi(2)
+                        && d2(q.xyz, t.xyz) < (0.65 * settings.coverage_reach_mm).powi(2)
                 })
             {
                 region.push(t);
@@ -208,6 +236,7 @@ fn needs_targets(
             anchor: false,
             grow: false,
             sharing: false,
+            group: None,
         };
         if !covered(t, chosen, 2.13, shift) {
             targets.push(t);
@@ -257,6 +286,7 @@ fn load_targets(
             anchor: false,
             grow: false,
             sharing: true,
+            group: Some((g.component, g.layer)),
         })
         .collect()
 }
@@ -271,9 +301,80 @@ struct Cache {
     pairs: BTreeMap<(CandId, CandId), bool>,
     growth_searched: BTreeSet<[u32; 3]>,
     sharing_tried: BTreeSet<[u32; 3]>,
-    patch_curves: BTreeMap<Vec<u32>, Vec<(u32, f64)>>,
+    patch_curves: BTreeMap<[u64; 7], Vec<(u32, f64)>>,
+    site_components: BTreeMap<[u32; 3], u32>,
+    mergers: Vec<Option<(u32, u32)>>,
+    shift: f64,
 }
 impl Cache {
+    fn rollback_trial(
+        &mut self,
+        chosen: &mut Vec<Chosen>,
+        envelope: BTreeMap<[u32; 3], f64>,
+        originals: Vec<CandId>,
+    ) {
+        // Rejected reactions cannot enlarge later accepted geometry.
+        self.load_envelope = envelope;
+        self.available.extend(chosen.drain(originals.len()..));
+        for (c, id) in chosen.iter_mut().zip(originals) {
+            if c.candidate.id != id {
+                let at = self
+                    .available
+                    .iter()
+                    .position(|q| q.candidate.id == id)
+                    .expect("private replacements retain their original certificate");
+                std::mem::swap(c, &mut self.available[at]);
+            }
+        }
+    }
+    fn index_components(&mut self, layers: &ModelLayers, sites: &[NeedPoint], shift: f64) {
+        self.shift = shift;
+        self.mergers = layers
+            .stack
+            .components
+            .iter()
+            .map(|c| c.merged_into)
+            .collect();
+        // Batch of all legal sites, indexed once. Most layers have one component;
+        // only the separated-island layers need a nearest-source comparison.
+        for p in sites {
+            let k = ((p.xyz[2] + shift - layers.grid.origin) / layers.grid.height)
+                .floor()
+                .max(0.0) as usize;
+            for layer in layers.stack.layers.iter().skip(k).take(3) {
+                let best = layer
+                    .components
+                    .iter()
+                    .flat_map(|c| {
+                        c.sources.iter().map(move |e| {
+                            let xyz = [p.xyz[0], p.xyz[1], p.xyz[2] + shift];
+                            (d2(e.xyz, xyz), c.component)
+                        })
+                    })
+                    .min_by(|a, b| a.0.total_cmp(&b.0));
+                if let Some((d, c)) = best.filter(|(d, _)| *d <= 2.5_f64.powi(2)) {
+                    let _ = d;
+                    self.site_components.insert(site_key(p.xyz), c);
+                    break;
+                }
+            }
+        }
+    }
+    fn same_group(&self, p: &NeedPoint, target: Target) -> bool {
+        target.group.is_none_or(|(wanted, k)| {
+            let Some(&initial) = self.site_components.get(&site_key(p.xyz)) else {
+                return false;
+            };
+            let mut c = initial;
+            while let Some((parent, at)) = self.mergers.get(c as usize).copied().flatten() {
+                if at > k {
+                    break;
+                }
+                c = parent;
+            }
+            c == wanted
+        })
+    }
     fn certify_selected(
         &mut self,
         builder: &PlanBuilder<Contacts>,
@@ -287,11 +388,6 @@ impl Cache {
             if !x.patch_history.is_empty() {
                 continue;
             }
-            let key = geometry_key(&x.candidate);
-            if let Some(h) = self.patch_curves.get(&key) {
-                x.patch_history = h.clone();
-                continue;
-            }
             let Ok(ball) = x.quote.contact().inner_ball() else {
                 x.patch_history = vec![(0, 0.0)];
                 continue;
@@ -299,6 +395,14 @@ impl Cache {
             let first = ((x.site.xyz[2] + shift - layers.grid.origin) / layers.grid.height)
                 .floor()
                 .max(0.0) as u32;
+            // Column/head-length changes do not change the certified in-sphere
+            // patch. Bind reuse to its exact geometry, activation, full bound,
+            // and grid frame, not to unrelated downstream members.
+            let key = patch_curve_key(x, first, shift);
+            if let Some(h) = key.and_then(|k| self.patch_curves.get(&k)) {
+                x.patch_history = h.clone();
+                continue;
+            }
             let last = ((ball.centre[2] + ball.radius + shift - layers.grid.origin)
                 / layers.grid.height)
                 .ceil()
@@ -333,8 +437,12 @@ impl Cache {
             if x.patch_history.is_empty() {
                 x.patch_history.push((0, 0.0));
             }
-            self.patch_curves
-                .insert(geometry_key(&x.candidate), x.patch_history.clone());
+            let first = ((x.site.xyz[2] + shift - layers.grid.origin) / layers.grid.height)
+                .floor()
+                .max(0.0) as u32;
+            if let Some(key) = patch_curve_key(x, first, shift) {
+                self.patch_curves.insert(key, x.patch_history.clone());
+            }
         }
     }
     fn near(
@@ -352,6 +460,7 @@ impl Cache {
                     .copied()
                     .filter(|p| {
                         p.xyz[2] + shift < target.deadline
+                            && self.same_group(p, target)
                             && (!target.sharing || d2(p.xyz, target.xyz) <= 25.0)
                             && (!target.anchor || p.xyz[2] + shift >= target.deadline - 0.05)
                             && chosen
@@ -367,10 +476,14 @@ impl Cache {
         let score = |p: &NeedPoint| {
             d2(p.xyz, target.xyz)
                 - if target.sharing {
-                    1.2 * chosen
+                    0.35 * chosen
                         .iter()
+                        .filter(|c| self.same_group(&c.site, target))
                         .map(|c| d2(c.site.xyz, p.xyz))
                         .fold(25.0, f64::min)
+                        // Prefer useful patch growth before the deficit, not
+                        // the newest edge of an island that has no column route.
+                        - 3.0 * (p.xyz[2] - target.xyz[2])
                 } else {
                     0.0
                 }
@@ -394,6 +507,16 @@ impl Cache {
         near.dedup_by(|a, b| site_key(a.xyz) == site_key(b.xyz));
         near
     }
+    fn record_budget_skip(&mut self, target: Target) {
+        let event = if target.grow {
+            "growth sites skipped by batch budget"
+        } else if target.sharing {
+            "sharing sites skipped by batch budget"
+        } else {
+            "coverage sites skipped by batch budget"
+        };
+        *self.rejected.entry(event.into()).or_default() += 1;
+    }
     fn measure(
         &mut self,
         builder: &PlanBuilder<Contacts>,
@@ -411,15 +534,7 @@ impl Cache {
         for (target, old) in tasks {
             let near = self.near(*target, *old, sites, shift, chosen);
             task_sites.push(near.iter().take(8).copied().collect::<Vec<_>>());
-            // Seeds have no tributary assignment yet. This is an estimate, not a
-            // capacity certificate: their real loads are replayed before commit.
-            let load = if old.is_some() {
-                target.load
-            } else {
-                target.load.max(3.0)
-            };
-            let proposed = (((load / 12. / 2.85).sqrt() * 1000.0).ceil() / 1000.0)
-                .clamp(0.053, f64::from(MAX_NECK)) as f32;
+            let (load, proposed) = seed_load(*target, old.is_some());
             for p in near {
                 // Growth gets the SAME complete fan x length domain as column
                 // sizing, before a single load-sharing neighbour is proposed.
@@ -452,6 +567,7 @@ impl Cache {
                     sizes.dedup();
                 }
                 if alternatives.len() + fans.len() * reaches.len() * sizes.len() > 384 {
+                    self.record_budget_skip(*target);
                     continue;
                 }
                 let before = alternatives.len();
@@ -479,7 +595,11 @@ impl Cache {
                 }
                 if alternatives.len() > before {
                     task_sites.last_mut().expect("current target").push(p);
-                    break;
+                    // Several independent spread alternatives in one batch.
+                    // Ordinary coverage and growth retain one site per target.
+                    if !target.sharing || task_sites.last().is_some_and(|s| s.len() >= 16) {
+                        break;
+                    }
                 }
             }
         }
@@ -599,13 +719,19 @@ impl Cache {
                         }) =>
                 {
                     let site = chosen[owner].site;
-                    chosen[owner] = Chosen {
-                        candidate,
-                        site,
-                        quote,
-                        column,
-                        patch_history: Vec::new(),
-                    };
+                    let old = std::mem::replace(
+                        &mut chosen[owner],
+                        Chosen {
+                            candidate,
+                            site,
+                            quote,
+                            column,
+                            patch_history: Vec::new(),
+                        },
+                    );
+                    // Private load trials roll back all replacements on a failed
+                    // replay. Keep the original immutable certificate available.
+                    self.available.push(old);
                     resized.insert(owner);
                 }
                 Err(e) => {
@@ -662,6 +788,7 @@ impl Cache {
                     anchor: false,
                     grow: true,
                     sharing: false,
+                    group: None,
                 },
                 Some(x.site),
             ));
@@ -702,6 +829,19 @@ impl Cache {
         chosen: &mut Vec<Chosen>,
     ) {
         for ((target, old), near) in tasks.into_iter().zip(near) {
+            // The preceding selection can cover this target. Do not spend a
+            // second contact (and its exclusion zone) on the same coverage need.
+            if old.is_none()
+                && !target.sharing
+                && covered(
+                    target,
+                    chosen,
+                    if target.anchor { 0.5 } else { 3.0 },
+                    self.shift,
+                )
+            {
+                continue;
+            }
             let replacing =
                 old.and_then(|p| chosen.iter().position(|c| d2(c.site.xyz, p.xyz) < 1e-12));
             let pairs = &mut self.pairs;
@@ -749,6 +889,23 @@ impl Cache {
             opts.sort_by(|&a, &b| {
                 let a = &self.available[a];
                 let b = &self.available[b];
+                if target.sharing {
+                    // Rank in the plane of the equilibrium equations, not by
+                    // ball size alone. Two largest patches on the same side of
+                    // an island can shift the merged body's reactions adversely.
+                    // This is a proposal heuristic only; complete replay decides.
+                    let spread = |q: &Chosen| {
+                        chosen
+                            .iter()
+                            .filter(|c| self.same_group(&c.site, target))
+                            .map(|c| {
+                                (c.site.xyz[0] - q.site.xyz[0]).hypot(c.site.xyz[1] - q.site.xyz[1])
+                            })
+                            .fold(5.0, f64::min)
+                            * q.quote.full_capacity()
+                    };
+                    return spread(b).total_cmp(&spread(a));
+                }
                 let enough_a = a.quote.full_capacity() >= target.load;
                 let enough_b = b.quote.full_capacity() >= target.load;
                 enough_b.cmp(&enough_a).then_with(|| {
@@ -804,6 +961,17 @@ fn complete_replay(
     ))
 }
 
+// Violation classes, not magnitudes within a class, govern retention [O].
+// Removing an unprintable island deficit must not be vetoed by a larger
+// already-reported intervention. A new intervention or unprintable exposure
+// elsewhere still vetoes a load-only trial.
+fn ratio_class(ratio: f64, additive: bool) -> u8 {
+    if additive && ratio > load::warn::BREAKING_RATIO {
+        2
+    } else {
+        u8::from(ratio > 12.0 + 1e-7)
+    }
+}
 fn replay_improves(before: &load::LoadDetail, after: &load::LoadDetail) -> bool {
     let mut improvement = false;
     for (b, a) in before.groups.iter().zip(&after.groups) {
@@ -811,7 +979,7 @@ fn replay_improves(before: &load::LoadDetail, after: &load::LoadDetail) -> bool 
             return false;
         }
         let model_max = |g: &load::GroupLoad, rigid: bool| {
-            g.states
+            g.section_states
                 .iter()
                 .map(|s| {
                     if rigid {
@@ -822,6 +990,9 @@ fn replay_improves(before: &load::LoadDetail, after: &load::LoadDetail) -> bool 
                 })
                 .fold(0.0, f64::max)
         };
+        if ratio_class(a.x_group, true) > ratio_class(b.x_group, true) {
+            return false;
+        }
         for (old, new, comparable) in [
             (b.x_group, a.x_group, true),
             (
@@ -835,7 +1006,7 @@ fn replay_improves(before: &load::LoadDetail, after: &load::LoadDetail) -> bool 
             ),
             (model_max(b, false), model_max(a, false), true),
         ] {
-            if new > old.max(12.0) + 1e-7 {
+            if comparable && ratio_class(new, false) > ratio_class(old, false) {
                 return false;
             }
             improvement |= comparable && old > 12.0 && new + 1e-6 < old;
@@ -846,33 +1017,56 @@ fn replay_improves(before: &load::LoadDetail, after: &load::LoadDetail) -> bool 
             return false;
         }
         if !b.equilibrium_assessed {
-            let metric = |g: &load::GroupLoad| {
-                g.outside_hull_mm
-                    + g.force_residual
-                    + g.moment_residual
-                    + g.condition.clamp(1.0, 1e12).log10()
-            };
-            if metric(a) > metric(b) + 1e-7 {
-                return false;
+            // Compare stated thresholds independently, not a sum of unlike
+            // units. An already unresolved measure can change within its class;
+            // a newly failed assessment cannot be hidden by another improvement.
+            for (old, new, limit) in [
+                (b.outside_hull_mm, a.outside_hull_mm, 1e-6),
+                (
+                    b.force_residual,
+                    a.force_residual,
+                    load::lever::EQUILIBRIUM_LIMIT,
+                ),
+                (
+                    b.moment_residual,
+                    a.moment_residual,
+                    load::lever::EQUILIBRIUM_LIMIT,
+                ),
+                (b.condition, a.condition, load::lever::CONDITION_LIMIT),
+                (
+                    b.position_sensitivity,
+                    a.position_sensitivity,
+                    load::lever::SENSITIVITY_LIMIT,
+                ),
+            ] {
+                if old <= limit && new > limit + 1e-7 {
+                    return false;
+                }
+                improvement |= old > limit && new + 1e-6 < old;
             }
-            improvement |= a.equilibrium_assessed || metric(a) + 1e-6 < metric(b);
+            improvement |= a.equilibrium_assessed;
         }
         // Check each pre-existing contact too: a lower group maximum cannot
         // hide a newly overloaded old section elsewhere in the same layer.
-        for old in &b.states {
-            if let Some(new) = a.states.iter().find(|s| s.contact == old.contact) {
-                for (o, n) in [
+        if a.section_states.len() < b.section_states.len() {
+            return false;
+        }
+        // Existing chains keep stable order; additions are a suffix. Compare
+        // their whole section batches, not an O(n²) per-section lookup.
+        for (old, new) in b.section_states.iter().zip(&a.section_states) {
+            if (old.contact, old.part) != (new.contact, new.part) {
+                return false;
+            }
+            {
+                for (o, n, comparable) in [
                     (
-                        if b.equilibrium_assessed {
-                            old.ratios.rigid_lever
-                        } else {
-                            b.x_group
-                        },
+                        old.ratios.rigid_lever,
                         new.ratios.rigid_lever,
+                        b.equilibrium_assessed && a.equilibrium_assessed,
                     ),
-                    (old.ratios.equal_share, new.ratios.equal_share),
+                    (old.ratios.equal_share, new.ratios.equal_share, true),
                 ] {
-                    if n > o.max(12.0) + 1e-7 {
+                    if comparable && ratio_class(n, false) > ratio_class(o, false) {
                         return false;
                     }
                 }
@@ -880,6 +1074,35 @@ fn replay_improves(before: &load::LoadDetail, after: &load::LoadDetail) -> bool 
         }
     }
     improvement && before.groups.len() == after.groups.len()
+}
+
+// Independent island capacity is mandatory, like anchoring and coverage [O].
+// Its contacts are not optional parent-load refinements. Complete replay must
+// reduce its own additive deficit and must not create another unprintable
+// exposure; any new intervention is retained and reported, not silently passed.
+fn island_capacity_improves(
+    before: &load::LoadDetail,
+    after: &load::LoadDetail,
+    component: u32,
+) -> bool {
+    if before.groups.len() != after.groups.len() {
+        return false;
+    }
+    let mut old = 0.0_f64;
+    let mut new = 0.0_f64;
+    for (b, a) in before.groups.iter().zip(&after.groups) {
+        if (b.component, b.layer) != (a.component, a.layer)
+            || (a.x_group > 25.0 && a.x_group > b.x_group.max(25.0) + 1e-7)
+            || (!b.active.is_empty() && a.active.is_empty())
+        {
+            return false;
+        }
+        if b.component == component {
+            old = old.max(b.x_group);
+            new = new.max(a.x_group);
+        }
+    }
+    old > 12.0 && new + 1e-6 < old
 }
 
 pub(super) fn run(
@@ -892,68 +1115,40 @@ pub(super) fn run(
 ) -> Proposal {
     let mut chosen = Vec::new();
     let mut cache = Cache::default();
+    cache.index_components(layers, sites, shift);
     let valid = !unavailable(&layers.stack)
         && settings.coverage_reach_mm.is_finite()
         && settings.coverage_reach_mm > 0.;
     let mut termination = Termination::NotBuilt;
+    let mut detail = load::analyse_full(
+        &layers.stack,
+        &view(&chosen, layers, shift),
+        &load::Extras::default(),
+    );
     for round in 0..settings.max_rounds.min(8) {
         if !valid {
             break;
         }
-        let layout = view(&chosen, layers, shift);
-        let detail = load::analyse_full(&layers.stack, &layout, &load::Extras::default());
         // [O] Load grows tips first. Only a completed, unsuccessful growth search
         // (or a tip already at the search cap) can request load-sharing neighbours.
         let capped = cache.grow_tips(builder, &mut chosen, &detail);
         cache.certify_selected(builder, layers, &mut chosen, shift);
-        let detail = load::analyse_full(
-            &layers.stack,
-            &view(&chosen, layers, shift),
-            &load::Extras::default(),
-        );
         // Mandatory anchoring/coverage has a separate batch. The old rotation
         // mixed replacements and 16 ring tasks per capped tip into this same
         // 384-alternative budget, starving coverage. Never do that again.
         let targets = needs_targets(layers, sites, &chosen, settings, shift);
-        let tasks: Vec<_> = targets.into_iter().map(|t| (t, None)).collect();
+        // Reserve the first batch for islands. Their independent capacity must
+        // be searched before optional carrier columns can block the island.
+        let tasks: Vec<_> = targets
+            .into_iter()
+            .filter(|t| round > 0 || t.anchor)
+            .map(|t| (t, None))
+            .collect();
         let near = cache.measure(builder, &tasks, (sites, shift), &chosen, false);
         cache.select(tasks, near, &mut chosen);
         cache.certify_selected(builder, layers, &mut chosen, shift);
         // One load-only proposal per round [S], not a contact-count target.
-        // Its complete routed geometry must improve the replay before retention.
-        let targets = load_targets(&detail, &chosen, &capped, &layers.grid, shift);
-        let tasks: Vec<_> = targets.into_iter().take(1).map(|t| (t, None)).collect();
-        if !tasks.is_empty() {
-            let before = complete_replay(builder, layers, &chosen, shift);
-            let count = chosen.len();
-            let near = cache.measure(builder, &tasks, (sites, shift), &chosen, false);
-            cache.select(tasks, near, &mut chosen);
-            cache.certify_selected(builder, layers, &mut chosen, shift);
-            if chosen.len() > count {
-                let key = site_key(chosen.last().expect("added sharing candidate").site.xyz);
-                cache.sharing_tried.insert(key);
-                let after = complete_replay(builder, layers, &chosen, shift);
-                let keep = before
-                    .as_ref()
-                    .zip(after.as_ref())
-                    .is_some_and(|(b, a)| replay_improves(b, a));
-                *cache
-                    .rejected
-                    .entry(
-                        if keep {
-                            "load-only complete replay kept"
-                        } else {
-                            "load-only complete replay dropped"
-                        }
-                        .into(),
-                    )
-                    .or_default() += 1;
-                if !keep {
-                    cache.available.push(chosen.pop().expect("added candidate"));
-                }
-            }
-        }
-        let _ = round;
+        // Use the new mandatory contacts, not stale pre-coverage assignments.
         let selected = load::analyse_full(
             &layers.stack,
             &view(&chosen, layers, shift),
@@ -961,8 +1156,97 @@ pub(super) fn run(
         );
         cache.size_columns(builder, &mut chosen, &super::routing_loads(&selected));
         cache.certify_selected(builder, layers, &mut chosen, shift);
-        let layout = view(&chosen, layers, shift);
-        let detail = load::analyse_full(&layers.stack, &layout, &load::Extras::default());
+        detail = load::analyse_full(
+            &layers.stack,
+            &view(&chosen, layers, shift),
+            &load::Extras::default(),
+        );
+        // Its complete routed geometry must improve the replay before retention.
+        let mut targets = load_targets(&detail, &chosen, &capped, &layers.grid, shift);
+        // A temporary island has no access to the main carrier's contacts.
+        // Search its independent deficit before main-body spread refinements.
+        targets.sort_by_key(|t| {
+            t.group
+                .is_none_or(|(c, _)| cache.mergers[c as usize].is_none())
+        });
+        let tasks: Vec<_> = targets.into_iter().take(1).map(|t| (t, None)).collect();
+        if !tasks.is_empty() {
+            let capacity_component = tasks[0].0.group.map(|g| g.0).filter(|&c| {
+                cache.mergers[c as usize].is_some()
+                    && detail
+                        .groups
+                        .iter()
+                        .any(|g| g.component == c && g.x_group > 12.0)
+            });
+            let count = chosen.len();
+            let originals: Vec<_> = chosen.iter().map(|c| c.candidate.id).collect();
+            let near = cache.measure(builder, &tasks, (sites, shift), &chosen, false);
+            // A spread proposal can require two springs together: one alone
+            // leaves a singular row and may overload its early equal-share patch.
+            // Treat the set atomically; neither contact survives a failed replay.
+            let pair_tasks: Vec<_> = tasks.iter().copied().cycle().take(2).collect();
+            let pair_near: Vec<_> = near.iter().cloned().cycle().take(2).collect();
+            cache.select(pair_tasks, pair_near, &mut chosen);
+            cache.certify_selected(builder, layers, &mut chosen, shift);
+            if chosen.len() > count {
+                // Do not route an identical baseline when the legal-site batch
+                // could not add anything. Selection only appends here, so the
+                // prefix is still the exact pre-trial geometry.
+                let before = complete_replay(builder, layers, &chosen[..count], shift);
+                let original_envelope = cache.load_envelope.clone();
+                for c in &chosen[count..] {
+                    cache.sharing_tried.insert(site_key(c.site.xyz));
+                }
+                // Placement changes reactions on the old paths too. Re-size
+                // the entire private proposal, then re-solve before comparison.
+                // No admitted geometry is repaired and all changes roll back
+                // together when the complete replay rejects the proposal.
+                let trial = load::analyse_full(
+                    &layers.stack,
+                    &view(&chosen, layers, shift),
+                    &load::Extras::default(),
+                );
+                // Do not enlarge unrelated existing tips during this trial. That
+                // changes their earlier reactions before either new spring is
+                // active and can worsen equilibrium on a different component.
+                // Any new overload rejects this private set; ordinary growth is
+                // a separate construction step, with its own replay next round.
+                cache.size_columns(builder, &mut chosen, &super::routing_loads(&trial));
+                cache.certify_selected(builder, layers, &mut chosen, shift);
+                let after = complete_replay(builder, layers, &chosen, shift);
+                let keep = before.as_ref().zip(after.as_ref()).is_some_and(|(b, a)| {
+                    capacity_component.map_or_else(
+                        || replay_improves(b, a),
+                        |c| island_capacity_improves(b, a, c),
+                    )
+                });
+                *cache
+                    .rejected
+                    .entry(
+                        if keep && capacity_component.is_some() {
+                            "mandatory island capacity complete replay kept"
+                        } else if keep {
+                            "load-only complete replay kept"
+                        } else {
+                            "load-only complete replay dropped"
+                        }
+                        .into(),
+                    )
+                    .or_default() += 1;
+                if keep {
+                    detail = load::analyse_full(
+                        &layers.stack,
+                        &view(&chosen, layers, shift),
+                        &load::Extras::default(),
+                    );
+                } else {
+                    cache.rollback_trial(&mut chosen, original_envelope, originals);
+                }
+            }
+        }
+        // Columns were already sized after mandatory placement and in any
+        // accepted trial. Reuse the matching replay here and next round rather
+        // than analysing and resizing identical geometry three more times.
         // Selected heads/columns already carry pair and model certificates.
         // Braces are optional admitted alternatives. Replay the full route once
         // at the end, not eight times with transient tributary assignments.

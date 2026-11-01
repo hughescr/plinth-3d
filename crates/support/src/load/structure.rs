@@ -113,6 +113,7 @@ impl Structure {
                 kind: "print-order cup".to_owned(),
                 layers: vec![c.layer],
                 contacts: Vec::new(),
+                location_mm: None,
                 message: format!(
                     "A closed pocket of about {:.2} mm² at ({:.2}, {:.2}) mm in layer {} has no \
                      path for resin to the outside, so it can hold suction. No suction factor \
@@ -128,6 +129,7 @@ impl Structure {
                 kind: "small island left unsupported (P18)".to_owned(),
                 layers: vec![i.first_layer],
                 contacts: Vec::new(),
+                location_mm: None,
                 message: format!(
                     "Island {} first appears in layer {} at ({:.2}, {:.2}) mm with {:.3} mm², \
                      at most {:.3} x {:.3} mm ({} x {} pixels), and joins other material in \

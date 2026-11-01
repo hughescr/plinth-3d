@@ -1,6 +1,33 @@
 use super::*;
 use crate::check::{Rule, Verdict};
 
+#[test]
+fn review_markers_and_native_meshes_share_local_xy_even_with_file_translation() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test-data/chitubox-native/samples/04-round25-supports-raft-connected.chitubox"
+    );
+    let bytes = std::fs::read(path).unwrap();
+    let mut project = plinth_chitubox::parse(&bytes).unwrap();
+    let m = &mut project.models[0];
+    m.translate[0] = 7.5;
+    m.translate[1] = 1.37;
+    let scene = review_scene(m);
+    for (actual, native) in scene.model.iter().flatten().zip(m.mesh.iter().flatten()) {
+        for axis in 0..2 {
+            assert!((actual[axis] - native[axis]).abs() < 2e-6);
+        }
+    }
+    let records = &m.supports.as_ref().unwrap().records;
+    for (part, record) in scene.parts.iter().zip(records) {
+        for (actual, native) in part.tris.iter().flatten().zip(record.mesh.iter().flatten()) {
+            for axis in 0..2 {
+                assert!((actual[axis] - native[axis]).abs() < 2e-6);
+            }
+        }
+    }
+}
+
 fn measured_pass() -> Checked {
     Checked {
         verdict: Verdict::Pass,

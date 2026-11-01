@@ -171,6 +171,8 @@ pub struct LoadWarning {
     pub layers: Vec<u32>,
     /// Contacts affected (indices into [`LayoutView::contacts`]).
     pub contacts: Vec<u32>,
+    /// Specific model-space XY / layer-space Z location, when known.
+    pub location_mm: Option<[f64; 3]>,
     /// What is unknown or what to change, in plain sentences.
     pub message: String,
 }

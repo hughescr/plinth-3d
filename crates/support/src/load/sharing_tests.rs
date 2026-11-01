@@ -123,16 +123,18 @@ fn a_near_collinear_contact_row_is_unresolved_even_with_low_ratios_and_balanced_
         ..LayerStack::default()
     };
     let v = layout(vec![
-        contact(0., 0., 0., 0, 1.),
-        contact(1., 1e-8, 0., 0, 1.),
-        contact(2., 0., 0., 0, 1.),
-        contact(3., -1e-8, 0., 0, 1.),
+        contact(0., -0.01, 0., 0, 1.),
+        contact(1., 0.01, 0., 0, 1.),
+        contact(2., -0.01, 0., 0, 1.),
+        contact(3., 0.01, 0., 0, 1.),
     ]);
     let d = analyse_full(&stack, &v, &Extras::default());
     let g = &d.groups[0];
     assert!(g.x_group < 12. && g.force_residual < 1e-6);
     assert!(
-        g.condition > lever::CONDITION_LIMIT && !g.equilibrium_assessed,
+        g.condition < lever::CONDITION_LIMIT
+            && g.position_sensitivity > lever::SENSITIVITY_LIMIT
+            && !g.equilibrium_assessed,
         "{g:?}"
     );
     assert!(
@@ -203,4 +205,19 @@ fn a_separate_rib_island_cannot_borrow_main_carrier_capacity_before_merger() {
         "pooling becomes legal only at the merger layer"
     );
     assert!(merged.x_group < 12.);
+    let join = d
+        .report
+        .warnings
+        .iter()
+        .find(|w| w.kind == "local load path not assessed" && w.layers == vec![2])
+        .expect("the merger needs its own local-transfer intervention");
+    assert_eq!(join.location_mm, Some([2.5, 0., 0.125]));
+    assert!(join.message.contains("connection") && join.message.contains("picture 04"));
+    let lip = d
+        .report
+        .warnings
+        .iter()
+        .find(|w| w.kind == "local load path not assessed" && w.layers.first() == Some(&0))
+        .expect("the first lip must be located, not the area peak");
+    assert_eq!(lip.location_mm, Some([0., 0., 0.025]));
 }

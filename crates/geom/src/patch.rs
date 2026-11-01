@@ -245,6 +245,16 @@ fn patch_below(
     {
         return Measure::Unverified("patch outside numerical domain");
     }
+    // Early-layer capacity needs a certified LOWER bound, not the H1 upper
+    // bound's precision. A 0.001 mm boundary mesh [S] is still much smaller
+    // than a printer pixel. Every unresolved triangle stays entirely in U, so
+    // this changes tightness and work, never credits future or uncertain area.
+    // Full patches retain the tighter H1 measurement unchanged.
+    let edge_precision_mm: f64 = if z_top.is_finite() && z_top < ball.centre[2] + ball.radius {
+        0.001
+    } else {
+        0.00025
+    };
     let mut lo = 0.0_f64;
     let mut hi = 0.0_f64;
     let mut nodes = 0;
@@ -297,7 +307,7 @@ fn patch_below(
                         })
                         .max_by(|a, b| a.1.total_cmp(&b.1))
                         .expect("three edges");
-                    if depth == MAX_DEPTH || length2 <= 0.00025_f64.powi(2) {
+                    if depth == MAX_DEPTH || length2 <= edge_precision_mm.powi(2) {
                         hi = (hi + area.1).next_up();
                         continue;
                     }

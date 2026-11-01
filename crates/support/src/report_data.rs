@@ -148,6 +148,9 @@ pub struct WrittenMetrics {
     pub nearest_column_mm: Vec<f64>,
     /// Long (>4 mm) columns; each tuple is (native record, length, braced).
     pub long_columns: Vec<(u32, f64, bool)>,
+    /// Largest vertical interval between written brace endpoints (or column
+    /// ends), per native column record. Geometry only, not a stability bound.
+    pub unbraced_spans_mm: Vec<(u32, f64)>,
     /// Actual written brace diagonals, not proposals.
     pub braces: u32,
 }

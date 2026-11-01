@@ -325,6 +325,11 @@ fn warning_json(w: &plinth_support::load::LoadWarning) -> Json {
                     .collect(),
             ),
         ),
+        (
+            "location_mm",
+            w.location_mm
+                .map_or(Json::Null, |p| Json::Arr(p.map(num).to_vec())),
+        ),
         ("message", Json::str(&w.message)),
     ])
 }
@@ -364,7 +369,11 @@ fn ranked_sections(
             .then(a.chain.cmp(&b.chain))
             .then(a.part.cmp(&b.part))
     });
+    // One limiting section per contact/exposure. Equal ratios on the neck,
+    // cone and throat must not crowd other critical places out of the table.
+    let mut seen = std::collections::BTreeSet::new();
     s.iter()
+        .filter(|d| seen.insert((d.chain, d.sizing.1)))
         .take(10)
         .enumerate()
         .map(|(i, d)| {
@@ -381,7 +390,8 @@ fn ranked_sections(
                 ("worst_layer", Json::Uint(u64::from(d.sizing.1))),
                 ("plate_z_mm", num(plate_z(data, ld, d.sizing.1))),
                 ("equilibrium_and_conditioning_pass", Json::Bool(assessed)),
-                ("row_definition", Json::str("All models at this section's largest rigid-carrier/additive sizing exposure, not independent maxima")),
+                ("row_definition", Json::str("Distinct contact/exposure, limiting section only; all models at its largest rigid-carrier/additive sizing exposure, not independent maxima")),
+                ("sizing_ratio", num(d.sizing.0)),
                 ("section_area_mm2", num(d.area_mm2)),
                 ("load_area_mm2", num(load)),
                 ("tributary_ratio", num(d.at_worst.tributary)),
@@ -390,7 +400,7 @@ fn ranked_sections(
                 ("equal_share_ratio", num(d.at_worst.equal_share)),
                 ("rigid_lever_ratio", if assessed { num(d.at_worst.rigid_lever) } else { Json::Null }),
                 ("light_tip_ratio_at_this_load", num(load / LIGHT_NECK_MM2)),
-                ("picture", Json::str(format!("7c, contact {}", d.chain))),
+                ("picture", Json::str(format!("02, contact {} (all contacts numbered)", d.chain))),
             ])
         })
         .collect()
@@ -419,6 +429,10 @@ fn load_json(
             crate::load_report::maxima(data, ld),
         ),
         ("critical_locations", crate::load_report::critical(data, ld)),
+        (
+            "numerical_assessment_rules",
+            Json::str(crate::load_report::NUMERICAL_RULES),
+        ),
         (
             "limitations_and_print_observations",
             Json::str(crate::load_report::LIMITATIONS),
@@ -707,11 +721,12 @@ pub fn fr21_text(data: &plinth_support::report_data::ReportData) -> String {
         };
         let _ = writeln!(
             s,
-            "    #{} contact {} {} layer {}: {:.1}  ({:.1} / {:.1} / {}; Light tip {:.0}), marker 07/12 contact {}, plate {:.2} mm",
+            "    #{} contact {} {} layer {}: sizing {:.1}  ({:.1} / {:.1} / {:.1} / {}; Light tip {:.0}), marker 02 contact {}, plate {:.2} mm",
             r.get("rank").and_then(Json::as_u64).unwrap_or(0),
             r.get("contact").and_then(Json::as_u64).unwrap_or(0),
             r.get("part").and_then(Json::as_str).unwrap_or("?"),
             r.get("worst_layer").and_then(Json::as_u64).unwrap_or(0),
+            g("sizing_ratio"),
             g("tributary_ratio"),
             g("additive_ratio"),
             g("equal_share_ratio"),
@@ -1037,6 +1052,20 @@ mod tests {
             .and_then(Json::as_arr)
             .expect("ratios");
         assert!(!top.is_empty() && top.len() <= 10);
+        let distinct: std::collections::BTreeSet<_> = top
+            .iter()
+            .map(|r| {
+                (
+                    r.get("contact").and_then(Json::as_u64),
+                    r.get("worst_layer").and_then(Json::as_u64),
+                )
+            })
+            .collect();
+        assert_eq!(
+            distinct.len(),
+            top.len(),
+            "one exposure must not repeat for five sections"
+        );
         // 4 mm² on a section of 0.5 mm² is 8; the worst layer is a layer index, the height is on the plate.
         let first = &top[0];
         assert_eq!(

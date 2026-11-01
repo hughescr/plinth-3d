@@ -6,6 +6,7 @@ use std::fmt::Write as _;
 
 pub const SHARING_CHANGE: &str = "Sharing-model change [O]: nearest-3D tributary sizing (old) is replaced by rigid-carrier, tension-only spring sharing plus the additive group requirement, both at P5=12. Stiffness is proportional to certified section available at that exposure [U], not a physical reaction bound. Separate islands retain separate groups until merger. Tributary remains a labelled sensitivity diagnostic only. This change is not proof that the old high ratio represented no risk. Singular/ill-conditioned/unbalanced responses remain unresolved; provisional area-weighted shares guide construction only.";
 pub const LIMITATIONS: &str = "The section-proportional spring stiffness is unmeasured. A moving peel front is replaced by a single layer resultant. The rigid part cannot certify local transfer through thin growing edges or narrow connections. Angled heads, neck bending, column stability, growing-brace bending and redistribution remain unmeasured. Print observation plan: bottom lip—lost lower layers and torn edges; rib—rib loss before merger and tears at its connection; newly active patches—patch/neck breaks; long columns—movement or brace failure. Record damage from support removal separately. No physical print has run.";
+pub const NUMERICAL_RULES: &str = "Pre-run thresholds [S]: tilt condition <=1e6; 0.01 mm position perturbation reaction Jacobian <=0.25 of stiffness-proportional share (fixed tension active set); force and normalised moment residual <=1e-6. Partial-patch boundary edges <=0.001 mm; all unresolved area is unavailable. Full-patch/H1 edges <=0.00025 mm.";
 fn n(v: f64) -> Json {
     Json::Num(v)
 }
@@ -21,6 +22,18 @@ fn group_at(ld: &LoadData, contact: u32, k: u32) -> Option<&GroupLoad> {
         .iter()
         .find(|g| g.layer == k && g.active.contains(&contact))
 }
+fn marker(ld: &LoadData, contact: u32, layer: u32) -> String {
+    let rib = group_at(ld, contact, layer).is_some_and(|g| {
+        ld.structure
+            .islands
+            .iter()
+            .any(|i| i.component == g.component && i.first_layer > 0)
+    });
+    format!(
+        "02, contact {contact}{}",
+        if rib { "; 04 rib close-up" } else { "" }
+    )
+}
 fn section_json(data: &ReportData, ld: &LoadData, s: &SectionDetail, value: (f64, u32)) -> Json {
     let g = group_at(ld, s.chain, value.1);
     Json::obj([
@@ -30,15 +43,16 @@ fn section_json(data: &ReportData, ld: &LoadData, s: &SectionDetail, value: (f64
         ("native_record", s.record.map_or(Json::Null, u)),
         ("layer", u(value.1)),
         ("plate_z_mm", n(z(data, value.1))),
-        (
-            "picture_marker",
-            Json::str(format!("07/12, contact {}", s.chain)),
-        ),
+        ("picture_marker", Json::str(marker(ld, s.chain, value.1))),
         (
             "equilibrium_and_conditioning_pass",
             Json::Bool(g.is_some_and(|g| g.equilibrium_assessed)),
         ),
         ("condition_number", g.map_or(Json::Null, |g| n(g.condition))),
+        (
+            "position_sensitivity",
+            g.map_or(Json::Null, |g| n(g.position_sensitivity)),
+        ),
         (
             "force_residual",
             g.map_or(Json::Null, |g| n(g.force_residual)),
@@ -97,7 +111,7 @@ fn state_json(data: &ReportData, ld: &LoadData, g: &GroupLoad, c: u32) -> Json {
         ("plate_z_mm", n(z(data, g.layer))),
         ("component", u(g.component)),
         ("contact", u(c)),
-        ("picture_marker", Json::str(format!("07/12, contact {c}"))),
+        ("picture_marker", Json::str(marker(ld, c, g.layer))),
         ("printed_patch_mm2", n(s.patch_mm2)),
         ("limiting_section_mm2", n(s.section_mm2)),
         ("part", Json::str(format!("{:?}", part.map(|p| p.kind)))),
@@ -125,6 +139,7 @@ fn state_json(data: &ReportData, ld: &LoadData, g: &GroupLoad, c: u32) -> Json {
             Json::Bool(g.equilibrium_assessed),
         ),
         ("condition_number", n(g.condition)),
+        ("position_sensitivity", n(g.position_sensitivity)),
         ("force_residual", n(g.force_residual)),
         ("normalised_moment_residual", n(g.moment_residual)),
         ("outside_contact_spread_mm", n(g.outside_hull_mm)),
@@ -221,6 +236,9 @@ pub fn written_json(m: Option<&WrittenMetrics>) -> Json {
             ("braced_long_columns",u(m.long_columns.iter().filter(|c|c.2).count() as u32)),
             ("unbraced_long_columns",u(m.long_columns.iter().filter(|c|!c.2).count() as u32)),
             ("brace_diagonals",u(m.braces)),
+            ("largest_unbraced_span_each_column",Json::Arr(m.unbraced_spans_mm.iter().map(|(r,l)|Json::obj([
+                ("native_record",u(*r)),("span_mm",n(*l))])).collect())),
+            ("unbraced_span_definition",Json::str("Largest vertical interval between written brace endpoints and column ends. This does not certify brace stiffness, print-order stability, or load redistribution.")),
             ("long_column_details",Json::Arr(m.long_columns.iter().map(|(r,l,b)|Json::obj([
                 ("native_record",u(*r)),("length_mm",n(*l)),("has_brace",Json::Bool(*b))])).collect())),
             ("spacing_definition",Json::str("Each written vertical column contributes once; nearest XY distance among all columns, not all-pairs spacing. A brace presence is not proof of stability.")),
@@ -230,7 +248,7 @@ pub fn written_json(m: Option<&WrittenMetrics>) -> Json {
 pub fn text(out: &mut String, data: &ReportData, ld: &LoadData) {
     let _ = writeln!(
         out,
-        "  Numerical thresholds set before run [S]: principal tilt stiffness condition <=1e6; relative force and normalised moment residual <=1e-6. A singular row fails conditioning even with zero residual."
+        "  Numerical thresholds set before run [S]: principal tilt stiffness condition <=1e6; reaction Jacobian for a 0.01 mm resultant-position displacement <=0.25 of stiffness-proportional share (fixed tension active set); relative force and normalised moment residual <=1e-6. A singular row fails conditioning even with zero residual. Early-patch subdivision ends at 0.001 mm edges [S]; all unresolved boundary area counts as zero available capacity. Full-patch/H1 measurements retain 0.00025 mm precision."
     );
     let _ = writeln!(
         out,
@@ -308,12 +326,26 @@ pub fn measure_written(m: &plinth_chitubox::Model) -> WrittenMetrics {
             .fold(f64::INFINITY, f64::min);
         result.nearest_column_mm.push(nearest);
         let length = f64::from((r.start[2] - r.end[2]).abs());
+        let lo = r.start[2].min(r.end[2]);
+        let hi = r.start[2].max(r.end[2]);
+        let mut levels = vec![f64::from(lo), f64::from(hi)];
+        levels.extend(
+            braces
+                .iter()
+                .flat_map(|(_, b)| [b.start, b.end])
+                .filter(|p| {
+                    (p[0] - r.start[0]).abs() < 1e-5
+                        && (p[1] - r.start[1]).abs() < 1e-5
+                        && p[2] >= lo
+                        && p[2] <= hi
+                })
+                .map(|p| f64::from(p[2])),
+        );
+        let braced = levels.len() > 2;
+        levels.sort_by(f64::total_cmp);
+        let span = levels.windows(2).map(|z| z[1] - z[0]).fold(0.0, f64::max);
+        result.unbraced_spans_mm.push((*i as u32, span));
         if length > 4.0 {
-            let braced = braces.iter().any(|(_, b)| {
-                [b.start, b.end]
-                    .iter()
-                    .any(|p| (p[0] - r.start[0]).abs() < 1e-5 && (p[1] - r.start[1]).abs() < 1e-5)
-            });
             result.long_columns.push((*i as u32, length, braced));
         }
     }

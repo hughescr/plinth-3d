@@ -90,6 +90,7 @@ fn failed_size_search_keeps_the_contact_and_never_bans_its_site() {
         anchor: false,
         grow: false,
         sharing: false,
+        group: None,
     };
     cache.select(
         vec![(target, Some(chosen[0].site))],
@@ -200,6 +201,39 @@ fn overloaded_seed_grows_before_any_sharing_neighbour_despite_capped_column_enve
 }
 
 #[test]
+fn private_column_resize_retains_the_original_for_atomic_trial_rollback() {
+    let (builder, mut chosen) = fixture();
+    let original = chosen[0].candidate.id;
+    let patch_key = patch_curve_key(&chosen[0], 0, 5.0);
+    let mut cache = Cache {
+        next_id: 1,
+        ..Cache::default()
+    };
+    cache.size_columns(&builder, &mut chosen, &[5.0]);
+    assert_ne!(
+        chosen[0].candidate.id, original,
+        "the witness must resize a column"
+    );
+    assert_eq!(
+        patch_curve_key(&chosen[0], 0, 5.0),
+        patch_key,
+        "a column resize reuses the identical certified patch geometry"
+    );
+    assert_ne!(
+        patch_curve_key(&chosen[0], 1, 5.0),
+        patch_key,
+        "different activation cannot borrow earlier capacity"
+    );
+    let at = cache
+        .available
+        .iter()
+        .position(|c| c.candidate.id == original)
+        .expect("a rejected trial must still own the old certificate");
+    std::mem::swap(&mut chosen[0], &mut cache.available[at]);
+    assert_eq!(chosen[0].candidate.id, original);
+}
+
+#[test]
 fn coverage_selection_cannot_claim_a_nearby_search_site_outside_the_actual_reach() {
     let (_builder, mut measured) = fixture();
     let q = measured.pop().unwrap();
@@ -216,6 +250,7 @@ fn coverage_selection_cannot_claim_a_nearby_search_site_outside_the_actual_reach
                 anchor: false,
                 grow: false,
                 sharing: false,
+                group: None,
             },
             None,
         )],
@@ -245,16 +280,89 @@ fn load_only_keep_rule_requires_improvement_and_refuses_a_worse_violation_elsewh
         replay_improves(&before, &after),
         "genuine additive improvement is measured"
     );
-    after.groups[1].x_group *= 1.1;
+    before.groups[0].x_group = 29.24;
+    after.groups[0].x_group = 11.75;
+    before.groups[1].x_group = 18.66;
+    after.groups[1].x_group = 20.14;
+    assert!(
+        replay_improves(&before, &after),
+        "removing an unprintable island deficit outweighs a larger existing intervention"
+    );
+    after.groups[1].x_group = 25.1;
     assert!(
         !replay_improves(&before, &after),
-        "a better parent cannot hide a worse other layer"
+        "no new unprintable exposure"
+    );
+    before.groups[1].x_group = 11.88;
+    after.groups[1].x_group = 12.10;
+    assert!(
+        !replay_improves(&before, &after),
+        "no new intervention exposure"
     );
     after.groups[1].x_group = before.groups[1].x_group;
     before.groups[1].equilibrium_assessed = true;
     assert!(
         !replay_improves(&before, &after),
         "newly unresolved equilibrium is not a low-ratio pass"
+    );
+}
+
+#[test]
+fn mandatory_island_capacity_is_not_an_optional_parent_sharing_refinement() {
+    let (_, chosen) = fixture();
+    let mut before = seed_load(&chosen);
+    before.groups[0].x_group = 29.24;
+    let mut parent = before.groups[0].clone();
+    parent.component = 1;
+    parent.x_group = 11.88;
+    parent.equilibrium_assessed = true;
+    before.groups.push(parent);
+    let mut after = before.clone();
+    after.groups[0].x_group = 11.75;
+    after.groups[1].x_group = 12.10;
+    after.groups[1].equilibrium_assessed = false;
+    assert!(
+        !replay_improves(&before, &after),
+        "a load-only refinement cannot add a violation"
+    );
+    assert!(
+        island_capacity_improves(&before, &after, 0),
+        "independent island capacity must survive a new reported parent intervention"
+    );
+    after.groups[1].x_group = 25.1;
+    assert!(
+        !island_capacity_improves(&before, &after, 0),
+        "never create another unprintable deficit"
+    );
+    after.groups[1].x_group = 12.10;
+    after.groups[0].x_group = 29.24;
+    assert!(
+        !island_capacity_improves(&before, &after, 0),
+        "the island itself must improve"
+    );
+}
+
+#[test]
+fn replay_compares_unresolved_measures_by_class_not_incompatible_units() {
+    let (_, chosen) = fixture();
+    let mut before = seed_load(&chosen);
+    before.groups[0].condition = 1e8;
+    before.groups[0].moment_residual = 0.1;
+    let mut after = before.clone();
+    after.groups[0].condition = 1e7;
+    assert!(
+        replay_improves(&before, &after),
+        "conditioning alone improves"
+    );
+    after.groups[0].moment_residual = 0.2;
+    assert!(
+        replay_improves(&before, &after),
+        "a larger already-unresolved moment is still an intervention, not a new class"
+    );
+    before.groups[0].moment_residual = 0.0;
+    assert!(
+        !replay_improves(&before, &after),
+        "conditioning improvement cannot hide a newly failed moment assessment"
     );
 }
 
@@ -286,6 +394,7 @@ fn load_sharing_search_has_no_mandatory_neighbour_ring() {
         anchor: false,
         grow: false,
         sharing: true,
+        group: None,
     };
     let near = cache.near(target, None, &sites, 0., &[]);
     assert_eq!(near.len(), 6);
