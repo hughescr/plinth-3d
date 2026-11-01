@@ -1,0 +1,39 @@
+{
+  "label": "calibration piece, not a print candidate",
+  "band": "individual feasibility pieces; not a plate layout",
+  "shuffle_seed": 1,
+  "head": {
+    "ball_diameter": 0.5,
+    "outside": 0.12,
+    "waist_length": 0.71,
+    "junction_diameter": 0.416,
+    "cone_start_diameter": 0.40,
+    "cone_end_diameter": 1.0,
+    "cone_length": 1.5,
+    "column_diameter": 1.0
+  },
+  "specimens": [
+    {
+      "id": "B-100", "body": "Block", "pose": [0.0, 0.0], "lift": 5.0,
+      "contact_sites": [[-1.25, -1.25], [1.25, -1.25], [1.25, 1.25], [-1.25, 1.25]],
+      "waist_diameters": [0.242, 0.242, 0.242, 0.242]
+    },
+    {
+      "id": "S-100", "body": "Strip", "pose": [0.0, 0.0], "lift": 5.0,
+      "contact_sites": [[-4.5, 0.0], [-1.5, 0.0], [1.5, 0.0], [4.5, 0.0]],
+      "waist_diameters": [0.242, 0.242, 0.242, 0.242]
+    },
+    {
+      "id": "S-324", "body": "Strip", "pose": [0.0, 0.0], "lift": 5.0,
+      "contact_sites": [[-4.5, 0.0], [-1.5, 0.0], [1.5, 0.0], [4.5, 0.0]],
+      "waist_diameters": [0.135, 0.135, 0.135, 0.135]
+    },
+    {
+      "id": "W", "body": "Witness", "pose": [0.0, 0.0], "lift": 5.0,
+      "contact_sites": [[-6.25, 0.0], [-3.75, 0.0], [-1.25, 0.0], [1.25, 0.0], [3.75, 0.0], [6.25, 0.0]],
+      "waist_diameters": [0.135, 0.135, 0.135, 0.242, 0.242, 0.242]
+    },
+    { "id": "K-15", "body": "K15", "pose": [0.0, 0.0], "lift": 0.0, "contact_sites": [], "waist_diameters": [] },
+    { "id": "K-60", "body": "K60", "pose": [0.0, 0.0], "lift": 0.0, "contact_sites": [], "waist_diameters": [] }
+  ]
+}
