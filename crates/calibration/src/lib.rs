@@ -2,6 +2,8 @@
 //! No production planner, construction API, load classifier or checker exceptions live here.
 
 pub mod build;
+pub mod goo;
+pub mod goo_grid;
 pub mod light;
 pub mod section;
 pub mod spec;

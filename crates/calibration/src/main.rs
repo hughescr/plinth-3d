@@ -215,7 +215,7 @@ fn run() -> Result<()> {
         &light::thin(&a0)?,
     )?;
     let tips = light::compare(&a0, &a1)?;
-    let eligible = tips.iter().all(|m| m.area_ratio >= 2.0);
+    let axis_normal_diagnostic_count = tips.iter().filter(|m| m.area_ratio >= 2.0).count();
     let mut tip_table = String::from(
         "record\tA0_exposed_area_mm2\tA1_exposed_area_mm2\tarea_ratio\tA0_axial_mm\tA1_axial_mm\tstation_step_mm\tlabel\n",
     );
@@ -235,7 +235,7 @@ fn run() -> Result<()> {
     }
     std::fs::write(dir.join("A0-A1-tips.tsv"), tip_table)?;
     let diff = serde_json::json!({"label":LABEL,"measurement":"sampled axis-normal union area of written ball and cone triangles, not field radius; no slicing claim",
-        "mesh_eligible_for_A1":eligible,"A1_status":if eligible {"mesh criterion met; slice/save checks Unverified"} else {"A1 = second A0; do not use the thinned diagnostic as an A1 contrast"},
+        "axis_normal_diagnostic_count_ge_2":axis_normal_diagnostic_count,"A1_status":"Unverified: C4 needs >=6 of 10 necks at >=2 by horizontal ChituBox sliced area; lower-ratio necks are observations only",
         "field_diff":"ten r1 fields and ten meshes only; reverting precisely these returns byte-identical A0",
         "written_main_tips":tips,"attribute_evidence":attributes(&a0)});
     std::fs::write(
@@ -265,7 +265,7 @@ fn run() -> Result<()> {
         }))?,
     )?;
     println!(
-        "{LABEL}; wrote 8 individual projects; A1 mesh eligible: {eligible}; ChituBox open/save/slice Unverified"
+        "{LABEL}; wrote 8 individual projects; {axis_normal_diagnostic_count}/10 axis-normal diagnostics >=2, not C4 qualification; ChituBox open/save/slice Unverified"
     );
     Ok(())
 }

@@ -66,12 +66,24 @@ pub fn extract(source: &Project) -> Result<Project> {
 
 pub fn thin(a0: &Project) -> Result<Project> {
     let mut a1 = a0.clone();
+    let frame = crate::goo_grid::offset(&a1.models[0]);
     let sup = a1.models[0].supports.as_mut().ok_or("no Light supports")?;
     let mut count = 0;
-    for r in &mut sup.records {
+    for i in 0..sup.records.len() {
+        let r = &sup.records[i];
         if r.record_type == Ty::TIP_CONE && (r.r1 - 0.2).abs() < 1e-6 && (r.r2 - 0.6).abs() < 1e-6 {
-            r.r1 = 0.052;
-            r.mesh = plinth_geom::shapes::frustum(r.start, r.end, r.r1, r.r2);
+            let ball = sup
+                .records
+                .iter()
+                .find(|b| {
+                    b.record_type == Ty::TIP_BALL
+                        && (0..3).all(|k| ((b.start[k] + b.end[k]) / 2.0 - r.start[k]).abs() < 2e-5)
+                })
+                .ok_or("no contact ball at main cone start")?;
+            // Continuity is a construction constraint. Do not first emit an unsafe
+            // thin cone and try to repair a saved project afterwards.
+            let fixed = crate::goo_grid::thin_cone(r, ball, frame, crate::goo_grid::Grid::cal1())?;
+            sup.records[i] = fixed;
             count += 1;
         }
     }
@@ -107,7 +119,7 @@ pub fn compare(a0: &Project, a1: &Project) -> Result<Vec<TipMeasurement>> {
         if reverted != *r0
             || r0.record_type != Ty::TIP_CONE
             || (r0.r1 - 0.2).abs() > 1e-6
-            || (r1.r1 - 0.052).abs() > 1e-6
+            || !(0.052..0.2).contains(&r1.r1)
         {
             return Err(format!("record {i}: change outside main cone r1 and mesh").into());
         }
@@ -151,7 +163,11 @@ pub fn compare(a0: &Project, a1: &Project) -> Result<Vec<TipMeasurement>> {
             area_ratio: old.area / new.area,
             station_step_mm: old.step,
             changed_fields: vec![
-                "r1 at record +32 (f32 bits 0x3e4ccccd → 0x3d54fdf4)".into(),
+                format!(
+                    "r1 at record +32 (f32 bits 0x{:08x} → 0x{:08x})",
+                    r0.r1.to_bits(),
+                    r1.r1.to_bits()
+                ),
                 "mesh vertex coordinates".into(),
             ],
         });
