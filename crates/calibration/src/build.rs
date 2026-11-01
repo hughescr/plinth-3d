@@ -123,13 +123,13 @@ fn raft(s: &mut Supports, sites: &[[f32; 2]], lift: f32) {
     }
 }
 
-/// One specimen per project. W deliberately has no model mesh: no dummy contact/body
-/// is inserted just to coax a favourable checker verdict out of an unsupported use case.
+/// One specimen per project. W and K are solid bodies without native supports.
 #[must_use]
 pub fn specimen(s: &Specimen, h: &Head) -> Project {
     let (mesh, supports) = match s.body {
         Body::K15 => (control(0.798, 0.60), None),
         Body::K60 => (control(0.399, 0.70), None),
+        Body::Witness => (crate::witness::mesh(s, h), None),
         _ => {
             let mesh = match s.body {
                 Body::Block => box_mesh(4.25, 4.25, -2.5, 2.5),
@@ -158,7 +158,11 @@ pub fn specimen(s: &Specimen, h: &Head) -> Project {
         preview: Some(crate::blank_preview()),
         models: vec![Model {
             name: format!("{}; {}", s.id, crate::LABEL),
-            translate: [s.pose[0], s.pose[1], s.lift],
+            translate: [
+                s.pose[0],
+                s.pose[1],
+                if s.body == Body::Witness { 0.0 } else { s.lift },
+            ],
             mesh,
             supports,
         }],
@@ -221,7 +225,7 @@ mod tests {
         for s in spec
             .specimens
             .iter()
-            .filter(|s| !s.contact_sites.is_empty())
+            .filter(|s| !s.contact_sites.is_empty() && s.body != Body::Witness)
         {
             let p = plinth_chitubox::parse(&specimen(s, &spec.head).to_bytes().unwrap()).unwrap();
             let sup = p.models[0].supports.as_ref().unwrap();

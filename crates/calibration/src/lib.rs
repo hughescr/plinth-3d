@@ -5,6 +5,9 @@ pub mod build;
 pub mod light;
 pub mod section;
 pub mod spec;
+pub mod witness;
+#[cfg(test)]
+mod witness_tests;
 
 pub const LABEL: &str = "calibration piece, not a print candidate";
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;

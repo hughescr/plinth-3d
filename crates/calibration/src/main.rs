@@ -26,8 +26,38 @@ fn measure_piece(
             .map(|p| f64::from(p[2]))
             .fold(f64::INFINITY, f64::min)
     };
-    let plate = [0.0, 0.0, face - f64::from(s.lift)];
-    if let Some(sup) = &m.supports {
+    let plate = [
+        0.0,
+        0.0,
+        face - f64::from(if s.body == Body::Witness { 0.0 } else { s.lift }),
+    ];
+    if s.body == Body::Witness {
+        for (i, &xy) in s.contact_sites.iter().enumerate() {
+            let triangles = plinth_calibration::witness::column(&m.mesh, xy);
+            let mesh = SectionMesh::new(&triangles, plate, [0.0, 0.0, 1.0]);
+            let min = section::minimum(&[mesh], 0.001, 4.88, 2000);
+            let design = 8.0
+                * (std::f64::consts::TAU / 16.0).sin()
+                * (f64::from(s.waist_diameters[i]) / 2.0).powi(2);
+            let ok = (min.area / design - 1.0).abs() <= 0.10 && min.at > 4.3 && min.at < 4.68;
+            writeln!(
+                out,
+                "{}\t{}\t{:.9}\t{:.9}\t{:.6}\twaist\t{:.6}\t{:.3}\t{}\t{}",
+                s.id,
+                i,
+                min.area,
+                design,
+                min.at,
+                min.step,
+                (min.area / design - 1.0) * 100.0,
+                if ok { "mesh criterion met" } else { "FAIL" },
+                LABEL
+            )?;
+            if !ok {
+                return Err(format!("W column {i}: written waist fails criterion").into());
+            }
+        }
+    } else if let Some(sup) = &m.supports {
         for (i, head) in sup.records[..s.contact_sites.len() * build::PARTS_PER_HEAD]
             .chunks_exact(build::PARTS_PER_HEAD)
             .enumerate()
@@ -109,8 +139,44 @@ fn attributes(p: &Project) -> serde_json::Value {
     }
     serde_json::json!({"label":LABEL,"presets":s.presets.iter().map(|p|serde_json::json!({"id":p.id,"name":p.name})).collect::<Vec<_>>(),"counts":counts})
 }
+/// Explicitly replace only W in an existing calibration review set.
+fn replace_witness(spec_path: &str, out_path: &str) -> Result<()> {
+    let spec: PlateSpec = serde_json::from_slice(&std::fs::read(spec_path)?)?;
+    spec.validate()?;
+    let s = spec
+        .specimens
+        .iter()
+        .find(|s| s.body == Body::Witness)
+        .unwrap();
+    let dir = Path::new(out_path);
+    let table_path = dir.join("measurements.tsv");
+    let table = std::fs::read_to_string(&table_path)?;
+    let p = save(
+        &dir.join("W-calibration-not-print-candidate.chitubox"),
+        &build::specimen(s, &spec.head),
+    )?;
+    let mut rows = String::new();
+    measure_piece(s, &p, &mut rows)?;
+    let retained: String = table
+        .lines()
+        .filter(|line| !line.starts_with("W\t"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(table_path, retained + &rows)?;
+    std::fs::write(
+        dir.join("W-calibration-not-print-candidate.stl"),
+        plinth_calibration::reference_stl(&p.models[0]),
+    )?;
+    print!("{rows}");
+    Ok(())
+}
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if let [mode, spec_path, out_path] = args.as_slice()
+        && mode == "--witness"
+    {
+        return replace_witness(spec_path, out_path);
+    }
     let [spec_path, owner_path, out_path] = args.as_slice() else {
         return Err(
             "usage: plinth-calibration <cal1.json> <read-only-owner.chitubox> <output-directory>"
@@ -190,7 +256,7 @@ fn run() -> Result<()> {
             "label":LABEL,"source_read_only":owner_path,"source_model_index":2,"band":spec.band,"shuffle_seed":spec.shuffle_seed,
             "assembled_plate":false,"pose":"translation only; individual pieces, not a plate layout",
             "K_base_choice_S":"48-sided diameter 8 mm pedestal, z 0 to 4.5; arm, flare and cap follow plan reconstruction",
-            "W":"native supports with no dummy model mesh; checker may be unable to establish its plate frame",
+            "W":"single connected solid STL body on its raft, no native supports; H4 calibration-only exception as for K",
             "section_scope":"sampled mesh measurements; no certified continuous lower bound, no sliced pixel or physical-load claim",
             "ChituBox_open_save_slice":"Unverified, not run",
             "a0_unchanged":"native mesh, translate, presets, attrs and all records retained; model name labelled; three-model preview replaced with an 800x600 native-background preview",

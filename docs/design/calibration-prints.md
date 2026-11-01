@@ -190,7 +190,9 @@ Applied to every contrast:
 
 - A calibration entry point (a CLI example or binary, not a flag on the production command) reads a **specimen spec** (JSON): body, pose, lift, contact sites, the waisted-head dimensions (§3.2), the band and the shuffle seed.
 - The step-11 construction API cannot build a waisted head. It allows one cone from the ball centre with end radius ≥ 0.25 mm. So this entry point writes the native records directly with the shape kernel in `geom`: ball, waist rod, junction ball, cone, joint ball, column, base, raft. Owner ruling R1 (§6.5) allows this.
-- The independent checker then verifies H1, H2, H3, H4, H6 and H9 on the written file. The checker, not the builder, is the evidence.
+- W is a solid body with no native supports, as for K. ChituBox v1.4.0 refused the native-support-only W with no body triangles. Its replacement is one closed, outward-oriented surface: six radial unions of contact ball, waist, junction ball, cone, joint ball, column and base, welded to a common 0.20 mm raft. The balls end free; there is no block above them. The waist remains at 4.40–4.60 mm above the plate. The replacement still needs an owner open/slice check.
+- The independent checker then reports H1, H2, H3, H4, H6 and H9 on the written file, with the K/W exceptions in §6.3. Its body checks do not measure the minimum section of an STL arm or waist: the calibration section measurement does that separately from the written triangles.
+- Orchestrator ruling: the A1 '≥ ×2 thinner' rule is by cross-section AREA (the load ratio is area-based); measured 3.88× by area, 1.97× by diameter.
 - The planner, the P5 load check and the step-11 tip-family rule are not applied.
 - Every file and report says "calibration piece, not a print candidate for any model".
 
@@ -204,16 +206,16 @@ The cap controls are solid bodies (STL) built to §3.3, with 48-sided sections. 
 |---|---|---|---|---|
 | H1 patch ≤ 0.50 mm² | Kept (about 0.15) | Not applicable (no contact) | Not applicable (no contact) | Reported, not enforced |
 | H2 no fused contacts | Kept | Not applicable | Not applicable | Reported |
-| H3 print-order continuity | Kept | **Measured and kept** | **Measured and kept** | Reported |
-| H4 lift ≥ 5.0 mm | Kept | **Exception:** rests on the plate on its own base, as on plate 6 | Kept | As made |
-| H6 gap ≥ 0.3 mm | Kept | Not applicable | Kept | Reported |
-| H9 ≥ 0.10 mm across | Kept (thinnest waist 0.135 mm) | **Measured** (thinnest arm 0.798 mm) | Kept | Reported (A0: 0.098 mm) |
+| H3 print-order continuity | Kept | **Measured and kept** | **Unverified by checker:** no native supports; solid-body layer continuity still needs slice inspection | Reported |
+| H4 lift ≥ 5.0 mm | Kept | **Exception:** rests on the plate on its own base, as on plate 6 | **Exception:** solid body rests on its own raft on the plate, as for K | As made |
+| H6 gap ≥ 0.3 mm | Kept | Not applicable | Not applicable (no native supports) | Reported |
+| H9 ≥ 0.10 mm across | Kept (thinnest waist 0.135 mm) | **Measured** (thinnest arm 0.798 mm) | Written waist sections measured separately (0.135/0.242 mm design); checker H9 not applicable to body-only mesh | Reported (A0: 0.098 mm) |
 | P5 and the "unprintable as is" class | **Deliberately exceeded** | Exceeded (K-60) | — | Exceeded as made |
 
-**Calibration-only exception (K and W).** K and W are not support layouts for a model, so H1, H2 and H6 do not apply, and K breaks H4 by design. For both, the checker still measures and reports two things:
+**Calibration-only exception (K and W).** K and W are not support layouts for a model, so H1, H2 and H6 do not apply, and both break H4 by design. The W checker verdict is **FAIL** (H4); H3 and H8 are **Unverified**, H5 topology and H7 body preservation pass, and H1/H2/H6/H9 are not applicable. This is not a print-candidate pass. The calibration checks and independent report must distinguish two things:
 
-- the minimum load-bearing section along every load path (arm, flare and cap for K; waist, junction and cone for W);
-- print-order continuity.
+- the minimum load-bearing section along every load path (arm, flare and cap for K; raft through the contact-ball equator for W), measured from written triangles by the calibration section tool. W's free ball crown above its equator is not a loaded neck and tapers to a point. The six W paths meet ±10% of their design areas; the same minimum plateau includes 4.40–4.60 mm. This is sampled measurement, not a certified continuous lower bound;
+- print-order continuity, reported independently; **Unverified** is not a pass. W's closed-surface topology test does not prove sliced-layer continuity.
 
 The exception applies only to pieces labelled K or W in the calibration entry point.
 
