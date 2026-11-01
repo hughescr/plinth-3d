@@ -1,6 +1,6 @@
 # Calibration print plan: Light on Round 25, and thin strips against compact bodies (plate CAL-1)
 
-Status: design, 2026-11-01, revised twice after cross-family challenges. Nothing here is printed until the owner says yes. Owner decisions are listed in §11. It informs the FR-20a load model (`docs/design/step11-construction.md` §4) and PRD §7 (P4, P5). It does not calibrate the whole model.
+Status: design, 2026-11-01, revised twice after cross-family challenges, then updated with the owner's answers of 2026-11-01 (§6.5). Nothing here is printed until the owner says yes. Remaining owner questions are in §11. It informs the FR-20a load model (`docs/design/step11-construction.md` §4) and PRD §7 (P4, P5). It does not calibrate the whole model.
 
 **Labels on numbers** (as in the step-11 design):
 
@@ -18,7 +18,7 @@ Piece counts, sizes, sections and resin in this document are planning values **[
 
 The owner decided on 2026-11-01 to calibrate the load model with test prints before more sizing rounds **[O]**.
 
-The owner believes ChituBox's own auto-supports print the Round 25 base well **[O]**. It is not yet known whether that comes from a print of this 65° copy with these exact supports (§11 Q1). The plan tests A0 directly either way.
+The owner judges that ChituBox's own auto-supports would print the Round 25 base well **[O]**. That is his judgement only: this 65° copy with these supports has never been printed (owner, 2026-11-01). A0 is therefore an untested layout, and this plate is its first test.
 
 The replay adapter (`plinth-slots/bench/crates/cli/examples/magic.rs`, uncommitted) read the owner's file `round 25.chitubox-magic-supports.chitubox`. These are model outputs on the written file **[M]**, not physical loads:
 
@@ -55,9 +55,9 @@ This plate tests the Light layout directly and looks at the first reading. It do
 2. **Model comparison only on preregistered contrasts** (§5). Every other outcome is an observation, recorded and reported but not scored.
 3. **Clear calls come only from a measured law.** The compact full-area law (P4 cylinder bracket 19.9–30.5 **[M]**) makes a clear call only at least ×3 past the bracket: fail at ≥ 92, hold at ≤ 6.6. Between those it makes no call.
    - The alternative "strips tolerate more" is an assumed scenario, not a calibrated law. It makes no clear calls.
-   - The owner's belief about Light is not a law. No margin is derived from it.
+   - The owner's judgement about Light is not a law. No margin is derived from it.
 4. **Censored, not wrong.** A prediction whose mechanism was not exercised is censored. Examples: the piece failed for another reason first; the predicted site never formed. Censored calls are neither right nor wrong.
-5. **Cross-piece contamination (§7.3).** A lost piece whose time of loss is unknown makes every outcome that could have happened after it uncertain, in any band and at any height, unless shown otherwise.
+5. **Failed pieces stay at their own site (§7.3).** On this printer a piece that leaves the build plate stays on the vat film at its own spot until the job ends, and does not spoil other pieces **[O]**. Neighbours' outcomes therefore stay scorable.
 6. **No global elimination.** One specimen never removes a predictor from the model. Results are stated per contrast.
 7. **Intervals only when monotone.** A pass/fail interval is reported only when outcomes are monotone across rungs and replicates, and the failure modes match. Otherwise the raw outcomes are reported, with no interval.
 8. **Survival is evidence for that configuration only.** If strips survive, the statement is "this strip configuration survived at index X on CAL-1", nothing wider.
@@ -159,7 +159,7 @@ These are replication controls. They establish only whether these two controls r
 
 **Labels and scale.** IDs and one 10 mm scale bar per band are engraved on raft tabs, inside the first 1.2 mm above the plate. That is outside every measured layer. A top-view plate-map picture is the main key.
 
-**Real prints.** None share this plate unless the owner explicitly accepts the debris risk (§7.3).
+**Real prints.** None are planned on this plate.
 
 **Resin, planning estimate [U]:** Round 25 copies 4 × (0.85 mL model **[M]** + about 0.2 mL supports) = 4.2 mL; coupons, controls, witnesses and their supports about 1.1 mL; **total about 5–6 mL**. ChituBox's sliced volume replaces this (§6.4).
 
@@ -179,7 +179,7 @@ Only these are scored.
 
 Applied to every contrast:
 
-- **Contamination (§2 rule 5, §7.3).** A failure that could have happened after an unexplained loss elsewhere on the plate is "uncertain (possible debris)". It is reported but not scored. A survival needs no timing and is checked by inspecting the piece. So survivals stay scorable; failures often will not be.
+- **Failed pieces (§2 rule 5, §7.3).** A failed piece stays on the film at its own site, so it does not change any other piece's outcome. Every piece is scored on its own.
 - **Formation.** If W shows that the ball did not form on a waist size, no coupon failure at that waist counts as a load failure.
 
 ---
@@ -189,7 +189,7 @@ Applied to every contrast:
 ### 6.1 Coupons and W: a calibration-only head builder
 
 - A calibration entry point (a CLI example or binary, not a flag on the production command) reads a **specimen spec** (JSON): body, pose, lift, contact sites, the waisted-head dimensions (§3.2), the band and the shuffle seed.
-- The step-11 construction API cannot build a waisted head. It allows one cone from the ball centre with end radius ≥ 0.25 mm. So this entry point writes the native records directly with the shape kernel in `geom`: ball, waist rod, junction ball, cone, joint ball, column, base, raft. Ruling R1 covers this.
+- The step-11 construction API cannot build a waisted head. It allows one cone from the ball centre with end radius ≥ 0.25 mm. So this entry point writes the native records directly with the shape kernel in `geom`: ball, waist rod, junction ball, cone, joint ball, column, base, raft. Owner ruling R1 (§6.5) allows this.
 - The independent checker then verifies H1, H2, H3, H4, H6 and H9 on the written file. The checker, not the builder, is the evidence.
 - The planner, the P5 load check and the step-11 tip-family rule are not applied.
 - Every file and report says "calibration piece, not a print candidate for any model".
@@ -223,7 +223,7 @@ The exception applies only to pieces labelled K or W in the calibration entry po
    - On the written mesh, measure the minimum load-bearing section along the path. It must be at the waist and within ±10 % **[S]** of the design section.
    - Open and slice in ChituBox. Measure the pixel area of the waist in its sliced layers. It must agree with the mesh within one pixel row.
    - If either check fails, redesign the head and record the change. Do not relabel the rung.
-2. **A1, exposed-section check.** It is not enough that a field changed.
+2. **A1, exposed-section check.** Plinth makes the edit (§6.5). It is not enough that a field changed.
    - Measure the exposed narrowest section of the 10 edited tips on the written mesh and in the sliced layers, against A0.
    - A field-by-field comparison must show that only those 10 cone fields and their meshes changed.
    - ChituBox must open and save A1 with the fields intact. This depends on step-11 §2 item 1: whether ChituBox slices the stored mesh or rebuilds from the fields.
@@ -237,7 +237,17 @@ The exception applies only to pieces labelled K or W in the calibration entry po
    - the A0 lip trio and the two branch rods with the highest rigid-lever ratio.
 6. **Freeze the SHA-256 hashes** of the `.chitubox` project and of the sliced printer file. Results are valid only for those two files.
 7. **Replay every piece** and write the prediction table (§7.1).
-8. **Cross-family review (R4)** of the spec, the feasibility measurements and the replay.
+8. **Cross-family review** (PRD §7 rule 2) of the spec, the feasibility measurements and the replay.
+
+### 6.5 Owner rulings for this plate (2026-11-01) [O]
+
+These apply only to the labelled calibration plate CAL-1, never to the production path:
+
+- **R1.** Test pieces may exceed P5 and the "unprintable as is" class, and may use the waisted calibration tip.
+- **R2.** Test pieces may be meant to break. That does not conflict with the PRD §7 "never doomed to fail" rule for this plate.
+- **R3.** The four Round 25 copies are ChituBox comparison copies. Plinth's limits are reported for them, not enforced.
+- **A1 edit.** Plinth makes the A1 edit to the support records, not the owner in ChituBox. The §6.4 item 2 checks still apply: the edit must survive a ChituBox save, and the exposed neck must be thinner in the sliced pixels.
+- **Light.** "Light prints fine" is the owner's judgement, not a print. A0 is untested.
 
 ---
 
@@ -251,23 +261,26 @@ Commit the prediction table. Per piece: the measured narrowest section, the repl
 
 Both file hashes; resin type and lot; resin and tank temperature (warmed; heater at 30 °C in his setup **[O]**); profile name; layer height; normal and bottom exposure; bottom and transition layer counts; anti-aliasing and image blur settings; release mode and speeds (tilt); rest times before exposure and after release; film; date; anything unusual.
 
-### 7.3 Debris and cross-piece contamination (preregistered)
+### 7.3 Failed pieces (owner's printer facts, 2026-11-01) [O]
 
-Coupons and K-60 are meant to fail. A failed body can stay on the film, fall into the vat, scratch the film or cure onto later layers. The time of a loss is normally unknown. A clean film at the end does not prove that nothing interfered earlier.
+Coupons and K-60 are meant to fail. On this printer, as the owner describes it:
 
-**Rule:** if any piece is lost and the time of loss is unknown, then every failure on the plate is marked **"uncertain (possible debris)"** unless shown otherwise. That covers every band and any height that printed after the loss could have happened. A failure counts as "shown otherwise" only by a dated record, for example an owner-approved pause inspection that saw the plate clean after that failure had already happened. Survivals stay scorable after inspection.
+- A job runs to completion. It can be aborted but not paused and resumed. There is no mid-print inspection.
+- A piece that does not stay on the build plate stays on the vat film at its own spot until the job ends.
+- It does not fall onto other pieces or spoil them. The plate never goes lower than it rose, so it cannot press loose material into the film. The film is not damaged.
+- After the job, a "tank clean" exposure cures one full-screen layer. The owner peels it out, and it collects the debris.
 
-Most intended failures happen low on the plate, so this rule can make every failure contrast unreadable. The owner chooses one option (§11 Q3):
+The owner accepts this risk as minimal. Consequences for scoring:
 
-- **(a) Retention features.** Mechanically inactive features that keep a failed coupon out of the vat. They must not touch any piece before it fails, carry no load and form no print-order cup. It is not yet known whether a practical design exists; plinth would design one and prove it in ChituBox first.
-- **(b) A pause procedure the owner defines** for his printer (when, how, what he inspects). The pause, its length and any change in temperature or rest time are recorded. Inspections give the dated records that rule "shown otherwise" needs.
-- **(c) Accept** that the plate may give no interpretable failure contrast. It then mainly gives survival evidence: A0, A1 and strips that survive.
+- A failed piece stays at its own site, so neighbouring outcomes stay scorable. No outcome is marked uncertain because another piece failed.
+- The tank-clean sheet shows which pieces left remnants on the film, and where. That helps locate where a piece separated: at the waist, at the patch, or higher in the body. **The owner photographs the tank-clean sheet, with the scale bar or a ruler, before discarding it.**
 
 ### 7.4 Recording, kept small
 
 - **Before removing anything:**
   - One photo per band from the front and one from above, with the scale bar in view, before washing.
-  - Check the film and the vat, and after washing the basket, for lost pieces and flakes.
+  - Run the tank-clean exposure and photograph the cured sheet before discarding it (§7.3). Note which remnants match which pieces, using the plate map.
+  - After washing, check the basket for lost pieces and flakes.
 - **One overview sheet** (the plate-map picture). For every piece, one mark: **present / partly present / gone**.
 - **Close inspection only of preregistered contacts:**
   - Coupons: their 4 contacts. Each is intact, broken at the waist, or broken elsewhere / cannot tell.
@@ -287,18 +300,18 @@ Most intended failures happen low on the plate, so this rule can make every fail
 | K-15 present, K-60 gone (per band) | Those two controls reproduced plate 6. Nothing more |
 | K does not reproduce | Reported beside every result. It does not void A0, A1 or coupon survivals. The direct A0 evidence stands even if K-60 survives |
 | C1: block gone, strip present (and the strip failure not in question) | This strip configuration survived at index about 100 where the matched compact coupon did not. The compact-law clear call is reversed for this strip. Cause not isolated (§3.2) |
-| C1: both gone | No survival separation at this tested level, conditional on formation (W) and on the failure mode at the waists. Both failures may be "uncertain (possible debris)" (§7.3) |
+| C1: both gone | No survival separation at this tested level, conditional on formation (W) and on the failure mode at the waists |
 | C1: both present | The compact-law clear call is reversed for both bodies at this level, for these configurations |
 | C2: S-324 present | This strip configuration survived at index about 323 on CAL-1, about Light's lip value. Observed survival for this configuration only |
 | C3: A0 present | This Light copy survived on this plate. The compact full-area clear call is reversed for it |
-| C3: A0 failed | Record where, by anatomy, and compare with the replay's top list as an observation. If the failure could have followed a loss elsewhere, it is "uncertain (possible debris)" |
+| C3: A0 failed | Record where, by anatomy, and compare with the replay's top list as an observation. The tank-clean sheet may show where it separated |
 | C4: A0 and A1 present | Both tested configurations survived. Mechanism not established |
 | C4: A0 present, A1 failed at the edited tips | Survival differed with the exposed tip section at the underside heads, subject to §7.3 |
 | Bands disagree | Report both; no interval; replicate on a later plate |
 
 ### 8.2 Intervals
 
-An interval for strips (for example "survived at 100, failed at 323") is stated only under §2 rule 7: monotone across both bands, with waist breaks at the failed rung, and the failures not marked uncertain. Each edge rests on 2 pieces from one plate and one resin.
+An interval for strips (for example "survived at 100, failed at 323") is stated only under §2 rule 7: monotone across both bands, with waist breaks at the failed rung. Each edge rests on 2 pieces from one plate and one resin.
 
 ### 8.3 Validity
 
@@ -308,7 +321,7 @@ An interval for strips (for example "survived at 100, failed at 323") is stated 
 ### 8.4 What changes after the plate
 
 - No design ratio is computed from the plate. In particular, no "lower edge ÷ 2": with n = 1 or 2 per edge, that is not a defensible derivation (`plate-06-results.md`, Finding 2).
-- The owner receives the evidence per contrast: outcomes, reversed or confirmed clear calls, uncertain outcomes and why, and any monotone interval.
+- The owner receives the evidence per contrast: outcomes, reversed or confirmed clear calls, and any monotone interval.
 - A change to A2 (full-area load for strips) or to P5 is the owner's ruling (PRD §7). If he rules a change, plinth re-runs Round 25. The new layout is reported beside Light as a measurement, not a target.
 - The PRD §8.4 side-by-side print still follows. CAL-1 does not replace it.
 
@@ -317,11 +330,11 @@ An interval for strips (for example "survived at 100, failed at 323") is stated 
 ## 9. Order of work (dependencies, no dates)
 
 1. Owner answers to §11.
-2. Settle step-11 §2 item 1 if plinth makes the A1 edit.
+2. Settle step-11 §2 item 1 (plinth makes the A1 edit, §6.5).
 3. Build the calibration entry point and the waisted-head builder; write the coupons, W and K.
 4. Feasibility (§6.4 items 1–3). Redesign and re-measure any piece that fails, recording the change.
 5. Assemble the plate with the seeded shuffle; §6.4 items 4–8; commit the prediction table.
-6. Ask the owner to print. He prints, using the debris option he chose.
+6. Ask the owner to print. He prints, then runs the tank-clean exposure.
 7. Photos, film, vat and basket checks, overview sheet, preregistered contacts, removal notes (§7.4).
 8. Transcribe; score C1–C4 and K under §2 and §7.3. A different-family reviewer checks the scoring against the raw marks before the owner sees it.
 9. Owner rulings, if any. Update PRD §7 and step-11 §4 by replacing the superseded values.
@@ -343,17 +356,7 @@ Each needs its own controlled pair, with a common formed carrier and a common ac
 
 ## 11. Questions for the owner
 
-1. **Light on this base:** have you actually printed this tilted Round 25 copy with ChituBox Light supports, or is "it prints fine" from general use of Light? Either answer is fine; the plate tests it.
-2. **Test pieces outside the normal rules:**
-   - May the test pieces deliberately carry more load than plinth's design ratio allows, including pieces meant to break?
-   - May they use a special tip with a narrow waist, which plinth would never make for a real model?
-   - Is it all right to print pieces that are meant to break, given the "never print something doomed to fail" rule? The plate as a whole is not meant to fail.
-   - Should the four Round 25 copies count as ChituBox copies, so plinth's limits are reported but not enforced on them?
-3. **Fallen pieces:** broken test pieces can end up on the film or in the vat. Without a record of when that happened, most failures on the plate cannot be trusted. Which do you prefer?
-   - (a) We try to design catch features that keep broken pieces out of the vat.
-   - (b) You define a pause-and-inspect procedure that suits your printer.
-   - (c) Accept that failures may not be readable, and use the plate mainly for what survives.
-4. **The thinned Light copy (A1):** should plinth edit the support data, or would you do it in ChituBox? Can ChituBox change the tip size of selected supports without moving them?
-5. **Size and resin:** is 16 pieces at about 5–6 mL acceptable?
-6. **Settings:** which resin and lot? The default ChituBox profile at 0.05 mm, with the tank at 30 °C?
-7. **Other prints on the plate:** none are planned. Would you add one only if you accept the debris risk?
+The answers of 2026-11-01 are recorded in §6.5 and §7.3. Still open:
+
+1. **Size and resin:** is 16 pieces at about 5–6 mL acceptable?
+2. **Settings:** which resin and lot? The default ChituBox profile at 0.05 mm, with the tank at 30 °C?
