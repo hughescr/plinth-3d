@@ -45,6 +45,19 @@ Tests sabotage the windowed minimum, omit the late waist minimum, and supply
 a descending last-isolated section before body merge. These are sampled checks,
 not certified continuous sections or physical-strength evidence.
 
+Frozen CAL-1 evidence (2026-11-02) is in cal1-frozen/: FROZEN.json identifies
+both emitted inputs, predictions.json is the compact 16-row preregistration,
+and measurements.json matches the review folder's slice-check.json byte-for-byte.
+No owner project or GOO binary is stored here. replay-maxima.json is a small
+snapshot of output from cal1-replay rebuilt with serde_json float_roundtrip;
+its source project/output hashes are recorded. Tests compare all frozen rows
+bit-for-bit with those output maxima and recompute the six specimen types from
+cal1.json. A0's owner mesh is not a repository fixture; its snapshot arithmetic
+was independently rerun on the hashed source outside the repo. A consistent
+one-ULP drift across index, maxima and call still fails the frozen-row test.
+The native-raster differences were accepted under R-REP on 2026-11-02; the
+plate was released for the print request.
+
 Run tests and lint through scripts/t L1 calibration and scripts/t L0 calibration.
 The unit tests cover both waist sizes on every written coupon path, the controls'
 arm sections/cap area/heights, and an adversarial mesh-only waist change with

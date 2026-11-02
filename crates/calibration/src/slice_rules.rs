@@ -222,6 +222,72 @@ mod tests {
         assert!(measure(&models, &layers, &waist, 0.001).is_err());
     }
     #[test]
+    fn c4_measure_requires_six_necks_and_measurable_minima_on_both_pieces() {
+        let models = [
+            json!({"name":"front-A0; calibration"}),
+            json!({"name":"front-A1; calibration"}),
+        ];
+        // Exactly six records have both independent area ratios at the x2 boundary.
+        let tracks = |pixels: f64| -> Vec<Value> {
+            (1..20).step_by(2).map(|record| {
+                let area = if record <= 11 { pixels } else { 15.0 };
+                json!({"record":record,"blob":{"pixels":area,"weighted_pixels":area,"bounds":[0,0,10,10]}})
+            }).collect()
+        };
+        let mut layers =
+            vec![json!({"layer":1,"pieces":[{"tracks":tracks(20.)},{"tracks":tracks(10.)}]})];
+        let verdict =
+            |layers: &[Value]| measure(&models, layers, &[], 0.001).unwrap()["tips"][0].clone();
+        let pass = verdict(&layers);
+        assert_eq!(pass["qualifying_records"], json!([1, 3, 5, 7, 9, 11]));
+        assert_eq!(pass["keep_A1"], true);
+        // Sabotage only the weighted ratio: five qualifying records cannot keep A1.
+        layers[0]["pieces"][1]["tracks"][5]["blob"]["weighted_pixels"] = json!(10.01);
+        assert_eq!(
+            verdict(&layers)["qualifying_records"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+        assert_eq!(verdict(&layers)["keep_A1"], false);
+        layers[0]["pieces"][1]["tracks"][5]["blob"]["weighted_pixels"] = json!(10.);
+        // Both A0 and A1 must have a measurable exposed minimum. A last isolated
+        // shrinking sample before body merge has a numeric ratio, but cannot count.
+        for unmeasurable in 0..2 {
+            let mut sabotaged = layers.clone();
+            if unmeasurable == 0 {
+                sabotaged[0]["pieces"][0]["tracks"][5]["blob"]["pixels"] = json!(22.);
+                sabotaged[0]["pieces"][0]["tracks"][5]["blob"]["weighted_pixels"] = json!(22.);
+            }
+            let mut next = sabotaged[0].clone();
+            next["layer"] = json!(2);
+            let blob = &mut next["pieces"][unmeasurable]["tracks"][5]["blob"];
+            blob["pixels"] = json!(if unmeasurable == 0 { 21. } else { 9. });
+            blob["weighted_pixels"] = blob["pixels"].clone();
+            let mut merged = next.clone();
+            merged["layer"] = json!(3);
+            merged["pieces"][unmeasurable]["tracks"][5]["blob"]["bounds"] = json!([0, 0, 201, 10]);
+            sabotaged.extend([next, merged]);
+            let failed = verdict(&sabotaged);
+            assert_eq!(
+                failed["keep_A1"], false,
+                "piece {unmeasurable} minimum is not measurable"
+            );
+            assert_eq!(failed["necks"][5]["qualifies"], false);
+            assert!(failed["necks"][5]["lit_any_ratio"].as_f64().unwrap() >= 2.);
+            assert!(failed["necks"][5]["weighted_ratio"].as_f64().unwrap() >= 2.);
+            let side = if unmeasurable == 0 { "a0" } else { "a1" };
+            assert_eq!(
+                failed["necks"][5][side]["minimum_measurable_before_body_merge"],
+                false
+            );
+        }
+        // The lit-any ratio is independently binding as well.
+        layers[0]["pieces"][1]["tracks"][5]["blob"]["pixels"] = json!(10.01);
+        assert_eq!(verdict(&layers)["keep_A1"], false);
+    }
+    #[test]
     fn descending_into_body_merge_does_not_qualify_as_a_minimum() {
         let samples = [
             s(401, 1500., false),

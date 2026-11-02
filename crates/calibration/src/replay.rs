@@ -583,6 +583,158 @@ mod tests {
         }
     }
     #[test]
+    fn frozen_cal1_table_matches_measurement_identity_and_records_release_ruling() {
+        let frozen: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/calibration/cal1-frozen/FROZEN.json"
+        ))
+        .unwrap();
+        let table: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/calibration/cal1-frozen/predictions.json"
+        ))
+        .unwrap();
+        let measured: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/calibration/cal1-frozen/measurements.json"
+        ))
+        .unwrap();
+        assert_eq!(table["freeze"], frozen);
+        assert_eq!(measured["freeze"], frozen);
+        assert_eq!(
+            frozen["project_sha256"],
+            "91611c85a661f5caf77704898ff8b04ff5ef69c05d5d6b1b024b65a72ceb28b1"
+        );
+        assert_eq!(frozen["seed"], 20261102);
+        assert_eq!(table["pieces"].as_array().unwrap().len(), 16);
+        assert_eq!(measured["first_lit_layer"].as_array().unwrap().len(), 16);
+        assert_eq!(measured["ready_to_print"], true);
+        assert_eq!(measured["status"], "released");
+        assert!(measured["rulings"].as_str().unwrap().contains("R-REP"));
+        assert_eq!(measured["island_count"], 0);
+        assert_eq!(measured["waist_boundary_pass_count"], 216);
+        assert_eq!(
+            measured["pixel_diff"]["outside_replaced_slots_differing_pixels"],
+            0
+        );
+        for row in table["pieces"].as_array().unwrap() {
+            assert_ne!(row["id"], "A1");
+            let index = row["replayed_index"].as_f64().unwrap();
+            let additive = &row["sharing_maxima"]["additive"];
+            assert_eq!(
+                index.to_bits(),
+                additive["ratio_U"].as_f64().unwrap().to_bits()
+            );
+            assert_eq!(row["replayed_layer"], additive["layer_M"]);
+            assert_eq!(row["replayed_contact"], additive["contact_M"]);
+        }
+    }
+    #[test]
+    fn reviewed_prediction_numbers_survive_json_reencoding_bit_exactly() {
+        for value in [
+            311.22094393328246_f64,
+            15.037470363267387,
+            112.50639479508857,
+            0.04601799947552978,
+        ] {
+            let encoded = serde_json::to_string(&value).unwrap();
+            let decoded: f64 = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(value.to_bits(), decoded.to_bits(), "{encoded}");
+        }
+    }
+    fn replay_reference() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../fixtures/calibration/cal1-frozen/replay-maxima.json"
+        ))
+        .unwrap()
+    }
+    // Compare numeric leaves as IEEE-754 bits, not rounded display strings or
+    // tolerance checks. Expected objects may project fields from the full replay.
+    fn assert_replay_bits(actual: &Value, expected: &Value) {
+        match expected {
+            Value::Number(n) => assert_eq!(
+                actual.as_f64().unwrap().to_bits(),
+                n.as_f64().unwrap().to_bits(),
+                "replay numeric drift: {actual} != {expected}"
+            ),
+            Value::Object(fields) => {
+                for (key, value) in fields {
+                    assert_replay_bits(&actual[key], value);
+                }
+            }
+            Value::Array(values) => {
+                assert_eq!(actual.as_array().unwrap().len(), values.len());
+                for (a, b) in actual.as_array().unwrap().iter().zip(values) {
+                    assert_replay_bits(a, b);
+                }
+            }
+            _ => assert_eq!(actual, expected),
+        }
+    }
+    #[test]
+    fn frozen_rows_are_bit_exact_to_rebuilt_replay_output() {
+        // This is a snapshot of OUTPUT from the rebuilt executable, not values
+        // read back from the frozen table. A0's owner mesh is not a repo fixture;
+        // its full replay was rerun on the frozen 7d507a3d input before snapshotting.
+        let reference = replay_reference();
+        assert_eq!(reference["replay_project_sha256"], HASH);
+        assert_eq!(reference["pieces"].as_array().unwrap().len(), 7);
+        let table: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/calibration/cal1-frozen/predictions.json"
+        ))
+        .unwrap();
+        let rows = table["pieces"].as_array().unwrap();
+        assert_eq!(rows.len(), 16);
+        for row in rows {
+            let replay = reference["pieces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == row["id"])
+                .unwrap();
+            assert_replay_bits(&row["sharing_maxima"], &replay["maxima"]);
+            let additive = &replay["maxima"]["additive"];
+            for (field, source) in [
+                ("replayed_index", "ratio_U"),
+                ("replayed_layer", "layer_M"),
+                ("replayed_contact", "contact_M"),
+                (
+                    "additive_limiting_whole_section_mm2_M",
+                    "section_whole_area_mm2_M",
+                ),
+            ] {
+                assert_replay_bits(&row[field], &additive[source]);
+            }
+            let prediction = call(row["id"].as_str().unwrap(), ratio(additive));
+            for field in ["call", "index_U", "replication_expectation"] {
+                assert_replay_bits(&row["compact_law_replay_call"][field], &prediction[field]);
+            }
+        }
+    }
+    #[test]
+    fn replay_reference_matches_computed_fixture_outputs_bit_exactly() {
+        // Recompute the six pieces whose construction inputs live in the repo.
+        // This anchors the snapshot to real replay arithmetic, not just JSON IO.
+        let spec: crate::spec::PlateSpec =
+            serde_json::from_str(include_str!("../../../fixtures/calibration/cal1.json")).unwrap();
+        let reference = replay_reference();
+        for specimen in &spec.specimens {
+            let bytes = crate::build::specimen(specimen, &spec.head)
+                .to_bytes()
+                .unwrap();
+            let model = plinth_chitubox::parse(&bytes).unwrap().models.remove(0);
+            let output = if model.supports.is_some() {
+                native(&model).unwrap()
+            } else {
+                solid(&model, &specimen.id).unwrap()
+            };
+            let expected = reference["pieces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == specimen.id)
+                .unwrap();
+            assert_replay_bits(&output["maxima"], &expected["maxima"]);
+        }
+    }
+    #[test]
     fn displayed_replay_fields_use_additive_not_larger_tributary() {
         let mut row = json!({"replay":{"maxima":{
             "additive":{"ratio_U":311.22,"contact_M":0,"layer_M":116},

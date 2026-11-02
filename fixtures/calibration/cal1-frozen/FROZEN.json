@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "seed": 20261102,
+  "project_sha256": "91611c85a661f5caf77704898ff8b04ff5ef69c05d5d6b1b024b65a72ceb28b1",
+  "goo_sha256": "28d7e12515674824e6bb3fa5725a1df2de819886b04b1b72e14df5e9808b4b2c",
+  "project_file": "/Users/craig/code/hughescr/dnd-campaigns/plinth-review/2026-11-02-cal1-plate/CAL1-plate-calibration-not-print-candidate.chitubox",
+  "goo_file": "/Users/craig/code/hughescr/dnd-campaigns/plinth-review/2026-11-02-cal1-plate/cal1.goo",
+  "superseded_goo_sha256": "fc7540e071e0a16f2e8dc179af5c640f2793b281067862dab09697912f313d94",
+  "scope": "Frozen evidence, not a print release. C4 deferred; no physical outcomes.",
+  "float_policy": "serde_json float_roundtrip enabled; replay regenerated from current source on the frozen A1-era project; all numeric leaves bit-identical to superseded replay output. Replacement A0 copies reuse that A0 replay after written-geometry equality."
+}
