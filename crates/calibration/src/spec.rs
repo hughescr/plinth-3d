@@ -101,14 +101,21 @@ fn expected(id: &str) -> crate::Result<Expected<'_>> {
     let square = vec![[-1.25, -1.25], [1.25, -1.25], [1.25, 1.25], [-1.25, 1.25]];
     let row = vec![[-4.5, 0.0], [-1.5, 0.0], [1.5, 0.0], [4.5, 0.0]];
     Ok(match id {
-        "B-100" => (id, Body::Block, square, vec![0.242; 4]),
-        "S-100" => (id, Body::Strip, row, vec![0.242; 4]),
-        "S-324" => (id, Body::Strip, row, vec![0.135; 4]),
+        "B-100" => (id, Body::Block, square, vec![crate::plate::WAIST_100; 4]),
+        "S-100" => (id, Body::Strip, row, vec![crate::plate::WAIST_100; 4]),
+        "S-324" => (id, Body::Strip, row, vec![crate::plate::WAIST_324; 4]),
         "W" => (
             id,
             Body::Witness,
             (0..6).map(|i| [i as f32 * 2.5 - 6.25, 0.0]).collect(),
-            vec![0.135, 0.135, 0.135, 0.242, 0.242, 0.242],
+            vec![
+                crate::plate::WAIST_324,
+                crate::plate::WAIST_324,
+                crate::plate::WAIST_324,
+                crate::plate::WAIST_100,
+                crate::plate::WAIST_100,
+                crate::plate::WAIST_100,
+            ],
         ),
         "K-15" => (id, Body::K15, vec![], vec![]),
         "K-60" => (id, Body::K60, vec![], vec![]),

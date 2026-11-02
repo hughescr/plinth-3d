@@ -1,6 +1,6 @@
 # Calibration print plan: Light on Round 25, and thin strips against compact bodies (plate CAL-1)
 
-Status: individual owner slices measured, 2026-11-01; corrected A1b awaits the owner's new slice. The full plate is not assembled. Owner rulings are in §6.5. Nothing here is printed until the owner says yes. Remaining owner questions are in §11. It informs the FR-20a load model (`docs/design/step11-construction.md` §4) and PRD §7 (P4, P5). It does not calibrate the whole model.
+Status: full 16-piece plate assembled and written-mesh checks measured, 2026-11-02. A1 is corrected A1b; the owner's individual slice confirms zero islands and six qualifying necks. The retuned assembled project still needs ChituBox open/save/slice validation, actual sliced measurements, full load-model replay and independent review. **Not ready for a physical print.** Owner rulings are in §6.5; only resin lot and tank temperature remain open in §11. Nothing here is printed until the owner says yes. This informs the FR-20a load model (`docs/design/step11-construction.md` §4) and PRD §7 (P4, P5); it does not calibrate the whole model.
 
 **Labels on numbers** (as in the step-11 design):
 
@@ -10,7 +10,7 @@ Status: individual owner slices measured, 2026-11-01; corrected A1b awaits the o
 - **[C]** ChituBox convention or vendor data;
 - **[U]** unmeasured estimate; never decides alone.
 
-Piece counts, sizes, sections and resin in this document are planning values **[S]/[U]**. The feasibility step (§6.4) and the replay of the written files replace them before printing. Where the measured values differ, the design is changed openly and the change is recorded; ratios are never changed silently.
+Written counts, footprints and sections labelled **[M]** are measurements of the emitted files. Predicted indices and the resin estimate remain **[U]**; they are not assembled-slice or physical-print measurements. The remaining feasibility work (§6.4) and replay replace those predictions before printing. Where measurements require a redesign, change the geometry, never silently change a rung ID or a rule.
 
 ---
 
@@ -67,24 +67,24 @@ This plate tests the Light layout directly and looks at the first reading. It do
 
 ## 3. The pieces
 
-There are two bands, front and back. Each holds one complete set of 8 pieces. **Planning total: 16 pieces.**
+There are two bands, front and back. Each holds one complete set of 8 pieces. **Written plate total: 16 pieces [M].** This is a calibration plate, not a production print candidate; it has not been physically printed.
 
 ### 3.1 Round 25 copies (4: A0 ×2, A1 ×2)
 
 | ID | Supports | Purpose |
 |---|---|---|
 | **A0** (front and back) | ChituBox Light exactly as ChituBox made it (17 contacts) | Aim (a): direct survival test. The compact full-area law makes a clear fail call (additive 313 ≥ 92). Nothing makes an opposing clear call |
-| **A1** (front and back; current candidate A1b) | A0 with only the 10 main cone start radii and their canonical meshes changed. Start diameter is normally 0.104 mm; A1b uses 0.140 mm at cone record 3 and 0.200 mm at record 5 to support the ball's first pixels. Balls, every endpoint, cone ends and lengths, columns, branches and raft unchanged | Aim (a): does a thinner exposed neck at the underside heads change survival? |
+| **A1** (front and back; corrected A1b) | A0 with only the 10 main cone start radii and their canonical meshes changed. Start diameter is normally 0.104 mm; A1b uses 0.140 mm at cone record 3 and 0.200 mm at record 5 to support the ball's first pixels. Balls, every endpoint, cone ends and lengths, columns, branches and raft unchanged | Aim (a): does a thinner exposed neck at the underside heads change survival? |
 
-**What A1 changes [M].** The written axis-normal minimum with the initial 0.052 mm start radius was 0.038954 mm² against A0's 0.151371 mm² (×3.886). That is not the horizontal section the printer forms. In the owner's slices, eight of ten necks meet ×2; cone records 7 and 9 give only ×1.478 and ×1.494 and are observations, not C4 scores. The sampled comparison uses the minimum isolated blob in the nearest labelled layer and its immediate neighbours at each file's written neck station. Grey-weighted and lit-any areas are identical for these full-intensity support blobs.
+**What A1 changes [M].** A1 is the corrected A1b. The eight 0.052 mm start-radius heads have a written axis-normal minimum of about 0.038954 mm² against A0's 0.151371 mm² (×3.886); records 3 and 5 have wider starts for continuity. Axis-normal area is not the horizontal section the printer forms. The owner's A1b slice has **zero islands** and **six of ten** necks qualify by horizontal sliced area. The frozen qualifying cone records are **1, 11, 13, 15, 17, 19** (ratios ×2.396, ×3.089, ×2.124, ×2.131, ×3.349, ×3.341). Records **3, 5, 7, 9** are observations only (×1.905, ×1.380, ×1.478, ×1.494); they cannot decide C4. Lit-any and grey-weighted areas and ratios are identical for these full-intensity support blobs. The comparison takes the minimum isolated blob in the nearest labelled layer and its immediate neighbours at each file's written neck station, as specified by the slice-measurement protocol.
 
-**A1b continuity correction [M/U].** The inclined thin cone let the low cap of the unchanged contact ball at record 4 start separately at layer 62 (label 3.10 mm; midpoint 3.075 mm), near cone record 5. A0's wider cone carries this cap. The builder now requires the written cone/ball pair to overlap below at every midpoint on the 14×19 µm, 0.05 mm grid before emitting each thinned cone. It tests both centre-filled and cell-touching raster boundaries. This selects start radii 0.070 mm at record 3 and 0.100 mm at record 5; the other eight remain 0.052 mm. All 525 layers of the complete A1b written mesh have zero islands under both checks **[M]**. The local raster is not ChituBox: its cell-touching baseline finds the same original island layer and bounds but eight pixels instead of ChituBox's six. **A1b needs the owner's new slice to confirm continuity and re-qualify each neck [U].** No tip moves and no ball changes.
+**A1b continuity [M].** The builder requires the written cone/ball pair to overlap below at every midpoint on the owner's 14×19 µm, 0.05 mm grid under both centre-filled and cell-touching boundaries. This selects start radii 0.070 mm at record 3 and 0.100 mm at record 5; the other eight remain 0.052 mm. All 525 layers of the complete A1b written mesh have zero islands under both checks; the owner's independent A1b slice also has zero islands. No tip moves and no ball changes. Placement preserves the source raster phase by moving only whole pixel steps; the written assembled plate also has zero midpoint-grid islands (§4). Its ChituBox slice is still required [U].
 
 The lip contacts stay limited by their unchanged patches (0.03–0.04 mm²), so **A1 does not change the lip**. Under the orchestrator ruling in §5/§6.4, keep A1 if at least six of the ten necks qualify by horizontal sliced area. Otherwise both A1 slots become A0 copies and aim (a) reduces to "does A0 survive, n = 4".
 
 ### 3.2 Matched compact and strip coupons (3 per band)
 
-**Bodies.** Both are 5.0 mm tall (100 layers), on 4 contacts, lift 5.0 mm. The nominal layer area is 18.0 mm²; the written block is 18.0625 mm² (4.25²), and the strip is 18.0 mm². Their measured sliced areas and indices are recorded below:
+**Bodies.** Both are 5.0 mm tall (100 layers), on 4 contacts, lift 5.0 mm. The nominal layer area is 18.0 mm²; the written block is 18.0625 mm² (4.25²), and the strip is 18.0 mm². The current written waist dimensions and predicted indices are recorded below; the measured body-slice areas are inputs, not assembled-slice results:
 
 - **Block** (`B`): 4.25 × 4.25 mm. Contacts at the corners of a 2.5 mm square.
 - **Strip** (`S`): 1.5 × 12.0 mm, long side along X (like the Round 25 layers). Contacts in a row, 3.0 mm apart, 1.5 mm in from each end.
@@ -101,17 +101,19 @@ The two bodies differ in more than shape. Contact arrangement (square against ro
 
 Only the waist diameter changes. At every rung the waist is the narrowest section on the load path, and its section is the 16-gon value 3.0615 r² **[M]**. Patch, junction, cone and column are all larger.
 
-| ID | Body | Waist diameter | Design waist section | Nominal index | As-sliced index [M] | Compact-law call at measured index |
+| ID | Body | Written waist diameter [M] | Written waist section [M] | Nominal index | Predicted as-sliced index [U], each band | Compact-law call, conditional on slice confirmation |
 |---|---|---|---|---|---|---|
-| **B-100** | block | 0.242 mm | 0.0448 mm² | 100 | 88.43–89.36 | no clear call (<92) |
-| **S-100** | strip | 0.242 mm | 0.0448 mm² | 100 | 89.76–90.72 | no clear call (<92) |
-| **S-324** | strip | 0.135 mm | 0.0139 mm² | 324 | 278.12 (about 280) | clear fail |
+| **B-100** | block | 0.229 mm | 0.0401366 mm² | 100 | 95.84–99.79 | predicted clear fail (≥92); assembled slice Unverified |
+| **S-100** | strip | 0.229 mm | 0.0401366 mm² | 100 | 95.67–101.32 | predicted clear fail (≥92); assembled slice Unverified |
+| **S-324** | strip | 0.125 mm | 0.0119589 mm² | 324 | 314.10–335.66 | predicted clear fail; assembled slice Unverified |
 
-**As-sliced arithmetic [M], not a measured load law.** The native coupon waists are full-intensity and slice about 11–20% larger than their design/written sections: B 0.051072–0.052668 mm², S-100 0.049742–0.051338 mm², S-324 0.016226–0.016758 mm² over labelled layers 4.40–4.60. Lit-any equals intensity-weighted area there. Each index above is the largest lit-any body-layer area divided by four and by that contact's minimum waist area across those five layers; the range is over the four contacts. Sliced body areas are 18.254250 mm² (B) and 18.051026 mm² (S). The equal quarter-share is P4 arithmetic, not measured sharing. Keep the nominal IDs, but state the measured index beside them in predictions and results. At these indices C1 has no compact-law clear-fail call under the fixed ≥92 rule; do not claim a reversal of a call that was not made.
+**Prediction arithmetic [U], grounded in owner-sliced measurements [M].** Retune the heads, not the IDs. The measured native waist inflation is 11–20% by area; the 100-rung targets must remain above 92 with margin after that inflation. The predictions use two methods: (1) apply the measured native slice/mesh inflation range at the matching waist size to the new written mesh section; (2) calibrate the original midpoint cell-touching grid area to that contact's native sliced waist area, then apply that factor to the new written grid area. The table gives the envelope of both methods over all five labelled layers 4.40–4.60 and all four contacts. The mesh-inflation-only estimates are B 96.76–99.79, S-100 98.17–101.32 and S-324 314.10–324.40. These are predictions, not measured assembled-slice indices or certified error bounds. Minimum predicted margins above 92 are 3.84 (B) and 3.67 (S).
 
-**Formation load.** The ball's widest layer (0.196 mm², its equator, 0.12 mm below the body) prints on the waist before the body starts. That puts a formation index of about 4.4 on the 0.242 mm waist and about 14 on the 0.135 mm waist **[U]**. The W witness measures whether that forms.
+The measured unchanged body maxima used in both methods are 18.254250 mm² (B) and 18.051026 mm² (S). Each is divided by four and the predicted waist area. The equal quarter-share is P4 arithmetic, not measured sharing or a plinth load-model replay. The 324 rung also needed retuning: its measured slice was 14% below its nominal value, outside a declared ±10% closeness criterion [S]. The retuned prediction is near 324 by that criterion. The old-size measurements remain raw inputs in `input-measurements/`, not current rung results. Replace these predictions with the assembled slice's lit-any and grey-weighted measurements before printing.
 
-**W, formation witness (1 per band).** Six free-standing waisted heads with no body on them, built exactly as above: three with the 0.135 mm waist, three with the 0.242 mm waist. They show whether the ball forms on each waist under its own formation load only.
+**Formation load.** The ball forms on the waist before the body starts. Formation-load ratios for the retuned heads remain Unverified until measured in the assembled slice. W directly tests whether the balls form.
+
+**W, formation witness (1 per band).** Six free-standing waisted heads with no body on them, built exactly as above: three with the 0.125 mm waist, three with the 0.229 mm waist. Their written sampled minimum sections are 0.0119588–0.0119589 and 0.0401366 mm² [M]. They show whether the ball forms on each waist under its own formation load only.
 
 Each coupon is read first as **whole-coupon survival** (present / partly present / gone). The break site is a second, preregistered reading (§7.4).
 
@@ -153,11 +155,18 @@ These are replication controls. They establish only whether these two controls r
 - Units and single pieces are shuffled within each band by a seeded random order, and the seed is recorded. Left and right inside each pair are random too.
 - Front-to-back position was bounded at about one ×1.5 step on plate 4 **[M]**; the duplicated bands show its effect here.
 
-**Space [U].** Footprints with supports: Round 25 about 30 × 22 mm; block about 8 × 8; strip about 16 × 6; cap control about 10 × 10; W about 10 × 4. One band needs about 140 mm of the 211.68 mm, with 6 mm between pieces.
+**Written layout [M].** Seed **20261102**; xorshift64 and Fisher–Yates over six units per band, with random left/right within both pairs before the unit shuffle. Left to right in the top-view map:
 
-**Combined layer profile.** All pieces cure in one exposure per layer, so the plate-wide cured area per layer changes the peel and the heat at each height. The replay records the plate's total cured area for every layer. Coupon bodies end near plate z 10 mm and cap controls near 9.7 mm; the Round 25 copies run to about 28 mm. Both bands see the same profile. It is reported, not modelled.
+- **Front:** S-100, B-100, W, A1, A0, K-60, K-15, S-324.
+- **Back:** A1, A0, K-60, W, S-324, B-100, S-100, K-15.
 
-**Labels and scale.** IDs and one 10 mm scale bar per band are engraved on raft tabs, inside the first 1.2 mm above the plate. That is outside every measured layer. A top-view plate-map picture is the main key.
+Measured footprints including every native support: A 24.9991 × 14.6856 mm, B 4.7000 × 4.7000 mm, S 12.0000 × 2.2000 mm, K 8.0000 × 8.0000 mm, W 15.0000 × 2.4000 mm. Band spans are 151.8880 mm (front) and 151.8988 mm (back). Every piece reaches the plate and fits within the build area. The minimum conservative bounding-box gap is **6.017721 mm**; it is a lower bound on mesh separation, not an exact nearest-triangle distance. Placement reserves two pixel widths beyond 6 mm, then quantizes translations to whole owner-grid pixel steps to preserve each source's raster phase. The final written plate has **zero islands in all 525 midpoint layers under both centre-filled and cell-touching checks [M]**. That is not a ChituBox slice or proof of a physical print.
+
+**Native supports [M].** Each of the 16 written models is compared byte-for-byte with its written individual project after undoing only the model name and XY translation. Body triangles, support fields and meshes, attributes, presets, raft records and Z translation are retained. A1's source is A1b. The eight individual projects are included with the plate; only B/S/W waist sizes differ from the feasibility set.
+
+**Combined layer profile [M].** `area-profile.json` records every written-mesh midpoint layer on the owner's grid, under both boundary conventions. The maximum total areas are 771.620771 mm² (centre) and 778.510171 mm² (touch), both at layer 4, midpoint 0.175 mm. These are mesh-grid witnesses, not ChituBox cured-pixel measurements or a peel/heat model. Coupon bodies end at 10 mm, cap controls at 9.6/9.7 mm and the A copies at 26.230127 mm [M]. The assembled GOO must replace the grid profile before printing.
+
+**Labels and scale.** Engraved IDs and physical scale bars are **not implemented**: a safe editable native raft-tab cut has not been established by ChituBox round-trip. Use the labelled top-view `plate-map.png`; it marks the front edge in plain language. Its 10 mm drawing scale is not a printed part. Use a ruler in print photos.
 
 **Real prints.** None are planned on this plate.
 
@@ -169,11 +178,11 @@ These are replication controls. They establish only whether these two controls r
 
 Only these are scored.
 
-**C4 orchestrator ruling (2026-11-01) [S].** Judge ×2 **per neck on the horizontal sliced-layer area**, which is what the printer forms, not the axis-normal mesh section or the cone radius field. Exclude a neck below ×2 from C4 and report it only as an observation. Keep A1 as A1 if at least **6 of 10** main necks qualify; with fewer than six, replace both A1 slots by A0. The initial owner slice qualifies eight: records 7 and 9 (×1.478/×1.494) are excluded. The current corrected A1b must be sliced and its qualification list frozen before printing; do not reuse the earlier list without checking. A whole-piece outcome or a failure at an excluded neck does not become a scored qualifying-neck effect.
+**C4 orchestrator ruling (2026-11-01) [S].** Judge ×2 **per neck on the horizontal sliced-layer area**, which is what the printer forms, not the axis-normal mesh section or the cone radius field. Exclude a neck below ×2 from C4 and report it only as an observation. Keep A1 as A1 if at least **6 of 10** main necks qualify; with fewer than six, replace both A1 slots by A0. The corrected A1b owner's slice qualifies exactly six; the frozen qualifying records are **1, 11, 13, 15, 17, 19**. Records **3, 5, 7, 9** are excluded from C4 and retained only as observations. A whole-piece outcome or a failure at an excluded neck does not become a scored qualifying-neck effect.
 
 | # | Contrast | Compact full-area law (P4) | Other reading | Scored as |
 |---|---|---|---|---|
-| **C1** | B-100 against S-100, same band, ×2 bands | No clear call: measured indices 88.43–90.72 are below 92 | Assumed scenario, no clear call: the strip survives where the block fails | Per band: the (block, strip) outcome pair, with measured indices |
+| **C1** | B-100 against S-100, same band, ×2 bands | Predicted clear fail: retuned envelopes 95.67–101.32; confirm from the assembled slice before making a clear-call claim | Assumed scenario, no clear call: the strip survives where the block fails | Per band: the (block, strip) outcome pair, with measured indices |
 | **C2** | S-324, ×2 bands | Clear fail | None: a direct survival test | Outcome per band |
 | **C3** | A0, ×2 bands | Clear fail (additive 313) | None: a direct survival test | Outcome per band |
 | **C4** | A0 against A1, same band, ×2 bands; at least 6 of 10 main necks must qualify (§6.4) | Clear fail for both | None | Per band: outcome pair and failure site, scored only at qualifying necks; excluded necks are observations |
@@ -192,11 +201,15 @@ Applied to every contrast:
 
 - A calibration entry point (a CLI example or binary, not a flag on the production command) reads a **specimen spec** (JSON): body, pose, lift, contact sites, the waisted-head dimensions (§3.2), the band and the shuffle seed.
 - The step-11 construction API cannot build a waisted head. It allows one cone from the ball centre with end radius ≥ 0.25 mm. So this entry point writes the native records directly with the shape kernel in `geom`: ball, waist rod, junction ball, cone, joint ball, column, base, raft. Owner ruling R1 (§6.5) allows this.
-- W is a solid body with no native supports, as for K. ChituBox v1.4.0 refused the native-support-only W with no body triangles. Its replacement is one closed, outward-oriented surface: six radial unions of contact ball, waist, junction ball, cone, joint ball, column and base, welded to a common 0.20 mm raft. The balls end free; there is no block above them. The waist remains at 4.40–4.60 mm above the plate. The owner opened and sliced the replacement; its six waists and free tips form connected pixel columns in w.goo **[M]**. This is not a physical print result.
+- W is a solid body with no native supports, as for K. ChituBox v1.4.0 refused the native-support-only W with no body triangles. Its replacement is one closed, outward-oriented surface: six radial unions of contact ball, waist, junction ball, cone, joint ball, column and base, welded to a common 0.20 mm raft. The balls end free; there is no block above them. The waist remains at 4.40–4.60 mm above the plate. The solid construction opened and sliced in the feasibility check [M]. The current retuned six waists have connected pixel columns in the written plate's midpoint-grid witness [M]; their ChituBox slice is Unverified. Neither is a physical print result.
 - The independent checker then reports H1, H2, H3, H4, H6 and H9 on the written file, with the K/W exceptions in §6.3. Its body checks do not measure the minimum section of an STL arm or waist: the calibration section measurement does that separately from the written triangles.
 - Orchestrator ruling: the A1 '≥ ×2 thinner' rule is per-neck **horizontal sliced area**, with at least six qualifying main necks (§5/§6.4). The axis-normal mesh ratio does not decide C4.
 - The planner, the P5 load check and the step-11 tip-family rule are not applied.
 - Every file and report says "calibration piece, not a print candidate for any model".
+
+**Reproducible entry point.** `crates/calibration/src/bin/cal1-plate.rs` accepts `<cal1.json> <read-only-individual-directory> <measured-summary.json> <empty-output-directory>`. It refuses to overwrite a nonempty directory. The measurement directory must also contain `method.json` and `a1b.json`; the individual directory must contain the original projects and `a1b.goo` for its exact grid. These owner inputs are not needed by ordinary unit tests.
+
+Build and test through `scripts/t`. Run the assembly evidence job explicitly with `cargo run -p plinth-calibration --bin cal1-plate -- <cal1.json> <read-only-individual-directory> <measured-summary.json> <empty-output-directory>`. It writes the project, JSON evidence and SVG map; render the latter to PNG with `rsvg-convert --unlimited <output>/plate-map.svg -o <output>/plate-map.png`. Ordinary `scripts/t L1 calibration` runs the source-controlled tests without owner inputs.
 
 ### 6.2 Cap controls
 
@@ -208,13 +221,13 @@ The cap controls are solid bodies (STL) built to §3.3, with 48-sided sections. 
 |---|---|---|---|---|
 | H1 patch ≤ 0.50 mm² | Kept (about 0.15) | Not applicable (no contact) | Not applicable (no contact) | Reported, not enforced |
 | H2 no fused contacts | Kept | Not applicable | Not applicable | Reported |
-| H3 print-order continuity | No islands in the owner's slices **[M]** | No islands in the owner's slices **[M]** | Checker unverified; all 103 owner-sliced layers have no islands **[M]** | Reported; A1b awaits a new owner slice |
+| H3 print-order continuity | Retuned plate grid: no islands [M]; new owner slice required [U] | Individual owner slices and plate grid: no islands [M] | Retuned plate grid: no islands [M]; checker unverified and new owner slice required [U] | A1b owner slice: no islands [M]; assembled slice required [U] |
 | H4 lift ≥ 5.0 mm | Kept | **Exception:** rests on the plate on its own base, as on plate 6 | **Exception:** solid body rests on its own raft on the plate, as for K | As made |
 | H6 gap ≥ 0.3 mm | Kept | Not applicable | Not applicable (no native supports) | Reported |
-| H9 ≥ 0.10 mm across | Kept (thinnest waist 0.135 mm) | **Measured** (thinnest arm 0.798 mm) | Written waist sections measured separately (0.135/0.242 mm design); checker H9 not applicable to body-only mesh | Reported (A0: 0.098 mm) |
+| H9 ≥ 0.10 mm across | Kept: written minimum 16-gon caliper widths 0.122598 / 0.224600 mm [M] | **Measured** (thinnest arm 0.798 mm) | Written minimum sections measured for retuned 0.125/0.229 mm heads; checker H9 not applicable to body-only mesh | Reported (A0: 0.098 mm); R3, not a production exception |
 | P5 and the "unprintable as is" class | **Deliberately exceeded** | Exceeded (K-60) | — | Exceeded as made |
 
-**Calibration-only exception (K and W).** K and W are not support layouts for a model, so H1, H2 and H6 do not apply, and both break H4 by design. The W checker verdict is **FAIL** (H4); its report lists H3 and H8 as **Unverified**, H5 topology and H7 body preservation pass, and H1/H2/H6/H9 are not applicable. Separately, the owner has opened and sliced W and its written GOO has no unsupported blobs **[M]**; this does not change the checker's scope or prove a physical print. This is not a print-candidate pass. The calibration checks and independent report must distinguish two things:
+**Calibration-only exception (K and W).** K and W are not support layouts for a model, so H1, H2 and H6 do not apply, and both break H4 by design. The W checker verdict is **FAIL** (H4); its report lists H3 and H8 as **Unverified**, H5 topology and H7 body preservation pass, and H1/H2/H6/H9 are not applicable. The owner-sliced feasibility W had no unsupported blobs [M]. The retuned W has zero islands in the assembled midpoint-grid witness [M], but its new ChituBox slice is still required [U]. Neither result changes the checker's scope or proves a physical print. This is not a print-candidate pass. The calibration checks and independent report must distinguish two things:
 
 - the minimum load-bearing section along every load path (arm, flare and cap for K; raft through the contact-ball equator for W), measured from written triangles by the calibration section tool. W's free ball crown above its equator is not a loaded neck and tapers to a point. The six W paths meet ±10% of their design areas; the same minimum plateau includes 4.40–4.60 mm. This is sampled measurement, not a certified continuous lower bound;
 - print-order continuity, reported independently; **Unverified** is not a pass. W's closed-surface topology test does not prove sliced-layer continuity.
@@ -223,29 +236,30 @@ The exception applies only to pieces labelled K or W in the calibration entry po
 
 ### 6.4 Feasibility, proved before the owner is asked (mandatory)
 
-1. **One coupon per waist size** (0.242 and 0.135 mm), built and written.
-   - On the written mesh, measure the minimum load-bearing section along the path. It must be at the waist and within ±10 % **[S]** of the design section.
-   - Open and slice in ChituBox. Measure both lit-any and intensity-weighted waist area in the sliced layers. It must agree with the mesh within one pixel row; define that boundary tolerance explicitly rather than replacing it with a percentage. The measured native waists are 11–20% larger by area (§3.2); the one-row criterion is not yet declared passed.
-   - Compute each rung's as-sliced index from its sliced body and waist areas and state it next to the nominal ID/index. Current individual files give B-100 88.43–89.36, S-100 89.76–90.72, S-324 278.12 **[M]**. Recompute for the assembled plate.
-   - If either check fails, redesign the head and record the change. Do not relabel the rung.
+1. **One coupon per waist size** (0.229 and 0.125 mm), built and written.
+   - Re-tuned by reducing only waist diameters; nominal rung IDs unchanged. The 100 waists are 0.229 mm, and W uses the same two retuned sizes. S-324's measured index was 14% low, outside the declared ±10% closeness criterion [S], so its waist is 0.125 mm.
+   - Written sampled waist sections are 0.0401366 and 0.0119589 mm² [M], at the waist and within ±10% [S] of design. Written minimum opposing-face widths are 0.224600 and 0.122598 mm [M], both above H9's 0.10 mm. R1 permits calibration test pieces past production load limits; no new H9 exception is used. A0/A1b stay under R3's comparison-copy rule.
+   - Two prediction methods (§3.2) use the owner's measured waist inflation and the new written midpoint-grid areas. Per band: **B-100 95.84–99.79, S-100 95.67–101.32, S-324 314.10–335.66 [U]**. Thus both 100-rung predictions are above 92 with margin, and S-324 is near 324; this is not an assembled-slice measurement or a replay.
+   - Open and slice the assembled project in ChituBox. Measure lit-any and intensity-weighted waist area in every labelled layer 4.40–4.60. Define the one-pixel-row boundary tolerance explicitly; that agreement criterion is **Unverified**, not replaced by a percentage. Replace predictions with measured assembled-slice indices and inspect formation layers before printing.
+   - If a check fails, redesign the head and re-measure. Never relabel the rung.
 2. **A1, exposed-section check.** Plinth makes the edit (§6.5). It is not enough that a field changed.
    - Measure the exposed narrowest section of the 10 edited tips on the written mesh and in the sliced layers, against A0.
    - A field-by-field comparison must show that only those 10 cone fields and their meshes changed.
    - ChituBox must open and save A1 with the fields intact. This depends on step-11 §2 item 1: whether ChituBox slices the stored mesh or rebuilds from the fields.
    - Judge ×2 per neck from the **horizontal ChituBox sliced area**, with lit-any and grey-weighted areas stated, not from axis-normal mesh diagnostics. Freeze the qualifying/excluded record list. Necks below ×2 are observations only and cannot decide C4. Keep A1 with at least **6 of 10** qualifying necks; with fewer than six, A1 becomes a second A0 (§3.1).
-   - A1b's own midpoint-grid witness reports no islands, but the original A1 island proves that mesh/field agreement alone is insufficient. The owner must slice A1b to confirm no island and re-measure all ten necks before this step passes.
-3. **W and K** open and slice. Their minimum sections and continuity are as in §6.3.
-4. **The assembled plate** opens and slices (H8). Record ChituBox's resin volume and print time.
+   - **A1b owner slice [M]: zero islands; 6/10 qualify.** Frozen qualifying cone records **1, 11, 13, 15, 17, 19**; observations only **3, 5, 7, 9**. Ratios and lit-any/grey-weighted equality are in §3.1 and the raw input measurements. A1b is now the A1 piece in both bands. The assembled placement preserves raster phase and native bytes; the new assembled slice must still confirm continuity. A1b-specific open/save field preservation remains Unverified until a new saved project is compared; the earlier A1 round-trip is not silently transferred to A1b.
+3. **W and K** open and slice. Their written minimum sections and continuity are as in §6.3. K is byte-preserved from the feasibility files; the retuned W needs its new slice.
+4. **The assembled plate** opens and slices (H8). Record ChituBox's resin volume and print time. The project, written-mesh checks and map are in `plinth-review/2026-11-02-cal1-plate/` (sibling of the slot root's parent). H8, assembled GOO measurements, volume and time are **Unverified**. Ask only for open/slice validation now, not a physical print.
 5. **Inspect the critical sliced layers:**
    - each coupon's waist layers, ball equator layer and first body layers;
    - the K arms, flares and first cap layer;
    - A0 against A1 at the edited tips;
    - the A0 lip trio and the two branch rods with the highest rigid-lever ratio.
-6. **Freeze the SHA-256 hashes** of the `.chitubox` project and of the sliced printer file. Results are valid only for those two files.
-7. **Replay every piece** and write the prediction table (§7.1).
-8. **Cross-family review** (PRD §7 rule 2) of the spec, the feasibility measurements and the replay.
+6. **Freeze the SHA-256 hashes** of the `.chitubox` project and of the sliced printer file. The written project hash is `7d507a3dfa3128278d4717ce132de3128341d9e1aa044d2ca8b7df3d4df358cc` [M]. The assembled sliced-file hash is **Unverified** until `cal1.goo` exists. Results are valid only for those two files.
+7. **Replay every piece** and write the prediction table (§7.1). `predictions.json` has all 16 rows and scoped written-section diagnostics, but the full plinth load-model replay, layer/contact maxima and calls are **Unverified**. The available foreign-support adapter assumes conventional native head chains and identical model bodies; it has not been adapted and tested for the extra waisted-head junctions or solid K/W paths. Quarter-share arithmetic is not passed off as a replay. Complete and commit the real replay before asking for a print.
+8. **Cross-family review** (PRD §7 rule 2) of the spec, feasibility measurements and replay is **Unverified** in this assembly step. It remains a pre-print requirement.
 
-### 6.5 Owner rulings for this plate (2026-11-01) [O]
+### 6.5 Owner rulings for this plate (2026-11-01/02) [O]
 
 These apply only to the labelled calibration plate CAL-1, never to the production path:
 
@@ -254,6 +268,8 @@ These apply only to the labelled calibration plate CAL-1, never to the productio
 - **R3.** The four Round 25 copies are ChituBox comparison copies. Plinth's limits are reported for them, not enforced.
 - **A1 edit.** Plinth makes the A1 edit to the support records, not the owner in ChituBox. The §6.4 item 2 checks still apply: the edit must survive a ChituBox save, and the exposed neck must be thinner in the sliced pixels.
 - **Light.** "Light prints fine" is the owner's judgement, not a print. A0 is untested.
+- **Resin.** Anycubic WW ABS-Like Clear, using the ChituBox profile already used for the owner's feasibility slices.
+- **Plate size.** Sixteen calibration pieces at about 5–6 mL is accepted. Actual assembled resin volume and print time must still come from ChituBox; acceptance of the estimate is not a volume measurement.
 
 ---
 
@@ -279,12 +295,12 @@ Coupons and K-60 are meant to fail. On this printer, as the owner describes it:
 The owner accepts this risk as minimal. Consequences for scoring:
 
 - A failed piece stays at its own site, so neighbouring outcomes stay scorable. No outcome is marked uncertain because another piece failed.
-- The tank-clean sheet shows which pieces left remnants on the film, and where. That helps locate where a piece separated: at the waist, at the patch, or higher in the body. **The owner photographs the tank-clean sheet, with the scale bar or a ruler, before discarding it.**
+- The tank-clean sheet shows which pieces left remnants on the film, and where. That helps locate where a piece separated: at the waist, at the patch, or higher in the body. **The owner photographs the tank-clean sheet with a ruler before discarding it.**
 
 ### 7.4 Recording, kept small
 
 - **Before removing anything:**
-  - One photo per band from the front and one from above, with the scale bar in view, before washing.
+  - One photo per band from the front and one from above, with a ruler in view, before washing.
   - Run the tank-clean exposure and photograph the cured sheet before discarding it (§7.3). Note which remnants match which pieces, using the plate map.
   - After washing, check the basket for lost pieces and flakes.
 - **One overview sheet** (the plate-map picture). For every piece, one mark: **present / partly present / gone**.
@@ -305,10 +321,10 @@ The owner accepts this risk as minimal. Consequences for scoring:
 |---|---|
 | K-15 present, K-60 gone (per band) | Those two controls reproduced plate 6. Nothing more |
 | K does not reproduce | Reported beside every result. It does not void A0, A1 or coupon survivals. The direct A0 evidence stands even if K-60 survives |
-| C1: block gone, strip present (and the strip failure not in question) | The strip at index 89.76–90.72 survived where the block at 88.43–89.36 did not. Neither has a compact-law clear call under the ≥92 rule, so this is not a clear-call reversal. Cause not isolated (§3.2) |
+| C1: block gone, strip present (and the strip failure not in question) | State both assembled as-sliced indices. If both are ≥92 as predicted, the strip survival reverses its compact-law clear-fail call; if not, report only the calls actually made at measured indices. Cause not isolated (§3.2) |
 | C1: both gone | No survival separation at this tested level, conditional on formation (W) and on the failure mode at the waists |
-| C1: both present | Both configurations survived at their measured indices near 89–91. Neither had a compact-law clear call at this level |
-| C2: S-324 present | This strip configuration survived at measured index 278.12 (nominal 324) on CAL-1. Observed survival for this configuration only |
+| C1: both present | Both configurations survived at their assembled measured indices. State which compact-law calls those measured indices actually support; do not use predicted values as measurements |
+| C2: S-324 present | This strip configuration survived at its assembled measured index (nominal ID S-324) on CAL-1. Observed survival for this configuration only |
 | C3: A0 present | This Light copy survived on this plate. The compact full-area clear call is reversed for it |
 | C3: A0 failed | Record where, by anatomy, and compare with the replay's top list as an observation. The tank-clean sheet may show where it separated |
 | C4: A0 and A1 present | Both tested configurations survived. Mechanism not established |
@@ -317,7 +333,7 @@ The owner accepts this risk as minimal. Consequences for scoring:
 
 ### 8.2 Intervals
 
-An interval for strips (for example "survived near measured index 90, failed at 278") is stated only under §2 rule 7: monotone across both bands, with waist breaks at the failed rung. State the as-sliced indices beside the nominal rung IDs. Each edge rests on 2 pieces from one plate and one resin.
+An interval for strips, stated using the two assembled measured indices, is given only under §2 rule 7: monotone across both bands, with waist breaks at the failed rung. State the as-sliced indices beside the nominal rung IDs. Each edge rests on 2 pieces from one plate and one resin.
 
 ### 8.3 Validity
 
@@ -362,7 +378,7 @@ Each needs its own controlled pair, with a common formed carrier and a common ac
 
 ## 11. Questions for the owner
 
-The answers of 2026-11-01 are recorded in §6.5 and §7.3. Still open:
+The answers of 2026-11-01/02 are recorded in §6.5 and §7.3. Only these remain open:
 
-1. **Size and resin:** is 16 pieces at about 5–6 mL acceptable?
-2. **Settings:** which resin and lot? The default ChituBox profile at 0.05 mm, with the tank at 30 °C?
+1. **Resin lot number.**
+2. **Tank temperature for this job.**
