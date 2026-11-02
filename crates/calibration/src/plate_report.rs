@@ -304,7 +304,7 @@ pub fn assemble(spec_path: &Path, input: &Path, measured_path: &Path, out: &Path
     )?;
     Ok(())
 }
-fn map(models: &[Model]) -> Result<String> {
+pub fn map(models: &[Model]) -> Result<String> {
     let mut s = String::from(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"2400\" height=\"1660\" viewBox=\"0 0 2400 1660\"><rect width=\"2400\" height=\"1660\" fill=\"white\"/><g font-family=\"Arial, sans-serif\" fill=\"#171717\"><text x=\"120\" y=\"90\" font-size=\"48\" font-weight=\"bold\">CAL-1 • calibration only — not a production print candidate</text><text x=\"120\" y=\"142\" font-size=\"29\">Top view • all 16 pieces • supports preserved • at least 6 mm between pieces • shuffle seed 20261102</text>",
     );
@@ -362,7 +362,7 @@ fn map(models: &[Model]) -> Result<String> {
             x(c[0])
         )?;
     }
-    s.push_str("<text x=\"1200\" y=\"200\" text-anchor=\"middle\" font-size=\"30\" font-weight=\"bold\">BACK EDGE</text><text x=\"1200\" y=\"1470\" text-anchor=\"middle\" font-size=\"36\" font-weight=\"bold\">FRONT EDGE — releases first (−Y in ChituBox)</text><path d=\"M1200 1410 L1200 1440 M1187 1427 L1200 1440 L1213 1427\" fill=\"none\" stroke=\"#171717\" stroke-width=\"4\"/><path d=\"M160 1515v15h100v-15\" fill=\"none\" stroke=\"#171717\" stroke-width=\"4\"/><text x=\"280\" y=\"1535\" font-size=\"25\">10 mm drawing scale — not printed</text><text x=\"120\" y=\"1605\" font-size=\"27\">A1 means corrected A1b. No engraved labels. Match each piece by this map; do not rearrange before slicing.</text></g></svg>");
+    s.push_str("<text x=\"1200\" y=\"200\" text-anchor=\"middle\" font-size=\"30\" font-weight=\"bold\">BACK EDGE</text><text x=\"1200\" y=\"1470\" text-anchor=\"middle\" font-size=\"36\" font-weight=\"bold\">FRONT EDGE — releases first (−Y in ChituBox)</text><path d=\"M1200 1410 L1200 1440 M1187 1427 L1200 1440 L1213 1427\" fill=\"none\" stroke=\"#171717\" stroke-width=\"4\"/><path d=\"M160 1515v15h100v-15\" fill=\"none\" stroke=\"#171717\" stroke-width=\"4\"/><text x=\"280\" y=\"1535\" font-size=\"25\">10 mm drawing scale — not printed</text><text x=\"120\" y=\"1605\" font-size=\"27\">A0-f2 / A0-b2 replace A1 under the plan rule. Original A0 names unchanged. No engraved labels; do not rearrange.</text></g></svg>");
     Ok(s)
 }
 

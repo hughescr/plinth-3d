@@ -286,6 +286,16 @@ fn witness_comparison(project: &Project) -> Value {
     }
 }
 
+fn model_metadata(project: &Project) -> Vec<Value> {
+    project.models.iter().map(|m| {
+        let b = plate::bounds(m);
+        let records = m.supports.as_ref().map(|s| s.records.iter().enumerate().map(|(i, r)| {
+            json!({"record":i,"type":r.record_type.0,"start":r.start,"end":r.end,"r1":r.r1,"r2":r.r2})
+        }).collect::<Vec<_>>());
+        json!({"name":m.name,"translate":m.translate,"offset":goo_grid::offset(m),"bounds":{"lo":b.lo,"hi":b.hi},"records":records})
+    }).collect()
+}
+
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let [project_path, goo_path, output] = args.as_slice() else {
@@ -304,16 +314,11 @@ fn run() -> Result<()> {
     let boxes: Vec<_> = project.models.iter().map(plate::bounds).collect();
     let pitch = goo.header.pitch();
     let pa = pitch[0] * pitch[1];
-    let models: Vec<_> = project.models.iter().map(|m| {
-        let b = plate::bounds(m);
-        let records = m.supports.as_ref().map(|s| s.records.iter().enumerate().map(|(i, r)| {
-            json!({"record":i,"type":r.record_type.0,"start":r.start,"end":r.end,"r1":r.r1,"r2":r.r2})
-        }).collect::<Vec<_>>());
-        json!({"name":m.name,"translate":m.translate,"offset":goo_grid::offset(m),"bounds":{"lo":b.lo,"hi":b.hi},"records":records})
-    }).collect();
+    let models = model_metadata(&project);
     let (shifts, registration) = registrations(&project, &goo, &boxes)?;
     let references = waist_references(&project, &goo, &shifts)?;
     let mut boundary_checks = Vec::new();
+    let mut waist_samples = Vec::new();
     let mut layers = Vec::new();
     let mut islands = Vec::new();
     let mut first: Vec<Option<Value>> = vec![None; project.models.len()];
@@ -336,11 +341,13 @@ fn run() -> Result<()> {
             }
             grouped[i].push(b);
         }
-        if (4.39999..=4.60001).contains(&f64::from(layer.z)) {
+        // R-S324: include the final sampled waist layer at 4.65 mm.
+        if (4.39999..=4.65001).contains(&f64::from(layer.z)) {
             for reference in &references {
                 let i = reference.model;
                 let contact = reference.contact;
                 let b = blob_at(reference.xy, &spans, &grouped[i]).ok_or("missing waist blob")?;
+                waist_samples.push(json!({"model":i,"contact":contact,"layer":li+1,"z_top_mm":layer.z,"lit_any_mm2":b.pixels as f64*pa,"weighted_mm2":b.weighted_pixels*pa}));
                 let native: Vec<_> = b.span_ids.iter().map(|&j| spans[j]).collect();
                 let mesh = reference
                     .layers
@@ -361,6 +368,7 @@ fn run() -> Result<()> {
                 );
             }
             let ts = if project.models[i].name.contains("-A0;")
+                || project.models[i].name.contains("-A0-")
                 || project.models[i].name.contains("-A1;")
             {
                 tracks(
@@ -382,13 +390,19 @@ fn run() -> Result<()> {
         previous = spans;
     }
     let witness_comparison = witness_comparison(&project);
+    let narrowest_sections =
+        plinth_calibration::slice_rules::measure(&models, &layers, &waist_samples, pa)?;
+    std::fs::write(
+        out.join("narrowest-sections.json"),
+        serde_json::to_vec_pretty(&narrowest_sections)?,
+    )?;
     std::fs::write(
         out.join("decoded.json"),
         serde_json::to_vec_pretty(&json!({
             "status":"M: owner slice pixels, not cured material or physical loads", "project_path":project_path,"goo_path":goo_path,
             "header":goo.header,"pixel_pitch_mm":pitch,"pixel_area_mm2":pa,"models":models,"first_lit_layer":first,
             "witness_comparison":witness_comparison,"nonzero_grey_histogram":histogram,"islands":islands,"layers":layers,
-            "registration":registration,
+            "registration":registration,"waist_samples":waist_samples,"narrowest_sections":narrowest_sections,
             "registration_method":"Per-piece first-layer native lit-any bounding-box centre minus continuous written first-midpoint section bbox centre, rounded to nearest integer pixel; fit independent of waist/tip layers. Same shift for every layer of that piece; no shape correction.",
             "waist_one_row_boundary_checks":boundary_checks,
             "one_row_definition":"Symmetric mask inclusion in the other mask's one-pixel Chebyshev dilation, X +/-1 and Y +/-1; midpoint centre-filled written waist mesh versus native lit-any blob. Explicit operational interpretation of the plan, not a percentage tolerance or a cure certificate."

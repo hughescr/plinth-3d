@@ -11,7 +11,9 @@ mod plate_sections;
 pub mod replay;
 mod replay_geom;
 mod replay_native;
+pub mod replicates;
 pub mod section;
+pub mod slice_rules;
 pub mod spec;
 pub mod witness;
 #[cfg(test)]
