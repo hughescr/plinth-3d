@@ -338,7 +338,7 @@ The owner accepts this risk as minimal. Consequences for scoring:
   - W: each head's ball is formed or not formed.
   - All four A0 copies: the bottom lip, two branch rods under the lower underside flanks, underside heads and central rib. Each is intact, broken, or part damaged there, marked on the picture by anatomy.
 - **Removal (Round 25 only, separate):** easy / normal / hard per zone, and any damage, with a photo. This is the PRD §6.4 record and is never mixed with print outcomes.
-- The owner sends photos and the marked sheet, or dictates short lines. The orchestrator transcribes them into `reference/experiments/cal-1-results.md` and asks him to confirm the transcript.
+- The owner sends photos and the marked sheet, or dictates short lines. The orchestrator transcribes them into `docs/experiments/cal-1-results.md` and asks him to confirm the transcript.
 
 ---
 
