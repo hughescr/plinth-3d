@@ -1,6 +1,6 @@
 # CAL-1 print results
 
-**Status:** Transcript of the owner's report on 2026-11-09. The owner has not yet confirmed it. Scoring below is proposed, pending owner confirmation and an independent review.
+**Status:** Transcript of the owner's report on 2026-11-09, confirmed by the owner on 2026-11-09. Scoring reviewed cross-family (GPT draft, Claude review) and accepted with fixes.
 
 ## Print record
 
@@ -37,7 +37,7 @@ The outcome is the body or main piece, not the raft or supports. For W it descri
 | Back | S-324 | Gone | Waist [S] | Raft and four cones remain; no ball formed on this waist; see W below. |
 | Back | W | Present | Cannot tell | Before removal: balls on the 3 heads with 0.229 mm waists, none on the 3 with 0.125 mm waists (photo 14). |
 | Back | K-15 | Present | None recorded | Complete. |
-| Back | K-60 | Present | None recorded | Present; the cap looks tilted in photo 07 — owner to check whether the arm is bent or cracked. |
+| Back | K-60 | Present | None recorded | Present, complete. The owner sees no tilt; any slight tilt in photo 07 could have come from washing. |
 | Back | A0 | Gone | Cannot tell | Disc fully detached; supports remain on plate. |
 | Back | A0-b2 | Gone | Cannot tell | Disc fully detached; supports remain on plate. |
 
@@ -67,7 +67,7 @@ The outcome is the body or main piece, not the raft or supports. For W it descri
 
 [O] Support removal by zone, easy / normal / hard (PRD §6.4), was not recorded. The front A0 discs were deformed failures; this removal assessment is not applicable / not recorded.
 
-## Proposed contrasts
+## Contrasts
 
 **Control context for every result below:** [O] K-15 was present and complete in both bands, reproducing plate 6. K-60 was present and complete in both bands, so it did **not** reproduce plate 6, where it was gone. [S] This does not void the A0 or coupon results (plan §8.1).
 
@@ -96,7 +96,8 @@ Copies are in `plate-photos/cal-1/` (HEIC originals converted to JPEG, longest s
 - Clean-out: `plate-photos/cal-1/13-clean-out-sheet.jpeg`.
 - Before removal, from the back edge: `plate-photos/cal-1/14-plate-from-back-before-removal.jpg`; W crops from the full-resolution original: `plate-photos/cal-1/14a-back-W-crop.jpg`, `plate-photos/cal-1/14b-front-W-crop.jpg`.
 
-## Open / owner actions
+## Owner ruling
 
-- Owner: confirm or correct this transcript. Independent review of the proposed scoring remains open.
-- Any ruling on A2 (full-area load for strips) or P5 belongs to the owner (plan §8.4). None is proposed here.
+- Transcript confirmed by the owner (2026-11-09); scoring review done.
+- [O] Ruling, 2026-11-09, after CAL-1: keep the design ratio P5 at 12, and keep assumption A2 (each support contact carries the full area of each cured layer). The owner said: “we should though go with the more-conservative approach, so I think 12 is the right call even if *this* resin can go a little thinner/sparser, let's play it safe rather than have failures on future prints.” Plinth proceeds with its own supports at ratio 12.
+- [O] Plate 6 used a different resin: the PRD records it as printed 2026-07-30 at about 30 °C with Sunlu black resin (owner, 2026-10-30); CAL-1 used Anycubic WW ABS-Like Clear. This is one possible reason K-60 failed on plate 6 but survived here. One piece per band per plate cannot separate resin from other plate-to-plate differences.
