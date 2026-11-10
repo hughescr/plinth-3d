@@ -4,8 +4,9 @@
 use crate::{Result, cal2_spec::Item, goo_grid::Grid, plate, plate::Random};
 use plinth_chitubox::Model;
 
-/// Plate edge margin and the three zones' extra separation, mm.
-const MARGIN: f64 = 1.0;
+/// Plate edge margin and the three zones' extra separation, mm. The margin is the required
+/// 8 mm plus 0.1 mm, because a part moves by whole pixel steps (under 0.05 mm each way).
+const MARGIN: f64 = plate::EDGE_MARGIN + 0.1;
 const SEP: f64 = plate::GAP + 0.1;
 pub const ZONES: usize = 3;
 
@@ -313,10 +314,11 @@ mod tests {
         let p = plan(&items, &foot, 3).unwrap();
         let boxes: Vec<_> = p.slots.iter().map(|s| (s.centre, foot[s.item])).collect();
         for (i, (c, f)) in boxes.iter().enumerate() {
-            assert!(c[0] - f.width / 2.0 >= -plate::BUILD[0] / 2.0);
-            assert!(c[0] + f.width / 2.0 <= plate::BUILD[0] / 2.0);
-            assert!(c[1] - f.height / 2.0 >= -plate::BUILD[1] / 2.0);
-            assert!(c[1] + f.height / 2.0 <= plate::BUILD[1] / 2.0);
+            let m = plate::EDGE_MARGIN;
+            assert!(c[0] - f.width / 2.0 >= -plate::BUILD[0] / 2.0 + m);
+            assert!(c[0] + f.width / 2.0 <= plate::BUILD[0] / 2.0 - m);
+            assert!(c[1] - f.height / 2.0 >= -plate::BUILD[1] / 2.0 + m);
+            assert!(c[1] + f.height / 2.0 <= plate::BUILD[1] / 2.0 - m);
             for (d, g) in &boxes[i + 1..] {
                 let dx = ((c[0] - d[0]).abs() - (f.width + g.width) / 2.0).max(0.0);
                 let dy = ((c[1] - d[1]).abs() - (f.height + g.height) / 2.0).max(0.0);
@@ -338,7 +340,7 @@ mod tests {
         }
         items.push(item(8, 6.0, 0, 1));
         // Three zones with one shelf of three each hold nine of these eleven.
-        let foot = vec![fp(50.0, 34.0); items.len()];
+        let foot = vec![fp(50.0, 28.0); items.len()];
         let p = plan(&items, &foot, 5).unwrap();
         assert!(!p.cut.is_empty());
         // The witness (row 8) goes first, then row 6 before any row 5, 1 or 0 item.

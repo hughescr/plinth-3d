@@ -1,7 +1,7 @@
 //! CAL-2 assembly: build every coupon with plinth's head path, lay them out, write the
 //! ChituBox project, re-read it, then measure and report from the re-read file only.
 use crate::{
-    Result, cal2_head,
+    Result, cal2_body, cal2_head,
     cal2_layout::{self, Footprint},
     cal2_map::{self, MapCoupon},
     cal2_measure,
@@ -63,8 +63,27 @@ fn label(spec: &Cal2Spec, k: usize, i: &Item) -> String {
 struct Written {
     project: Project,
     gap: f64,
+    /// Least distance from any part's footprint (raft included) to an edge of the build area.
+    margin: f64,
     identical: bool,
     hash: String,
+}
+
+/// Least distance from any model's footprint, supports included, to each edge of the build
+/// area, mm.
+fn edge_margin(models: &[Model]) -> f64 {
+    models
+        .iter()
+        .map(plate::bounds)
+        .flat_map(|b| {
+            (0..2).flat_map(move |k| {
+                [
+                    b.lo[k] + plate::BUILD[k] / 2.0,
+                    plate::BUILD[k] / 2.0 - b.hi[k],
+                ]
+            })
+        })
+        .fold(f64::INFINITY, f64::min)
 }
 
 fn write(path: &Path, models: Vec<Model>) -> Result<Written> {
@@ -79,9 +98,18 @@ fn write(path: &Path, models: Vec<Model>) -> Result<Written> {
     // The repo's CAL-1 round trip: the file parses and writes back byte for byte.
     let identical = read.to_bytes()? == bytes;
     let gap = plate::validate(&read.models)?;
+    let margin = edge_margin(&read.models);
+    if margin < plate::EDGE_MARGIN {
+        return Err(format!(
+            "a part is {margin:.3} mm from the plate edge, under the {} mm margin",
+            plate::EDGE_MARGIN
+        )
+        .into());
+    }
     Ok(Written {
         project: read,
         gap,
+        margin,
         identical,
         hash: sha(path)?,
     })
@@ -181,6 +209,44 @@ fn annotate(
     });
 }
 
+/// The coupon number raised on the top face, checked on the re-read model: the written mesh
+/// must carry exactly the raised boxes of the designed number (and tab). Only a formation
+/// witness, whose top face is too small for the smallest legible number, may carry none.
+fn number_label(m: &Model, item: &Item, built: &cal2_head::Built) -> Result<Value> {
+    let Some(f) = &built.features else {
+        if item.kind != Kind::Witness {
+            return Err(format!("{}: no number on the top face", m.name).into());
+        }
+        return Ok(json!({
+            "raised_number": null,
+            "reason": "the top face is smaller than the smallest legible number (7 x 5 pixels of 0.3 mm plus a 0.2 mm border, 2.5 x 1.9 mm); read it by its place on the plate map",
+        }));
+    };
+    let boxes = cal2_body::raised_boxes(&m.mesh);
+    if boxes != f.boxes() {
+        return Err(format!(
+            "{}: {boxes} raised boxes in the written file, {} designed for the number",
+            m.name,
+            f.boxes()
+        )
+        .into());
+    }
+    let (w, h) = {
+        let b = cal2_body::number_box(f.number, f.pixel);
+        (b[0], b[1])
+    };
+    Ok(json!({
+        "raised_number": f.number,
+        "on": if built.dims["shape"] == "ring" { "top surface of the ring, at the front" } else { "top face" },
+        "pixel_mm": f.pixel,
+        "digit_height_mm": h,
+        "number_width_mm": w,
+        "raised_mm": cal2_body::RAISE,
+        "orientation_tab": f.tab.is_some(),
+        "raised_boxes_in_written_file": boxes,
+    }))
+}
+
 /// Build, lay out, write, re-read, measure and report into the empty `out` directory.
 ///
 /// # Errors
@@ -227,6 +293,7 @@ pub fn assemble(spec_path: &Path, out: &Path) -> Result<()> {
         let item = &items[k];
         let mut j = cal2_measure::coupon(&spec, item, m, grid, built[k].load.as_ref())?;
         annotate(&mut j, &spec, (k, item), &built[k], (slot, foot[k]));
+        j["number_label"] = number_label(m, item, &built[k])?;
         map.push(map_coupon(
             &spec,
             item,
@@ -244,7 +311,17 @@ pub fn assemble(spec_path: &Path, out: &Path) -> Result<()> {
     let cut_text = if cut.is_empty() {
         "Nothing cut: every coupon in the matrix is on the plate.".to_string()
     } else {
-        format!("Cut to fit ({}): lowest-priority rows first.", cut.len())
+        let mut ids: Vec<String> = plan
+            .cut
+            .iter()
+            .map(|&k| format!("C{:02} ({})", k + 1, spec.rows[items[k].row].id))
+            .collect();
+        ids.sort();
+        format!(
+            "Cut to fit ({}), lowest-priority rows first: {}. Not on the plate.",
+            cut.len(),
+            ids.join(", ")
+        )
     };
     std::fs::write(
         out.join("plate-map.svg"),
@@ -268,6 +345,14 @@ pub fn assemble(spec_path: &Path, out: &Path) -> Result<()> {
             "shuffle_seed": spec.shuffle_seed,
             "build_area_mm": plate::BUILD,
             "minimum_bbox_gap_mm": written.gap,
+            "edge_margin_required_mm": plate::EDGE_MARGIN,
+            "minimum_edge_margin_mm": written.margin,
+            "edge_margin_note": "least distance from any part's footprint, raft and supports included, to an edge of the build area, measured on the re-read file",
+            "coupons_without_number": coupons
+                .iter()
+                .filter(|j| j["number_label"]["raised_number"].is_null())
+                .map(|j| j["id"].clone())
+                .collect::<Vec<_>>(),
             "coupon_count": coupons.len(),
             "cut_for_fit": cut,
             "tallest_part_mm": tallest,
@@ -278,10 +363,11 @@ pub fn assemble(spec_path: &Path, out: &Path) -> Result<()> {
         }))?,
     )?;
     println!(
-        "CAL-2: {} coupons, {} cut, minimum bounding-box gap {:.3} mm, tallest {:.2} mm ({} layers), sha256 {}",
+        "CAL-2: {} coupons, {} cut, minimum bounding-box gap {:.3} mm, minimum edge margin {:.3} mm, tallest {:.2} mm ({} layers), sha256 {}",
         written.project.models.len(),
         plan.cut.len(),
         written.gap,
+        written.margin,
         tallest,
         layers,
         written.hash
@@ -396,7 +482,31 @@ mod tests {
         let (a, dir_a) = run("a", SPEC);
         assert_eq!(a["round_trip_byte_identical"], true);
         assert!(a["minimum_bbox_gap_mm"].as_f64().unwrap() >= plate::GAP - 1e-9);
+        // Every footprint, raft included, is 8 mm or more from each plate edge.
+        assert!(a["minimum_edge_margin_mm"].as_f64().unwrap() >= 8.0);
         let coupons = a["coupons"].as_array().unwrap();
+        // Every coupon carries its raised number in the written file, except a formation
+        // witness, whose face is too small for the smallest legible digits.
+        for j in coupons {
+            let l = &j["number_label"];
+            if j["kind"] == "witness" {
+                assert!(l["raised_number"].is_null(), "{}", j["id"]);
+                continue;
+            }
+            assert_eq!(l["raised_number"], j["number"], "{}", j["id"]);
+            assert!(l["pixel_mm"].as_f64().unwrap() >= 0.3 - 1e-9);
+            assert!(l["raised_boxes_in_written_file"].as_u64().unwrap() >= 7);
+            if j["variant"] == "ring" {
+                assert_eq!(l["on"], "top surface of the ring, at the front");
+            }
+        }
+        assert!(
+            a["coupons_without_number"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|id| id.as_str().unwrap().contains("ratio 6"))
+        );
         assert_eq!(
             coupons.len() + a["cut_for_fit"].as_array().unwrap().len(),
             67
@@ -406,6 +516,17 @@ mod tests {
             let e = j["achieved_ratio_error_percent"].as_f64().unwrap();
             assert!((-3.0..=0.01).contains(&e), "{e}");
             assert_eq!(j["ratio_by_layer"]["no_layer_over_target"], true);
+            // Nor is any contact's own ratio in any layer (late load included).
+            let target = j["target_ratio"].as_f64().unwrap();
+            assert!(
+                j["ratio_by_layer"]["model_largest_contact_per_body_layer"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|x| x.as_f64().unwrap() <= target * (1.0 + 1e-4)),
+                "{}",
+                j["id"]
+            );
             assert_eq!(j["columns_and_flares_strictly_larger_than_neck"], true);
             // The physical ratios are below the model's: the certified patch is smaller
             // than the written ball's mesh section, which is smaller than the cone exit.

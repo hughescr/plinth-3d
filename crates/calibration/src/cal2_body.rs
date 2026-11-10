@@ -10,12 +10,14 @@ pub type Tri = [[f64; 3]; 3];
 
 /// Raised feature height above the top face, mm.
 pub const RAISE: f64 = 0.4;
-/// Pixel of the raised number font, mm.
-pub const PIXEL: f64 = 0.5;
+/// Pixel sizes of the raised number font, mm, largest first. A number takes the largest that
+/// fits its face. The smallest is the least that stays legible after washing and curing: a
+/// digit 1.5 mm tall with strokes 0.3 mm wide and 0.4 mm high.
+pub const PIXELS: [f64; 5] = [0.5, 0.45, 0.4, 0.35, 0.3];
 /// Corner tab, mm square.
 pub const TAB: f64 = 1.2;
-/// Squares narrower than this carry no tab or number.
-pub const MIN_FEATURE_SIDE: f64 = 5.0;
+/// Clear border between a number and the edge of its face, mm.
+pub const EDGE: f64 = 0.2;
 /// Facets of a ring's circles.
 pub const RING_FACETS: usize = 96;
 
@@ -53,21 +55,89 @@ pub struct Part {
     pub z1: f64,
 }
 
-/// The rectangle on the top face that carries the tab (front-left corner) and the number.
+/// The top face of a body: where the number is raised.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Face {
+    /// Rectangle, lower and upper corner, at height `z`.
+    Rect { lo: [f64; 2], hi: [f64; 2], z: f64 },
+    /// Annulus about the origin (the ring's top surface), at height `z`.
+    Ring { outer: f64, inner: f64, z: f64 },
+}
+
+/// The raised number on a top face, and the orientation tab where the face has room for it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Features {
-    pub lo: [f64; 2],
-    pub hi: [f64; 2],
+    /// Centre of the number, mm; it reads along +x.
+    pub centre: [f64; 2],
+    /// Pixel of the number's font, mm.
+    pub pixel: f64,
+    /// Lower corner of the corner tab (front-left of the face), if it has one.
+    pub tab: Option<[f64; 2]>,
+    /// Height of the top face.
     pub z: f64,
     pub number: u32,
 }
 
+/// Width and height of the number's box, mm.
+#[must_use]
+pub fn number_box(number: u32, pixel: f64) -> [f64; 2] {
+    let digits = number.to_string().len();
+    [(digits * 4 - 1) as f64 * pixel, 5.0 * pixel]
+}
+
 impl Features {
-    /// Whether a tab and a two-digit number fit on a `w` by `h` top face.
+    /// Whether the orientation tab fits a `w` by `h` top face: a square of 5 mm or more, or a
+    /// strip at least 3.5 mm wide and four times as long as it is wide.
     #[must_use]
-    pub fn fit(w: f64, h: f64) -> bool {
+    pub fn tab_fits(w: f64, h: f64) -> bool {
         let (short, long) = (w.min(h), w.max(h));
-        short >= MIN_FEATURE_SIDE || (short >= 3.5 && long >= 4.0 * short)
+        short >= 5.0 || (short >= 3.5 && long >= 4.0 * short)
+    }
+
+    /// The number, as large as the face allows, or none if even the smallest legible pixel
+    /// does not fit.
+    #[must_use]
+    pub fn on(face: Face, number: u32) -> Option<Self> {
+        match face {
+            Face::Rect { lo, hi, z } => {
+                let (w, h) = (hi[0] - lo[0], hi[1] - lo[1]);
+                let pixel = PIXELS.into_iter().find(|&p| {
+                    let b = number_box(number, p);
+                    b[0] + 2.0 * EDGE <= w && b[1] + 2.0 * EDGE <= h
+                })?;
+                Some(Self {
+                    centre: [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0],
+                    pixel,
+                    tab: Self::tab_fits(w, h).then_some(lo),
+                    z,
+                    number,
+                })
+            }
+            Face::Ring { outer, inner, z } => {
+                // At the front of the ring (-y), on its centre line, reading along +x. Every
+                // corner of the number's box is inside the outer circle and the box is
+                // outside the inner circle, each with the border.
+                let mid = (outer + inner) / 2.0;
+                let pixel = PIXELS.into_iter().find(|&p| {
+                    let [w, h] = number_box(number, p);
+                    let corner = (w / 2.0).hypot(mid + h / 2.0);
+                    corner + EDGE <= outer && mid - h / 2.0 >= inner + EDGE
+                })?;
+                Some(Self {
+                    centre: [0.0, -mid],
+                    pixel,
+                    tab: None,
+                    z,
+                    number,
+                })
+            }
+        }
+    }
+
+    /// Number of raised boxes: one per lit pixel and one for the tab.
+    #[must_use]
+    pub fn boxes(&self) -> usize {
+        number_pixels(self.number, self.pixel).len() + usize::from(self.tab.is_some())
     }
 }
 
@@ -111,21 +181,21 @@ fn cuboid(out: &mut Vec<Tri>, lo: [f64; 3], hi: [f64; 3]) {
 }
 
 /// Number pixels as (x, y) lower-left corners relative to the number's centre.
-fn number_pixels(number: u32) -> Vec<[f64; 2]> {
+fn number_pixels(number: u32, pixel: f64) -> Vec<[f64; 2]> {
     let digits: Vec<usize> = number
         .to_string()
         .bytes()
         .map(|b| usize::from(b - b'0'))
         .collect();
-    let width = (digits.len() * 4 - 1) as f64 * PIXEL;
+    let width = (digits.len() * 4 - 1) as f64 * pixel;
     let mut out = Vec::new();
     for (d, &digit) in digits.iter().enumerate() {
         for (row, bits) in FONT[digit].iter().enumerate() {
             for col in 0..3 {
                 if bits & (4 >> col) != 0 {
                     out.push([
-                        -width / 2.0 + (d * 4 + col) as f64 * PIXEL,
-                        2.5 * PIXEL - (row + 1) as f64 * PIXEL,
+                        -width / 2.0 + (d * 4 + col) as f64 * pixel,
+                        2.5 * pixel - (row + 1) as f64 * pixel,
                     ]);
                 }
             }
@@ -270,21 +340,38 @@ pub fn body(parts: &[Part], features: Option<&Features>) -> Vec<Tri> {
     }
     if let Some(f) = features {
         // The tab is at the front-left corner; the number reads along +x on the top.
-        cuboid(
-            &mut out,
-            [f.lo[0], f.lo[1], f.z],
-            [f.lo[0] + TAB, f.lo[1] + TAB, f.z + RAISE],
-        );
-        let c = [(f.lo[0] + f.hi[0]) / 2.0, (f.lo[1] + f.hi[1]) / 2.0];
-        for [x, y] in number_pixels(f.number) {
+        if let Some(lo) = f.tab {
+            cuboid(
+                &mut out,
+                [lo[0], lo[1], f.z],
+                [lo[0] + TAB, lo[1] + TAB, f.z + RAISE],
+            );
+        }
+        let (c, p) = (f.centre, f.pixel);
+        for [x, y] in number_pixels(f.number, p) {
             cuboid(
                 &mut out,
                 [c[0] + x, c[1] + y, f.z],
-                [c[0] + x + PIXEL, c[1] + y + PIXEL, f.z + RAISE],
+                [c[0] + x + p, c[1] + y + p, f.z + RAISE],
             );
         }
     }
     out
+}
+
+/// Raised boxes in a written body mesh that carries raised features: the flat faces at its
+/// highest point, two triangles each. The body's own top is 0.4 mm lower.
+#[must_use]
+pub fn raised_boxes(mesh: &[plinth_chitubox::Triangle]) -> usize {
+    let top = mesh
+        .iter()
+        .flatten()
+        .map(|p| p[2])
+        .fold(f32::NEG_INFINITY, f32::max);
+    mesh.iter()
+        .filter(|t| t.iter().all(|p| p[2] >= top - 1e-4))
+        .count()
+        / 2
 }
 
 /// Weld equal corners so the mesh is an indexed surface.
@@ -334,12 +421,15 @@ mod tests {
         }
     }
     fn features(side: f64, z: f64, number: u32) -> Features {
-        Features {
-            lo: [-side / 2.0; 2],
-            hi: [side / 2.0; 2],
-            z,
+        Features::on(
+            Face::Rect {
+                lo: [-side / 2.0; 2],
+                hi: [side / 2.0; 2],
+                z,
+            },
             number,
-        }
+        )
+        .unwrap()
     }
 
     #[test]
@@ -363,11 +453,101 @@ mod tests {
         assert_eq!(below, 12 - 2);
         assert!(t.iter().flatten().all(|v| v[2] <= 2.0 + RAISE + 1e-9));
         // "4" lights 9 pixels and "7" lights 7.
-        let digits = number_pixels(47).len();
+        let f = features(8.0, 2.0, 47);
+        assert!((f.pixel - 0.5).abs() < 1e-12);
+        let digits = number_pixels(47, f.pixel).len();
         assert_eq!(digits, 9 + 7);
+        assert_eq!(f.boxes(), digits + 1);
         let raised = volume(&t) - 8.0 * 8.0 * 2.0;
-        let want = (digits as f64 * PIXEL * PIXEL + TAB * TAB) * RAISE;
+        let want = (digits as f64 * f.pixel * f.pixel + TAB * TAB) * RAISE;
         assert!((raised - want).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_small_face_takes_a_smaller_legible_number_or_none() {
+        let rect = |w: f64, h: f64| Face::Rect {
+            lo: [0.0; 2],
+            hi: [w, h],
+            z: 1.0,
+        };
+        // Faces from the matrix: 5.79 mm square control, 3.66 mm strip, 1.62 mm witness.
+        assert!((Features::on(rect(5.79, 5.79), 12).unwrap().pixel - 0.5).abs() < 1e-12);
+        assert!((Features::on(rect(18.3, 3.66), 12).unwrap().pixel - 0.5).abs() < 1e-12);
+        // 3.0 mm wide: the largest pixel whose 2-digit box (7 x 5 pixels) and border fit.
+        let small = Features::on(rect(3.0, 3.0), 12).unwrap();
+        assert!(small.pixel < 0.5 && small.pixel >= 0.3 && small.tab.is_none());
+        assert!(Features::on(rect(2.2, 2.2), 12).is_none());
+        for w in [0.82, 1.12, 1.62] {
+            assert!(Features::on(rect(w, w), 65).is_none(), "{w}");
+        }
+        // The largest pixel is chosen: one step larger does not fit.
+        let b = number_box(12, small.pixel);
+        assert!(b[0] + 2.0 * EDGE <= 3.0);
+        let bigger = PIXELS.iter().copied().rfind(|&p| p > small.pixel);
+        if let Some(p) = bigger {
+            assert!(number_box(12, p)[0] + 2.0 * EDGE > 3.0);
+        }
+    }
+
+    #[test]
+    fn a_ring_carries_its_number_on_the_top_surface_inside_both_circles() {
+        for (outer, inner) in [(6.85, 3.85), (8.19, 5.19)] {
+            let f = Features::on(
+                Face::Ring {
+                    outer,
+                    inner,
+                    z: 2.0,
+                },
+                23,
+            )
+            .unwrap();
+            assert!(f.pixel >= 0.3 && f.tab.is_none());
+            let t = body(
+                &[Part {
+                    shape: Shape::Ring { outer, inner },
+                    z0: 0.0,
+                    z1: 2.0,
+                }],
+                Some(&f),
+            );
+            // Every raised vertex is over the annulus, with the border to spare.
+            let raised: Vec<_> = t
+                .iter()
+                .flatten()
+                .filter(|v| v[2] > 2.0 + 1e-9)
+                .map(|v| v[0].hypot(v[1]))
+                .collect();
+            assert!(!raised.is_empty());
+            assert!(raised.iter().all(|&r| r >= inner + 0.1 && r <= outer - 0.1));
+            assert_eq!(
+                (t.len() - RING_FACETS * 8) / 12,
+                f.boxes(),
+                "one box per lit pixel"
+            );
+        }
+        // A ring too narrow for the smallest legible digits carries none.
+        assert!(
+            Features::on(
+                Face::Ring {
+                    outer: 5.0,
+                    inner: 3.4,
+                    z: 2.0
+                },
+                23
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn raised_boxes_counts_the_written_tops() {
+        let f = features(8.0, 2.0, 47);
+        let t = body(&[slab(8.0, 2.0)], Some(&f));
+        let written: Vec<plinth_chitubox::Triangle> = t
+            .iter()
+            .map(|tri| tri.map(|p| p.map(|c| c as f32)))
+            .collect();
+        assert_eq!(raised_boxes(&written), f.boxes());
     }
 
     #[test]
@@ -457,18 +637,18 @@ mod tests {
     }
 
     #[test]
-    fn features_fit_rule() {
-        assert!(Features::fit(5.0, 5.0));
-        assert!(!Features::fit(4.2, 4.2));
-        assert!(Features::fit(18.5, 3.7));
-        assert!(!Features::fit(18.5, 3.0));
+    fn tab_fit_rule() {
+        assert!(Features::tab_fits(5.0, 5.0));
+        assert!(!Features::tab_fits(4.2, 4.2));
+        assert!(Features::tab_fits(18.5, 3.7));
+        assert!(!Features::tab_fits(18.5, 3.0));
     }
 
     #[test]
     fn digits_are_asymmetric() {
         // 2 mirrored left-right is not 5: the font is not symmetric.
-        assert_ne!(number_pixels(2), number_pixels(5));
-        assert_ne!(number_pixels(1).len(), number_pixels(8).len());
+        assert_ne!(number_pixels(2, 0.5), number_pixels(5, 0.5));
+        assert_ne!(number_pixels(1, 0.5).len(), number_pixels(8, 0.5).len());
     }
 
     #[test]

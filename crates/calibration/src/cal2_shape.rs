@@ -12,7 +12,7 @@
 //! footprint a layer's mid-plane cuts.
 use crate::{
     Result,
-    cal2_body::{self, Pads, Part, RING_FACETS, Shape},
+    cal2_body::{self, Face, Pads, Part, RING_FACETS, Shape},
     cal2_spec::{
         Item, LATE_HOLD_LAYERS, LAYER, LONG_FULL_LAYERS, LOW_FRACTION, RAMP_LAYERS, RING_WIDTH,
         SHORT_FULL_LAYERS, STRIP_ASPECT, Variant,
@@ -20,8 +20,16 @@ use crate::{
 };
 use serde_json::{Value, json};
 
-/// The top face that carries the tab and number: lower and upper corner, and its height.
-pub type Top = ([f64; 2], [f64; 2], f64);
+/// Smallest clear gap between the pads of a late-load body, mm. The load model gives a
+/// layer's area to components in cells of `StackOptions::cell_mm` (0.25 mm), each cell to the
+/// component nearest its centroid. A cell holding the edges of two pads goes to one of them
+/// whole, so with a narrower gap the pads' areas in the model differ from the pads' real
+/// (equal) areas by up to 7 percent. With the gap wider than a cell, no cell holds two pads
+/// and every pad's area is its own.
+#[must_use]
+pub fn pad_gap() -> f64 {
+    plinth_support::load::StackOptions::default().cell_mm * 1.04
+}
 
 /// Move of a step off its layer boundary, mm.
 pub const NUDGE: f64 = 0.0005;
@@ -36,7 +44,7 @@ const WIDE_PITCH: f64 = 2.30;
 pub struct Plan {
     pub parts: Vec<Part>,
     pub sites: Vec<[f64; 2]>,
-    pub top: Option<Top>,
+    pub top: Option<Face>,
     /// Designed dimensions, for the report.
     pub dims: Value,
 }
@@ -143,14 +151,21 @@ fn square(item: &Item, hold: usize, area: f64) -> Result<Plan> {
             (full, LONG_FULL_LAYERS)
         }
         Variant::LateLoad => {
-            // One pad per head, LOW_FRACTION..1 of its cell, growing each layer; one slab
-            // over all of them once the ramp is done.
+            // One pad per head, LOW_FRACTION of its cell in the first layer, growing every
+            // layer to the largest the load model can attribute exactly (a gap of `pad_gap`
+            // between neighbours); one slab over all of them once the ramp is done.
+            let (cx, cy) = (w / n as f64, h / n as f64);
+            let last = (1.0 - pad_gap() / cx).min(1.0 - pad_gap() / cy).powi(2);
             let steps = (0..RAMP_LAYERS)
                 .map(|j| {
-                    let f = LOW_FRACTION + (1.0 - LOW_FRACTION) * j as f64 / RAMP_LAYERS as f64;
-                    [w / n as f64 * f.sqrt(), h / n as f64 * f.sqrt()]
+                    let f =
+                        LOW_FRACTION + (last - LOW_FRACTION) * j as f64 / (RAMP_LAYERS - 1) as f64;
+                    [cx * f.sqrt(), cy * f.sqrt()]
                 })
                 .collect();
+            dims["last_ramp_fraction"] = json!(last);
+            dims["pad_gap_mm_at_last_ramp_layer"] =
+                json!([cx - cx * last.sqrt(), cy - cy * last.sqrt()]);
             let levels = (0..=RAMP_LAYERS)
                 .map(|j| z(j) + if j == 0 { 0.0 } else { NUDGE })
                 .collect();
@@ -181,7 +196,11 @@ fn square(item: &Item, hold: usize, area: f64) -> Result<Plan> {
     Ok(Plan {
         parts,
         sites: grid_sites(w, h, n),
-        top: Some((lo, hi, z(top_layers) - NUDGE)),
+        top: Some(Face::Rect {
+            lo,
+            hi,
+            z: z(top_layers) - NUDGE,
+        }),
         dims,
     })
 }
@@ -197,7 +216,11 @@ fn strip(item: &Item, hold: usize, area: f64) -> Plan {
         sites: (0..item.heads)
             .map(|i| [-l / 2.0 + (i as f64 + 0.5) * l / heads, 0.0])
             .collect(),
-        top: Some((lo, hi, z(hold) - NUDGE)),
+        top: Some(Face::Rect {
+            lo,
+            hi,
+            z: z(hold) - NUDGE,
+        }),
         dims: json!({"shape": "strip", "long_mm": l, "short_mm": w, "aspect": STRIP_ASPECT,
                      "rows": 1, "head_pitch_mm": l / heads, "hold_layers": hold}),
     }
@@ -217,7 +240,11 @@ fn ring(item: &Item, hold: usize, area: f64) -> Plan {
                 [mid * a.cos(), mid * a.sin()]
             })
             .collect(),
-        top: None,
+        top: Some(Face::Ring {
+            outer,
+            inner,
+            z: z(hold) - NUDGE,
+        }),
         dims: json!({"shape": "ring", "outer_radius_mm": outer, "inner_radius_mm": inner,
                      "width_mm": RING_WIDTH, "centre_line_radius_mm": mid,
                      "hold_layers": hold}),
@@ -329,10 +356,16 @@ mod tests {
         let full = layer_area(&p, 79);
         assert!(layer_area(&p, 0) <= 0.4 * full + 1e-6);
         assert!((layer_area(&p, 0) / full - 0.4).abs() < 1e-6);
+        // The ramp ends where the gap between pads is still wider than the load model's
+        // 0.25 mm cell, so every pad's area is attributed to its own head.
+        let last = p.dims["last_ramp_fraction"].as_f64().unwrap();
+        assert!(last > 0.8 && last < 0.9, "{last}");
+        let cell = 77.0_f64.sqrt() / 3.0;
+        assert!(cell * (1.0 - last.sqrt()) > 0.25);
         for l in 1..40 {
             assert!(layer_area(&p, l) > layer_area(&p, l - 1));
             assert!(layer_area(&p, l) < full);
-            let want = 0.4 + 0.6 * l as f64 / 40.0;
+            let want = 0.4 + (last - 0.4) * l as f64 / 39.0;
             assert!((layer_area(&p, l) / full - want).abs() < 1e-6);
         }
         assert!((40..80).all(|l| same(layer_area(&p, l), full)));
@@ -362,7 +395,14 @@ mod tests {
                 .iter()
                 .all(|p| (p[0].hypot(p[1]) - mid).abs() < 1e-9)
         );
-        assert!(r.top.is_none());
+        // The number is raised on the ring's own top surface.
+        let Some(Face::Ring {
+            outer: o, inner: i, ..
+        }) = r.top
+        else {
+            panic!()
+        };
+        assert!((o - outer).abs() < 1e-12 && (i - inner).abs() < 1e-12);
     }
 
     #[test]

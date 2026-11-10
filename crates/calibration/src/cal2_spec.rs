@@ -18,7 +18,8 @@ pub const LONG_FULL_LAYERS: usize = 100;
 /// The stem (short hold) and the first ramp layer (late load) are at most this fraction of
 /// the full area.
 pub const LOW_FRACTION: f64 = 0.40;
-/// Layers a late-load body takes to ramp from `LOW_FRACTION` to full area, and then holds.
+/// Layers a late-load body takes to ramp from `LOW_FRACTION` to its largest pads, then the
+/// layers it holds at full area.
 pub const RAMP_LAYERS: usize = 40;
 pub const LATE_HOLD_LAYERS: usize = 40;
 /// Strip body: long side over short side, long side along X.
@@ -49,8 +50,9 @@ pub enum Variant {
     ShortHold,
     /// 100 layers at full area.
     LongHold,
-    /// Starts at 40 percent of the area right above the heads, ramps to full area over 40
-    /// layers (one square pad per head until the pads meet), then holds 40 layers.
+    /// Starts at 40 percent of the area right above the heads, ramps over 40 layers (one
+    /// square pad per head, kept 0.26 mm apart) to 83 to 85 percent, then steps to full area
+    /// and holds 40 layers.
     LateLoad,
     /// Body 5:1, long side along X, heads in one row.
     Strip,

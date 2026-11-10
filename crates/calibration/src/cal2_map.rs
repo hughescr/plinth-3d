@@ -98,7 +98,7 @@ fn coupon(s: &mut String, c: &MapCoupon) -> Result<()> {
     // The tab is at the front-left corner of the top face: the stem's, when there is one.
     let top = c.stem.unwrap_or(c.body);
     if c.ring_inner.is_none()
-        && crate::cal2_body::Features::fit(top[1][0] - top[0][0], top[1][1] - top[0][1])
+        && crate::cal2_body::Features::tab_fits(top[1][0] - top[0][0], top[1][1] - top[0][1])
     {
         let t = crate::cal2_body::TAB * SCALE;
         let [tx, ty] = px(top[0]);
@@ -161,6 +161,15 @@ pub fn svg(coupons: &[MapCoupon], cut: &str, seed: u64) -> Result<String> {
         plate::BUILD[0] * SCALE,
         plate::BUILD[1] * SCALE
     )?;
+    // Nothing, rafts included, is inside the margin from the plate edge.
+    writeln!(
+        s,
+        "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"none\" stroke=\"#c53030\" stroke-width=\"1.5\" stroke-dasharray=\"10 6\"/>",
+        x0 + plate::EDGE_MARGIN * SCALE,
+        y0 + plate::EDGE_MARGIN * SCALE,
+        (plate::BUILD[0] - 2.0 * plate::EDGE_MARGIN) * SCALE,
+        (plate::BUILD[1] - 2.0 * plate::EDGE_MARGIN) * SCALE
+    )?;
     for c in coupons {
         coupon(&mut s, c)?;
     }
@@ -188,7 +197,7 @@ pub fn svg(coupons: &[MapCoupon], cut: &str, seed: u64) -> Result<String> {
     }
     writeln!(
         s,
-        "<text x=\"1200\" y=\"{:.0}\" text-anchor=\"middle\" font-size=\"30\" font-weight=\"bold\">BACK EDGE</text><text x=\"1500\" y=\"1470\" text-anchor=\"middle\" font-size=\"36\" font-weight=\"bold\">FRONT EDGE: peels first (-Y in ChituBox)</text><path d=\"M1500 1482 L1500 1520 M1486 1505 L1500 1520 L1514 1505\" fill=\"none\" stroke=\"#171717\" stroke-width=\"4\"/><text x=\"100\" y=\"1630\" font-size=\"22\">Black square = orientation tab, front-left corner of the top face. Raised number on the top face = coupon number (none on rings and small bodies).</text><text x=\"100\" y=\"1660\" font-size=\"22\">Circles: raft pads (2.2 mm) with one black dot per head. Outline = body at full load, to scale; dashed inner square = stem of a short hold.</text><text x=\"100\" y=\"1690\" font-size=\"22\">{}</text>",
+        "<text x=\"1200\" y=\"{:.0}\" text-anchor=\"middle\" font-size=\"30\" font-weight=\"bold\">BACK EDGE</text><text x=\"1500\" y=\"1470\" text-anchor=\"middle\" font-size=\"36\" font-weight=\"bold\">FRONT EDGE: peels first (-Y in ChituBox)</text><path d=\"M1500 1482 L1500 1520 M1486 1505 L1500 1520 L1514 1505\" fill=\"none\" stroke=\"#171717\" stroke-width=\"4\"/><text x=\"100\" y=\"1604\" font-size=\"22\">Black square = orientation tab, front-left corner of the top face. Raised number on the top face (rings: top surface, front) = coupon number.</text><text x=\"100\" y=\"1632\" font-size=\"22\">Only the formation witnesses are too small to carry a number. Red dashes: 8 mm margin from the plate edge, rafts included.</text><text x=\"100\" y=\"1660\" font-size=\"22\">Circles: raft pads (2.2 mm) with one black dot per head. Outline = body at full load, to scale; dashed inner square = stem of a short hold.</text><text x=\"100\" y=\"1690\" font-size=\"22\">{}</text>",
         y0 - 12.0,
         cut
     )?;

@@ -7,6 +7,9 @@ use serde::Serialize;
 pub const SEED: u64 = 20261102;
 pub const GAP: f64 = 6.0;
 pub const BUILD: [f64; 2] = [211.68, 118.37];
+/// CAL-2: least distance from any part's footprint (raft included) to each edge of the build
+/// area, mm.
+pub const EDGE_MARGIN: f64 = 8.0;
 pub const IDS: [&str; 8] = ["A0", "A1", "B-100", "S-100", "S-324", "K-15", "K-60", "W"];
 /// Same 100-rung waist in B, S and W; inferred from the owner's measured inflation.
 pub const WAIST_100: f32 = 0.229;

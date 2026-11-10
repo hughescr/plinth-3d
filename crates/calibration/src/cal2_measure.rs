@@ -372,9 +372,23 @@ fn expected_held(spec: &Cal2Spec, item: &Item) -> usize {
         Variant::Standard | Variant::Strip | Variant::Ring => spec.hold_layers,
         Variant::ShortHold => SHORT_FULL_LAYERS,
         Variant::LongHold => LONG_FULL_LAYERS,
-        // The last ramp layer (98.5 percent) and the hold.
-        Variant::LateLoad => LATE_HOLD_LAYERS + 1,
+        // The ramp stops short of the target (the pads stay apart), so only the hold counts.
+        Variant::LateLoad => LATE_HOLD_LAYERS,
     }
+}
+
+/// No contact's own ratio (rigid carrier or additive, the larger) is over the label in any
+/// layer. `peak` is the model's layer (0-based) and value.
+fn check_contacts(name: &str, label: f64, peak: (u32, f64)) -> Result<()> {
+    if peak.1 > label * (1.0 + SLACK) {
+        return Err(format!(
+            "{name}: a contact's own ratio in layer {} is {:.2}, over {label}",
+            peak.0 + 1,
+            peak.1
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Rules each variant's ratio profile must obey, as errors.
@@ -433,6 +447,8 @@ struct Modelled {
     certified: Vec<f64>,
     /// The model's per-contact sizing ratio: its layer (0-based) and value.
     sizing: (u32, f64),
+    /// The largest per-contact ratio (rigid carrier or additive) of every body layer.
+    contact: Vec<f64>,
 }
 
 /// Run `load::analyse_full` on the written body's layer stack and the coupon's load view.
@@ -494,6 +510,14 @@ fn model_coupon(
         .iter()
         .map(|c| (c.worst_layer, c.ratio))
         .fold((0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
+    let mut contact = vec![0.0_f64; ratio.len()];
+    for g in &detail.groups {
+        for s in &g.states {
+            let r = s.ratios.rigid_lever.max(s.ratios.additive);
+            let at = &mut contact[g.layer as usize];
+            *at = at.max(r);
+        }
+    }
     Ok(Modelled {
         peel,
         ratio,
@@ -501,7 +525,21 @@ fn model_coupon(
         first_layer,
         certified: layout.contacts.iter().map(|c| c.patch_lower_mm2).collect(),
         sizing,
+        contact,
     })
+}
+
+/// Lower and upper corner of the body mesh in plan, mm.
+fn body_bbox(m: &Model) -> ([f64; 2], [f64; 2]) {
+    m.mesh.iter().flatten().fold(
+        ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]),
+        |(lo, hi), p| {
+            (
+                std::array::from_fn(|k| lo[k].min(f64::from(p[k]))),
+                std::array::from_fn(|k| hi[k].max(f64::from(p[k]))),
+            )
+        },
+    )
 }
 
 /// Measure one written coupon. Errors if a head chain cannot be read, a layer is over the
@@ -522,15 +560,7 @@ pub fn coupon(
     let lift = f64::from(m.translate[2]);
     let (zb, plate) = body_floor(m);
     let loaded = (lift / grid.height).round() as usize + 1;
-    let (lo, hi) = m.mesh.iter().flatten().fold(
-        ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]),
-        |(lo, hi), p| {
-            (
-                std::array::from_fn(|k| lo[k].min(f64::from(p[k]))),
-                std::array::from_fn(|k| hi[k].max(f64::from(p[k]))),
-            )
-        },
-    );
+    let (lo, hi) = body_bbox(m);
     let chains = sites(m, item.kind)
         .into_iter()
         .map(|s| chain_at(m, item.kind, s, zb, plate))
@@ -553,6 +583,7 @@ pub fn coupon(
         first_layer,
         certified,
         sizing: (sizing_layer, sizing_peak),
+        contact,
     } = model_coupon(m, item, load, &chains, (zb, plate))?;
     // The model credits a certified section; the written meshes must carry at least that.
     let credited: f64 = capacity.iter().sum();
@@ -581,6 +612,9 @@ pub fn coupon(
         )
         .into());
     }
+    // The model's per-contact sizing ratio (rigid carrier or additive, the larger) is also
+    // never over the label, in any layer.
+    check_contacts(&m.name, item.ratio, (sizing_layer, sizing_peak))?;
     let held = check_profile(spec, item, &m.name, &ratio)?;
     let raster = layer_areas(m, grid)?;
     let raster_peak = raster[loaded - 1..].iter().copied().fold(0.0, f64::max);
@@ -626,7 +660,7 @@ pub fn coupon(
         "achieved_ratio_cone_exit": ratio_neck.iter().copied().fold(0.0, f64::max),
         "model_contact_sizing_ratio_peak": sizing_peak,
         "model_contact_sizing_peak_layer_in_body": sizing_layer + 1,
-        "model_contact_sizing_note": "the load model's per-contact sizing ratio (rigid-carrier or additive, with upstream self-peel); information only, not the label",
+        "model_contact_sizing_note": "the load model's per-contact sizing ratio (rigid-carrier or additive, with upstream self-peel), the peak over every contact and layer; the generator refuses a coupon where it is over the label",
         "achieved_ratio_error_percent": error * 100.0,
         "within_tolerance": true,
         "ratio_by_layer": {
@@ -635,6 +669,7 @@ pub fn coupon(
             "layers_held_at_target": held,
             "no_layer_over_target": true,
             "model_per_body_layer": ratio.iter().map(round).collect::<Vec<_>>(),
+            "model_largest_contact_per_body_layer": contact.iter().map(round).collect::<Vec<_>>(),
             "mesh_section_per_body_layer": ratio_mesh.iter().map(round).collect::<Vec<_>>(),
             "cone_exit_per_body_layer": ratio_neck.iter().map(round).collect::<Vec<_>>(),
         },
@@ -720,7 +755,7 @@ mod tests {
         for (variant, held, body) in [
             (Variant::ShortHold, 5, 48),
             (Variant::LongHold, 100, 108),
-            (Variant::LateLoad, 41, 88),
+            (Variant::LateLoad, 40, 88),
         ] {
             let it = item(variant, 0.55, 9, 50.0);
             let (m, load) = written(&it, 5);
@@ -807,18 +842,17 @@ mod tests {
             let peak = by_model.iter().copied().fold(0.0, f64::max);
             assert!((peak - model).abs() < 1e-3, "{name}: {peak} {model}");
             // The load model's own per-contact sizing ratio (what the planner tests against
-            // the design ratio) is the label too, wherever every head carries an equal pad.
-            // Late load is the exception: its pads are separate islands of unequal area until
-            // the ramp ends, so the centre head's own ratio is above the average label.
+            // the design ratio) is the label too, for every variant: never over it, and
+            // within 1 percent under it.
             let sizing = j["model_contact_sizing_ratio_peak"].as_f64().unwrap();
-            if it.variant == Variant::LateLoad {
-                assert!(sizing > model && sizing < model * 1.06, "{name}: {sizing}");
-            } else {
-                assert!(
-                    (sizing / model - 1.0).abs() < 5e-3,
-                    "{name}: {sizing} {model}"
-                );
-            }
+            assert!(
+                sizing <= it.ratio * (1.0 + 1e-4) && sizing >= it.ratio * 0.99,
+                "{name}: {sizing}"
+            );
+            assert!(
+                (sizing / model - 1.0).abs() < 5e-3,
+                "{name}: {sizing} {model}"
+            );
             if it.kind == Kind::Column {
                 assert!(
                     b.patch.is_empty() && (model / mesh - 1.0).abs() < 5e-3,
@@ -845,6 +879,55 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Late load, explicitly (the owner's R4 rows at 40 and 50). Every body layer, as a group
+    /// (layer peel over the active capacity) and as the model's largest per-contact ratio, is
+    /// at or under the label, and the peak of each is within 1 percent under it. The pads are
+    /// equal in the model's own attribution to heads in the last ramp layer, so the
+    /// per-contact ratio there is the group's, not 4 to 5 percent above it as it was when
+    /// the pads were 1.5 percent apart.
+    #[test]
+    fn late_load_is_at_or_under_the_label_in_every_layer_by_group_and_by_contact() {
+        for label in [40.0, 50.0] {
+            let it = item(Variant::LateLoad, 0.55, 9, label);
+            let (m, load) = written(&it, 5);
+            let j = measure(&it, &m, load.as_ref()).unwrap();
+            let layers = |key: &str| -> Vec<f64> {
+                j["ratio_by_layer"][key]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|x| x.as_f64().unwrap())
+                    .collect()
+            };
+            let group = layers("model_per_body_layer");
+            let contact = layers("model_largest_contact_per_body_layer");
+            assert_eq!(group.len(), 88);
+            for (name, r) in [("group", &group), ("contact", &contact)] {
+                // The body's 80 layers; the raised number and tab above carry little.
+                let peak = r.iter().copied().fold(0.0, f64::max);
+                assert!(
+                    r.iter().all(|&x| x <= label * (1.0 + 1e-4)),
+                    "R{label} {name}: {peak}"
+                );
+                assert!(peak >= label * 0.99, "R{label} {name}: {peak}");
+            }
+            // The last ramp layer (layer 40, index 39): pads equal, so the contact's ratio is
+            // the group's, and both are under the label by the ramp's own end fraction.
+            assert!(
+                (contact[39] / group[39] - 1.0).abs() < 2e-3,
+                "R{label}: {} {}",
+                contact[39],
+                group[39]
+            );
+            assert!(group[39] < label * 0.9 && group[39] > group[38]);
+            // The hold: 40 layers at the label.
+            assert!(group[40..80].iter().all(|&x| x >= label * 0.99));
+            assert_eq!(j["ratio_by_layer"]["layers_held_at_target"], 40);
+            let peak_contact = j["model_contact_sizing_ratio_peak"].as_f64().unwrap();
+            assert!(peak_contact <= label && peak_contact >= label * 0.99);
         }
     }
 

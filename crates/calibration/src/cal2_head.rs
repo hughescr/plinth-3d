@@ -107,6 +107,8 @@ pub struct Built {
     pub head: Option<HeadDesign>,
     /// The load view of the frozen plan (none for plain columns).
     pub load: Option<HeadLoad>,
+    /// The raised number (and tab) on the top face; none where the face is too small.
+    pub features: Option<cal2_body::Features>,
 }
 
 /// The sections of one head chain, mm^2. `minimum` is what plinth's load model divides by in
@@ -461,11 +463,11 @@ fn build_with(spec: &Cal2Spec, item: &Item, number: u32, with_load: bool) -> cra
     let sections = head_sections(spec, item, head)?;
     let full_area = item.ratio * item.heads as f64 * sections.minimum * (1.0 - GUARD);
     let plan = cal2_shape::plan(item, spec.hold_layers, full_area)?;
-    let features = (item.kind != Kind::Witness)
-        .then_some(plan.top)
-        .flatten()
-        .filter(|&(lo, hi, _)| cal2_body::Features::fit(hi[0] - lo[0], hi[1] - lo[1]))
-        .map(|(lo, hi, z)| cal2_body::Features { lo, hi, z, number });
+    // The number is raised on the top face, above every loaded layer; a face too small for
+    // the smallest legible number (the formation witnesses) carries none.
+    let features = plan
+        .top
+        .and_then(|face| cal2_body::Features::on(face, number));
     let tris = cal2_body::body(&plan.parts, features.as_ref());
     let (model, sites, patch, load) = match head {
         Some(h) => {
@@ -488,6 +490,7 @@ fn build_with(spec: &Cal2Spec, item: &Item, number: u32, with_load: bool) -> cra
         patch,
         head,
         load,
+        features,
     })
 }
 
@@ -539,6 +542,39 @@ mod tests {
                 .filter(|r| r.record_type == plinth_chitubox::RecordType::TIP_BALL)
                 .count();
             assert_eq!(balls, it.heads);
+        }
+    }
+
+    /// Every coupon of the matrix carries a raised number on its top face, above every loaded
+    /// layer, except the formation witnesses, whose 0.82 to 1.62 mm faces are smaller than
+    /// the smallest legible number. Rings carry it on their top surface.
+    #[test]
+    fn every_coupon_but_the_witnesses_carries_a_legible_number_above_the_loaded_layers() {
+        let s = spec();
+        for it in s.items().iter().filter(|i| i.copy == 0) {
+            let b = build_for_layout(&s, it, 47).unwrap();
+            let name = format!("{:?} {} R{}", it.variant, it.neck_mm, it.ratio);
+            match (&b.features, it.kind) {
+                (None, Kind::Witness) => {}
+                (Some(f), k) if k != Kind::Witness => {
+                    assert!(f.pixel >= 0.3 && f.number == 47, "{name}");
+                    // The number's boxes start at the body's top, which is the highest of the
+                    // body's own faces: nothing of the body is above them but the number.
+                    let raised = cal2_body::raised_boxes(b.model.mesh.as_slice());
+                    assert_eq!(raised, f.boxes(), "{name}");
+                    let z = |init: f32, pick: fn(f32, f32) -> f32| {
+                        b.model.mesh.iter().flatten().map(|p| p[2]).fold(init, pick)
+                    };
+                    let height = z(f32::MIN, f32::max) - z(f32::MAX, f32::min);
+                    assert!(
+                        (f64::from(height) - (f.z + cal2_body::RAISE)).abs() < 1e-4,
+                        "{name}"
+                    );
+                    // Rings carry no orientation tab: the number sits on the ring itself.
+                    assert!(f.tab.is_none() || b.dims["shape"] != "ring", "{name}");
+                }
+                other => panic!("{name}: {other:?}"),
+            }
         }
     }
 
