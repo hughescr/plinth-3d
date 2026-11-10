@@ -257,14 +257,14 @@ This block sits between the model table and the first mesh. The old docs called 
 
 ### 8.3 Attr values
 
-- Low byte = preset id << 2. Verified: in `04h`, Middle and Heavy ids swap, and exactly the attr low bytes of the Middle and Heavy supports swap (0x108 ↔ 0x10c). Bits 0..1 of the low byte were never nonzero.
-- Byte 1 = support kind code. Codes seen: 1, 2, 3, 4, 5, 6, 8. Code 7 was never seen.
+- In samples `03`–`07`, low byte = preset id << 2. Verified: in `04h`, Middle and Heavy ids swap, and exactly the attr low bytes of the Middle and Heavy supports swap (0x108 ↔ 0x10c). Bits 0..1 are zero in that family. This is not a universal decoding: the owner's Magic-supports Light instance uses `0x0c01` on every non-raft record; its meaning is not established. Preserve it rather than applying the manual-support formula. Field evidence is in [calibration-light-attrs.md](calibration-light-attrs.md).
+- In the `03`–`07` decoding, byte 1 = support kind code. Codes seen: 1, 2, 3, 4, 5, 6, 8. Code 7 was never seen. Do not infer a kind 12 from the Magic-supports value without a UI experiment.
 - Inferred kind names, from the owner's placement order in `03`: 1 adaptive, 2 vertical, 3 upright, 4 forked branch, 5 forked joint, 6 forked small, 8 forked tree. No UI test confirmed them.
 - `0x1e00` is on every type-6 (raft) record: kind byte 0x1e, preset byte 0.
 - All records of one support carry the same attr. Base pieces carry their parent support's attr.
 - A brace between two supports of different kinds carries both values, one in each u32 half. In `07`, records 38 and 39 carry `0x0000020400000304`: low half 0x0304 (upright), high half 0x0204 (vertical). Which half is which support is not known.
 - Two m2m supports in `03` both carry kind 6 but have different shapes (section 10.4). So the kind byte does not fix the shape.
-- The older files `cylinder-cube-sphere` show values like `0x0c01` and `0x4105`. This decoding does not apply to them.
+- `cylinder-cube-sphere` also shows values like `0x0c01` and `0x4105`. The manual-support decoding does not apply to those values, nor to the owner's Magic-supports file. No field-to-mesh or slicing behaviour follows from these words alone.
 
 ## 9. Support section
 
@@ -537,7 +537,7 @@ Front block:
 
 7. One 24-byte descriptor per model. Zero for an unsupported model.
 8. For a supported model: preset table, names joined in table order (each `name_ptr`, `name_len` right), attr array with one u64 per record.
-9. Attr low byte = (preset id << 2) for an id in that model's own table. Kind code in byte 1. `0x1e00` for raft records.
+9. For the manual-support family (`03`–`07`), attr low byte = (preset id << 2) for an id in that model's own table, with kind code in byte 1. `0x1e00` for raft records. Preserve unknown attrs such as the Magic-supports `0x0c01`; section 8.3 is not a universal decoding.
 10. Each block's pointers move when an earlier block grows. The first mesh starts right after the last attr array.
 
 Per supported model:
@@ -746,7 +746,7 @@ All support data is in the model-local frame (section 13, item 18).
 - **Raft pad (type 6, tail `[0, 4.0]`).** 20-sided prism. Rim radius r1 / 2, rim vertex i at 18 degrees x i from +x. Top (at z_top) a fan from the top centre, then the bottom (z_top - r2) a fan with reversed order, then 40 side triangles. The record stores start = end = (x, y, 0), r1 = diameter, r2 = thickness. The real z exists only in the mesh.
 - **Raft bridge (type 6, tail `[1.0, 4.0]`).** Box between the two pad centres, half width r1 / 2 to each side, flat ends at the centres, 12 triangles. The record stores the two centres at z = 0, r1 = width, r2 = thickness.
 - **Tail words.** Type 1: word 0 is the contact value (a parameter; its meaning is still a guess, section 10.1). Type 2: 0.15. Type 6: word 1 is 4.0, word 0 is 0.0 for a pad and 1.0 for a bridge. All other words are 0.
-- **Attr.** `kind << 8 | preset_id << 2`; raft records 0x1e00; a brace between two kinds `high << 32 | low` (`shapes::attr`, `attr_pair`).
+- **Attr for the manual-support family reproduced here (`03`–`07`).** `kind << 8 | preset_id << 2`; raft records 0x1e00; a brace between two kinds `high << 32 | low` (`shapes::attr`, `attr_pair`). This builder is not a decoder for the Magic-supports `0x0c01` value (section 8.3).
 
 ### 19.3 Accuracy, and why the tolerance is what it is
 

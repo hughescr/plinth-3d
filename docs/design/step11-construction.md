@@ -602,6 +602,6 @@ Step 12 then generates the supported Round 25 with zero violated or unverified a
 
 **For the orchestrator (decide from results, no owner input needed):**
 
-2. P5 = 12 at full layer area may give many contacts at the cap **[U]**; no count is predicted or targeted (§4.9). That may look over-supported next to his Light practice. The PRD §8.4 side-by-side print settles P5 vs 18 and whether A2 holds for strips. Ask before printing.
+2. P5 = 12 at full layer area may give many contacts at the cap **[U]**; no count is predicted or targeted (§4.9). That may look over-supported next to his Light practice. CAL-1 (2026-11-09) is done: ChituBox Light failed 4/4 on Round 25 and strips showed no advantage over blocks at index about 97; the owner kept P5 = 12 and A2 (docs/experiments/cal-1-results.md). The PRD §8.4 side-by-side print still shows whether 12 over-supports. Ask before printing.
 3. The tributary result does not size contacts; it is a labelled sensitivity diagnostic. All sharing results are classified under §4.8, and its unprintable conditions take precedence: a confirmed absent rooted material route, or an additive area ratio > 25. Any other additive, equal-share or valid rigid-lever result above 12, and any unbalanced or unassessed load response, is a located intervention. If the first print loses the lowest contacts, the moment imbalance of the near-straight bottom cluster is the first candidate cause.
 4. ChituBox's own thin native parts (r 0.05) measure 0.098 mm across flats, under H9. Record as a finding; the limit does not change.
