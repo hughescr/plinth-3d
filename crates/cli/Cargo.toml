@@ -22,5 +22,8 @@ plinth-render.workspace = true
 lexopt.workspace = true
 nix = { workspace = true, features = ["fs"] }
 
+[dev-dependencies]
+plinth-check = { path = "../../checker" }
+
 [lints]
 workspace = true

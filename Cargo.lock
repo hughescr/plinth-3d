@@ -218,6 +218,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "plinth-check"
+version = "0.0.0"
+
+[[package]]
 name = "plinth-chitubox"
 version = "0.0.0"
 dependencies = [
@@ -230,6 +234,7 @@ version = "0.0.0"
 dependencies = [
  "lexopt",
  "nix",
+ "plinth-check",
  "plinth-chitubox",
  "plinth-emit",
  "plinth-geom",
