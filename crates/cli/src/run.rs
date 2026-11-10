@@ -696,7 +696,10 @@ fn write_review(
         .as_ref()
         .into_iter()
         .flat_map(|s| s.records.iter())
-        .filter(|r| r.record_type == plinth_chitubox::RecordType::TIP_BALL)
+        .filter(|r| {
+            use plinth_chitubox::RecordType as T;
+            r.record_type == T::TIP_BALL
+        })
         .map(|r| Json::Num(f64::from(r.r1)))
         .collect();
     let candidate = checked.is_some_and(|c| candidate_allowed(cfg.candidate, c, false));

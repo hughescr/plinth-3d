@@ -128,10 +128,12 @@ pub fn build_command(
     if level == Level::L3 {
         // Rebuild the checker and the CLI (both after the edit), then run the end-to-end
         // tests: the Round bases through the real binary and the real checker, against the
-        // stage manifest, plus Round 25 at 1 thread and at the slot's allocation.
+        // stage manifest, plus Round 25 at 1 thread and at the slot's allocation. The support
+        // crate's own Round 25 planner test (`e2e_rounds_*`) runs here too: L2 leaves it out
+        // because the CLI test in L2 already plans Round 25.
         let sh = format!(
             "(cd checker && cargo build --locked) && cargo build --locked -p plinth-cli \
-             && cargo nextest run --locked -p plinth-cli -E '{ONLY_E2E}'"
+             && cargo nextest run --locked -p plinth-cli -p plinth-support -E '{ONLY_E2E}'"
         );
         return (vec![s("sh"), s("-c"), sh], root.to_path_buf(), s("rounds"));
     }
@@ -650,7 +652,7 @@ mod tests {
         let build =
             "(cd checker && cargo build --locked) && cargo build --locked -p plinth-cli && ";
         assert!(sh.starts_with(build), "{sh}");
-        assert!(sh.contains("cargo nextest run --locked -p plinth-cli"));
+        assert!(sh.contains("cargo nextest run --locked -p plinth-cli -p plinth-support"));
         assert!(sh.contains(ONLY_E2E));
         assert_eq!((cwd, label.as_str()), (PathBuf::from("/r"), "rounds"));
         assert_eq!(parse_level("L3"), Ok(Level::L3));

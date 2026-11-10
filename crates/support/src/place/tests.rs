@@ -140,7 +140,7 @@ fn mutually_exclusive_alternatives_cannot_bypass_atomic_pair_admission() {
 }
 
 #[test]
-fn e2e_round25_private_planner_reports_exhaustion_honestly() {
+fn e2e_rounds_round25_private_planner_reports_exhaustion_honestly() {
     use crate::construct::*;
     use plinth_geom::{Mesh, measure::Measure, slice::LayerGrid};
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

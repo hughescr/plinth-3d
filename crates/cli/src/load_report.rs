@@ -356,11 +356,19 @@ pub fn measure_written(m: &plinth_chitubox::Model) -> WrittenMetrics {
         .enumerate()
         .filter(|(_, r)| r.record_type == T::ROD)
         .collect();
-    let vertical = |r: &plinth_chitubox::SupportRecord| {
-        (r.start[0] - r.end[0]).abs() < 1e-6 && (r.start[1] - r.end[1]).abs() < 1e-6
+    let vertical = |start: [f32; 3], end: [f32; 3]| {
+        (start[0] - end[0]).abs() < 1e-6 && (start[1] - end[1]).abs() < 1e-6
     };
-    let columns: Vec<_> = rods.iter().copied().filter(|(_, r)| vertical(r)).collect();
-    let braces: Vec<_> = rods.iter().copied().filter(|(_, r)| !vertical(r)).collect();
+    let columns: Vec<_> = rods
+        .iter()
+        .copied()
+        .filter(|(_, r)| vertical(r.start, r.end))
+        .collect();
+    let braces: Vec<_> = rods
+        .iter()
+        .copied()
+        .filter(|(_, r)| !vertical(r.start, r.end))
+        .collect();
     let mut result = WrittenMetrics {
         radius_histogram: histogram,
         braces: braces.len() as u32,

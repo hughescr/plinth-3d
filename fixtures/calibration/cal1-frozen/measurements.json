@@ -1,0 +1,1017 @@
+{
+  "status": "released",
+  "ready_to_print": true,
+  "freeze": {
+    "schema": 1,
+    "date": "2026-11-02",
+    "seed": 20261102,
+    "project_sha256": "91611c85a661f5caf77704898ff8b04ff5ef69c05d5d6b1b024b65a72ceb28b1",
+    "goo_sha256": "28d7e12515674824e6bb3fa5725a1df2de819886b04b1b72e14df5e9808b4b2c",
+    "project_file": "/Users/craig/code/hughescr/dnd-campaigns/plinth-review/2026-11-02-cal1-plate/CAL1-plate-calibration-not-print-candidate.chitubox",
+    "goo_file": "/Users/craig/code/hughescr/dnd-campaigns/plinth-review/2026-11-02-cal1-plate/cal1.goo",
+    "superseded_goo_sha256": "fc7540e071e0a16f2e8dc179af5c640f2793b281067862dab09697912f313d94",
+    "scope": "Frozen evidence, not a print release. C4 deferred; no physical outcomes.",
+    "float_policy": "serde_json float_roundtrip enabled; replay regenerated from current source on the frozen A1-era project; all numeric leaves bit-identical to superseded replay output. Replacement A0 copies reuse that A0 replay after written-geometry equality."
+  },
+  "checks": {
+    "same_project_hash": true,
+    "settings_match_previous_slice": true,
+    "same_all_layer_definitions": true,
+    "zero_islands": true,
+    "all_16_start_at_layer_0": true,
+    "coupon_indices": true,
+    "registered_waist_boundaries": true,
+    "K_sections": true,
+    "W_heads": true,
+    "unchanged_slots_exactly_equal": true,
+    "replacement_slots_exactly_equal_to_shifted_A0": false
+  },
+  "header": {
+    "aa": 4,
+    "advanced": 0,
+    "blur": 2,
+    "bottom_layers": 3,
+    "exposure_s": 2.3499999046325684,
+    "file_time": "0",
+    "grey": 3,
+    "grey_scale": 1,
+    "layer_mm": 0.05000000074505806,
+    "layer_offset": 195477,
+    "layers": 525,
+    "mirror": [
+      1,
+      0
+    ],
+    "price": 0.1819470226764679,
+    "price_unit": "$/L",
+    "print_seconds": 3685,
+    "printer": "ELEGOO Saturn 4 Ultra 16K",
+    "printer_type": "ELEGOO Saturn 4 Ultra 16K",
+    "profile": "Anycubic WW ABS-Like Clear",
+    "pwm": [
+      255,
+      255
+    ],
+    "resolution": [
+      15120,
+      6230
+    ],
+    "settings": {
+      "after_lift_s": 0,
+      "after_retract_s": 1,
+      "before_lift_s": 0.5,
+      "bottom_after_lift_s": 0,
+      "bottom_after_retract_s": 1,
+      "bottom_before_lift_s": 0.5,
+      "bottom_exposure_s": 20,
+      "bottom_lift2_mm": 0,
+      "bottom_lift2_mm_min": 0,
+      "bottom_lift_mm": 0.05000000074505806,
+      "bottom_lift_mm_min": 0.05000000074505806,
+      "bottom_retract2_mm": 0,
+      "bottom_retract2_mm_min": 0,
+      "bottom_retract_mm": 0.05000000074505806,
+      "bottom_retract_mm_min": 0.05000000074505806,
+      "lift2_mm": 0,
+      "lift2_mm_min": 0,
+      "lift_mm": 0.05000000074505806,
+      "lift_mm_min": 0.05000000074505806,
+      "off_s": 0,
+      "retract2_mm": 0,
+      "retract2_mm_min": 0,
+      "retract_mm": 0.05000000074505806,
+      "retract_mm_min": 0.05000000074505806
+    },
+    "size_mm": [
+      211.67999267578125,
+      118.37000274658203,
+      220
+    ],
+    "software": "0.0.22",
+    "software_version": "0.0.22",
+    "static_delay": 1,
+    "transition_layers": 5,
+    "version": "V3.0",
+    "volume_mm3": 5861.978515625,
+    "weight_g": 6.741275310516357
+  },
+  "header_comparison": [
+    {
+      "field": "price",
+      "new": 0.1819470226764679,
+      "old": 0.1818123757839203
+    },
+    {
+      "field": "volume_mm3",
+      "new": 5861.978515625,
+      "old": 5857.640625
+    },
+    {
+      "field": "weight_g",
+      "new": 6.741275310516357,
+      "old": 6.736286640167236
+    }
+  ],
+  "pixel_pitch_mm": [
+    0.013999999515593999,
+    0.01900000044086389
+  ],
+  "pixel_area_mm2": 0.00026599999696838025,
+  "raw_decoder_output": "/Users/craig/code/hughescr/dnd-campaigns/plinth-review/2026-11-02-cal1-plate/correction-slice-measurements/decoded.json",
+  "rule_measurements": "/Users/craig/code/hughescr/dnd-campaigns/plinth-review/2026-11-02-cal1-plate/correction-slice-measurements/narrowest-sections.json",
+  "pixel_diff_summary": "/Users/craig/code/hughescr/dnd-campaigns/plinth-review/2026-11-02-cal1-plate/correction-pixel-diff/summary.json",
+  "exact_pixel_difference_locations": "/Users/craig/code/hughescr/dnd-campaigns/plinth-review/2026-11-02-cal1-plate/correction-pixel-diff/locations.json",
+  "first_lit_layer": [
+    {
+      "piece": "front-S-100; calibration piece, not a print candidate",
+      "layer_0based": 0,
+      "layer_1based": 1,
+      "pixels": 89388,
+      "weighted_pixels": 89388,
+      "z_top_mm": 0.05000000074505806
+    },
+    {
+      "piece": "front-B-100; calibration piece, not a print candidate",
+      "layer_0based": 0,
+      "layer_1based": 1,
+      "pixels": 74731,
+      "weighted_pixels": 74731,
+      "z_top_mm": 0.05000000074505806
+    },
+    {
+      "piece": "front-W; calibration piece, not a print candidate",
+      "layer_0based": 0,
+      "layer_1based": 1,
+      "pixels": 136271,
+      "weighted_pixels": 135340.68627450915,
+      "z_top_mm": 0.05000000074505806
+    },
+    {
+      "piece": "front-A0-f2; calibration piece, not a print candidate",
+      "layer_0based": 0,
+      "layer_1based": 1,
+      "pixels": 346246,
+      "weighted_pixels": 346246,
+      "z_top_mm": 0.05000000074505806
+    },
+    {
+      "piece": "front-A0; calibration piece, not a print candidate",
+      "layer_0based": 0,
+      "layer_1based": 1,
+      "pixels": 346243,
+      "weighted_pixels": 346243,
+      "z_top_mm": 0.05000000074505806
+    },
+    {
+      "piece": "front-K-60; calibration piece, not a print candidate",
+      "layer_0based": 0,
+      "layer_1based": 1,
+      "pixels": 189363,
+      "weighted_pixels": 188428.81568627502,
+      "z_top_mm": 0.05000000074505806
+    },
+    {
+      "piece": "front-K-15; calibration piece, not a print candidate",
+      "layer_0based": 0,
+      "layer_1based": 1,
+      "pixels": 189363,
+      "weighted_pixels": 188428.82352941227,
+      "z_top_mm": 0.05000000074505806
+    },
+    {
+      "piece": "front-S-324; calibration piece, not a print candidate",
+      "layer_0based": 0,
+      "layer_1based": 1,
+      "pixels": 89387,
+      "weighted_pixels": 89387,
+      "z_top_mm": 0.05000000074505806
+    },
+    {
+      "piece": "back-A0-b2; calibration piece, not a print candidate",
+      "layer_0based": 0,
+      "layer_1based": 1,
+      "pixels": 346252,
+      "weighted_pixels": 346252,
+      "z_top_mm": 0.05000000074505806
+    },
+    {
+      "piece": "back-A0; calibration piece, not a print candidate",
+      "layer_0based": 0,
+      "layer_1based": 1,
+      "pixels": 346248,
+      "weighted_pixels": 346248,
+      "z_top_mm": 0.05000000074505806
+    },
+    {
+      "piece": "back-K-60; calibration piece, not a print candidate",
+      "layer_0based": 0,
+      "layer_1based": 1,
+      "pixels": 189363,
+      "weighted_pixels": 188428.80392156905,
+      "z_top_mm": 0.05000000074505806
+    },
+    {
+      "piece": "back-W; calibration piece, not a print candidate",
+      "layer_0based": 0,
+      "layer_1based": 1,
+      "pixels": 136271,
+      "weighted_pixels": 135340.68627450915,
+      "z_top_mm": 0.05000000074505806
+    },
+    {
+      "piece": "back-S-324; calibration piece, not a print candidate",
+      "layer_0based": 0,
+      "layer_1based": 1,
+      "pixels": 89387,
+      "weighted_pixels": 89387,
+      "z_top_mm": 0.05000000074505806
+    },
+    {
+      "piece": "back-B-100; calibration piece, not a print candidate",
+      "layer_0based": 0,
+      "layer_1based": 1,
+      "pixels": 74736,
+      "weighted_pixels": 74736,
+      "z_top_mm": 0.05000000074505806
+    },
+    {
+      "piece": "back-S-100; calibration piece, not a print candidate",
+      "layer_0based": 0,
+      "layer_1based": 1,
+      "pixels": 89388,
+      "weighted_pixels": 89388,
+      "z_top_mm": 0.05000000074505806
+    },
+    {
+      "piece": "back-K-15; calibration piece, not a print candidate",
+      "layer_0based": 0,
+      "layer_1based": 1,
+      "pixels": 189362,
+      "weighted_pixels": 188428.74901960828,
+      "z_top_mm": 0.05000000074505806
+    }
+  ],
+  "witness_placement": {
+    "geometry_and_supports_identical": true,
+    "models": [
+      2,
+      11
+    ],
+    "placement_fields": "Only translate; rotation and scale are baked into identical meshes. No per-model hidden lift is represented by the strict project reader.",
+    "same_z_translation_bits": true,
+    "translate_mm": [
+      [
+        -39.689998626708984,
+        -30.001001358032227,
+        0
+      ],
+      [
+        7.62999963760376,
+        30.001001358032227,
+        0
+      ]
+    ]
+  },
+  "island_count": 0,
+  "island_definition": "8-connected lit-any blobs with zero exact XY overlap with preceding layer; first layer excluded. Does not prove cured attachment.",
+  "waist_boundary_pass_count": 216,
+  "waist_boundary_total": 216,
+  "waist_boundary_definition": "Symmetric mask inclusion in the other mask's one-pixel Chebyshev dilation, X +/-1 and Y +/-1; midpoint centre-filled written waist mesh versus native lit-any blob. Explicit operational interpretation of the plan, not a percentage tolerance or a cure certificate.",
+  "coupons": [
+    {
+      "body_maximum_mm2": {
+        "lit_any": 18.05102579427125,
+        "weighted": 17.99944891642768
+      },
+      "model": 0,
+      "narrowest_waist_per_contact": [
+        {
+          "contact": 0,
+          "lit_any_index": 98.06502890173411,
+          "lit_any_layer_1based": 88,
+          "lit_any_mm2": 0.04601799947552978,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 97.7848294230986,
+          "weighted_layer_1based": 88,
+          "weighted_mm2": 0.04601799947552978
+        },
+        {
+          "contact": 1,
+          "lit_any_index": 96.94428571428571,
+          "lit_any_layer_1based": 88,
+          "lit_any_mm2": 0.046549999469466544,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 96.66728851540604,
+          "weighted_layer_1based": 88,
+          "weighted_mm2": 0.046549999469466544
+        },
+        {
+          "contact": 2,
+          "lit_any_index": 98.06502890173411,
+          "lit_any_layer_1based": 88,
+          "lit_any_mm2": 0.04601799947552978,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 97.7848294230986,
+          "weighted_layer_1based": 88,
+          "weighted_mm2": 0.04601799947552978
+        },
+        {
+          "contact": 3,
+          "lit_any_index": 97.50143678160919,
+          "lit_any_layer_1based": 88,
+          "lit_any_mm2": 0.046283999472498165,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 97.22284764480492,
+          "weighted_layer_1based": 88,
+          "weighted_mm2": 0.046283999472498165
+        }
+      ],
+      "piece": "front-S-100; calibration piece, not a print candidate",
+      "rule": "R-S324 [S]: body maximum / 4 / narrowest sampled waist per contact; all six waist layers 4.40–4.65 mm included; same rule for both 100 rungs",
+      "passes_declared_index_check": true
+    },
+    {
+      "body_maximum_mm2": {
+        "lit_any": 18.254249791955093,
+        "weighted": 18.062416852964894
+      },
+      "model": 1,
+      "narrowest_waist_per_contact": [
+        {
+          "contact": 0,
+          "lit_any_index": 98.03571428571428,
+          "lit_any_layer_1based": 89,
+          "lit_any_mm2": 0.046549999469466544,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 97.00546218487361,
+          "weighted_layer_1based": 89,
+          "weighted_mm2": 0.046549999469466544
+        },
+        {
+          "contact": 1,
+          "lit_any_index": 98.03571428571428,
+          "lit_any_layer_1based": 89,
+          "lit_any_mm2": 0.046549999469466544,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 97.00546218487361,
+          "weighted_layer_1based": 89,
+          "weighted_mm2": 0.046549999469466544
+        },
+        {
+          "contact": 2,
+          "lit_any_index": 98.03571428571428,
+          "lit_any_layer_1based": 89,
+          "lit_any_mm2": 0.046549999469466544,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 97.00546218487361,
+          "weighted_layer_1based": 89,
+          "weighted_mm2": 0.046549999469466544
+        },
+        {
+          "contact": 3,
+          "lit_any_index": 98.03571428571428,
+          "lit_any_layer_1based": 89,
+          "lit_any_mm2": 0.046549999469466544,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 97.00546218487361,
+          "weighted_layer_1based": 89,
+          "weighted_mm2": 0.046549999469466544
+        }
+      ],
+      "piece": "front-B-100; calibration piece, not a print candidate",
+      "rule": "R-S324 [S]: body maximum / 4 / narrowest sampled waist per contact; all six waist layers 4.40–4.65 mm included; same rule for both 100 rungs",
+      "passes_declared_index_check": true
+    },
+    {
+      "body_maximum_mm2": {
+        "lit_any": 18.05102579427125,
+        "weighted": 17.99944891642768
+      },
+      "model": 7,
+      "narrowest_waist_per_contact": [
+        {
+          "contact": 0,
+          "lit_any_index": 320.09905660377353,
+          "lit_any_layer_1based": 88,
+          "lit_any_mm2": 0.014097999839324154,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 319.18444321124633,
+          "weighted_layer_1based": 88,
+          "weighted_mm2": 0.014097999839324154
+        },
+        {
+          "contact": 1,
+          "lit_any_index": 332.6519607843137,
+          "lit_any_layer_1based": 88,
+          "lit_any_mm2": 0.013565999845387392,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 331.7014801999227,
+          "weighted_layer_1based": 88,
+          "weighted_mm2": 0.013565999845387392
+        },
+        {
+          "contact": 2,
+          "lit_any_index": 326.2548076923077,
+          "lit_any_layer_1based": 88,
+          "lit_any_mm2": 0.013831999842355773,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 325.3226055806934,
+          "weighted_layer_1based": 88,
+          "weighted_mm2": 0.013831999842355773
+        },
+        {
+          "contact": 3,
+          "lit_any_index": 320.09905660377353,
+          "lit_any_layer_1based": 88,
+          "lit_any_mm2": 0.014097999839324154,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 319.18444321124633,
+          "weighted_layer_1based": 88,
+          "weighted_mm2": 0.014097999839324154
+        }
+      ],
+      "piece": "front-S-324; calibration piece, not a print candidate",
+      "rule": "R-S324 [S]: body maximum / 4 / narrowest sampled waist per contact; all six waist layers 4.40–4.65 mm included; same rule for both 100 rungs",
+      "passes_declared_index_check": true
+    },
+    {
+      "body_maximum_mm2": {
+        "lit_any": 18.05102579427125,
+        "weighted": 17.99944891642768
+      },
+      "model": 12,
+      "narrowest_waist_per_contact": [
+        {
+          "contact": 0,
+          "lit_any_index": 320.09905660377353,
+          "lit_any_layer_1based": 88,
+          "lit_any_mm2": 0.014097999839324154,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 319.18444321124633,
+          "weighted_layer_1based": 88,
+          "weighted_mm2": 0.014097999839324154
+        },
+        {
+          "contact": 1,
+          "lit_any_index": 332.6519607843137,
+          "lit_any_layer_1based": 88,
+          "lit_any_mm2": 0.013565999845387392,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 331.7014801999227,
+          "weighted_layer_1based": 88,
+          "weighted_mm2": 0.013565999845387392
+        },
+        {
+          "contact": 2,
+          "lit_any_index": 332.6519607843137,
+          "lit_any_layer_1based": 88,
+          "lit_any_mm2": 0.013565999845387392,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 331.7014801999227,
+          "weighted_layer_1based": 88,
+          "weighted_mm2": 0.013565999845387392
+        },
+        {
+          "contact": 3,
+          "lit_any_index": 320.09905660377353,
+          "lit_any_layer_1based": 88,
+          "lit_any_mm2": 0.014097999839324154,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 319.18444321124633,
+          "weighted_layer_1based": 88,
+          "weighted_mm2": 0.014097999839324154
+        }
+      ],
+      "piece": "back-S-324; calibration piece, not a print candidate",
+      "rule": "R-S324 [S]: body maximum / 4 / narrowest sampled waist per contact; all six waist layers 4.40–4.65 mm included; same rule for both 100 rungs",
+      "passes_declared_index_check": true
+    },
+    {
+      "body_maximum_mm2": {
+        "lit_any": 18.254249791955093,
+        "weighted": 18.062416852964894
+      },
+      "model": 13,
+      "narrowest_waist_per_contact": [
+        {
+          "contact": 0,
+          "lit_any_index": 98.03571428571428,
+          "lit_any_layer_1based": 89,
+          "lit_any_mm2": 0.046549999469466544,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 97.00546218487361,
+          "weighted_layer_1based": 89,
+          "weighted_mm2": 0.046549999469466544
+        },
+        {
+          "contact": 1,
+          "lit_any_index": 98.03571428571428,
+          "lit_any_layer_1based": 89,
+          "lit_any_mm2": 0.046549999469466544,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 97.00546218487361,
+          "weighted_layer_1based": 89,
+          "weighted_mm2": 0.046549999469466544
+        },
+        {
+          "contact": 2,
+          "lit_any_index": 98.03571428571428,
+          "lit_any_layer_1based": 89,
+          "lit_any_mm2": 0.046549999469466544,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 97.00546218487361,
+          "weighted_layer_1based": 89,
+          "weighted_mm2": 0.046549999469466544
+        },
+        {
+          "contact": 3,
+          "lit_any_index": 98.03571428571428,
+          "lit_any_layer_1based": 89,
+          "lit_any_mm2": 0.046549999469466544,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 97.00546218487361,
+          "weighted_layer_1based": 89,
+          "weighted_mm2": 0.046549999469466544
+        }
+      ],
+      "piece": "back-B-100; calibration piece, not a print candidate",
+      "rule": "R-S324 [S]: body maximum / 4 / narrowest sampled waist per contact; all six waist layers 4.40–4.65 mm included; same rule for both 100 rungs",
+      "passes_declared_index_check": true
+    },
+    {
+      "body_maximum_mm2": {
+        "lit_any": 18.05102579427125,
+        "weighted": 17.99944891642768
+      },
+      "model": 14,
+      "narrowest_waist_per_contact": [
+        {
+          "contact": 0,
+          "lit_any_index": 97.50143678160919,
+          "lit_any_layer_1based": 88,
+          "lit_any_mm2": 0.046283999472498165,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 97.22284764480492,
+          "weighted_layer_1based": 88,
+          "weighted_mm2": 0.046283999472498165
+        },
+        {
+          "contact": 1,
+          "lit_any_index": 98.06502890173411,
+          "lit_any_layer_1based": 88,
+          "lit_any_mm2": 0.04601799947552978,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 97.7848294230986,
+          "weighted_layer_1based": 88,
+          "weighted_mm2": 0.04601799947552978
+        },
+        {
+          "contact": 2,
+          "lit_any_index": 98.06502890173411,
+          "lit_any_layer_1based": 91,
+          "lit_any_mm2": 0.04601799947552978,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 97.7848294230986,
+          "weighted_layer_1based": 91,
+          "weighted_mm2": 0.04601799947552978
+        },
+        {
+          "contact": 3,
+          "lit_any_index": 98.06502890173411,
+          "lit_any_layer_1based": 88,
+          "lit_any_mm2": 0.04601799947552978,
+          "minimum_measurable_before_body_merge": true,
+          "sample_count": 6,
+          "weighted_index": 97.7848294230986,
+          "weighted_layer_1based": 88,
+          "weighted_mm2": 0.04601799947552978
+        }
+      ],
+      "piece": "back-S-100; calibration piece, not a print candidate",
+      "rule": "R-S324 [S]: body maximum / 4 / narrowest sampled waist per contact; all six waist layers 4.40–4.65 mm included; same rule for both 100 rungs",
+      "passes_declared_index_check": true
+    }
+  ],
+  "k_controls": [
+    {
+      "piece": "front-K-60; calibration piece, not a print candidate",
+      "arm_scan_z_top_mm": [
+        4.55,
+        8.5
+      ],
+      "arm_lit_any_range_mm2": [
+        0.5245519940216459,
+        0.5250839940155826
+      ],
+      "arm_weighted_range_mm2": [
+        0.49866028451281397,
+        0.4988584805889864
+      ],
+      "arm_all_one_blob": true,
+      "flare_first_label_mm": 8.55,
+      "flare_area_mm2": 0.7987979908960459,
+      "full_cap_first_label_mm": 9.25,
+      "full_cap_lit_any_mm2": 30.194457655871748,
+      "full_cap_weighted_mm2": 29.997784560074077,
+      "last_lit_label_mm": 9.699999809265137
+    },
+    {
+      "piece": "front-K-15; calibration piece, not a print candidate",
+      "arm_scan_z_top_mm": [
+        4.55,
+        8.5
+      ],
+      "arm_lit_any_range_mm2": [
+        2.0458059766838126,
+        2.0458059766838126
+      ],
+      "arm_weighted_range_mm2": [
+        1.9947464949127995,
+        1.9948841890288775
+      ],
+      "arm_all_one_blob": true,
+      "flare_first_label_mm": 8.55,
+      "flare_area_mm2": 2.5607819708145967,
+      "full_cap_first_label_mm": 9.15,
+      "full_cap_lit_any_mm2": 30.194457655871748,
+      "full_cap_weighted_mm2": 29.99778143066235,
+      "last_lit_label_mm": 9.600000381469727
+    },
+    {
+      "piece": "back-K-60; calibration piece, not a print candidate",
+      "arm_scan_z_top_mm": [
+        4.55,
+        8.5
+      ],
+      "arm_lit_any_range_mm2": [
+        0.5245519940216459,
+        0.5248179940186142
+      ],
+      "arm_weighted_range_mm2": [
+        0.4987906766681906,
+        0.49898782960712007
+      ],
+      "arm_all_one_blob": true,
+      "flare_first_label_mm": 8.55,
+      "flare_area_mm2": 0.7987979908960459,
+      "full_cap_first_label_mm": 9.25,
+      "full_cap_lit_any_mm2": 30.194457655871748,
+      "full_cap_weighted_mm2": 29.99777830125062,
+      "last_lit_label_mm": 9.699999809265137
+    },
+    {
+      "piece": "back-K-15; calibration piece, not a print candidate",
+      "arm_scan_z_top_mm": [
+        4.55,
+        8.5
+      ],
+      "arm_lit_any_range_mm2": [
+        2.0458059766838126,
+        2.0458059766838126
+      ],
+      "arm_weighted_range_mm2": [
+        1.9947485811872858,
+        1.9948831458916345
+      ],
+      "arm_all_one_blob": true,
+      "flare_first_label_mm": 8.55,
+      "flare_area_mm2": 2.5607819708145967,
+      "full_cap_first_label_mm": 9.15,
+      "full_cap_lit_any_mm2": 30.194457655871748,
+      "full_cap_weighted_mm2": 29.997796034583757,
+      "last_lit_label_mm": 9.600000381469727
+    }
+  ],
+  "witnesses": [
+    {
+      "piece": "front-W; calibration piece, not a print candidate",
+      "first_lit_layer_0based": 0,
+      "head_layers_checked": 16,
+      "all_six_heads_distinct": true,
+      "last_lit_layer_1based": 103,
+      "last_lit_label_mm": 5.150000095367432,
+      "contacts": [
+        {
+          "contact": 0,
+          "waist_diameter_mm": 0.125,
+          "waist_lit_any_range_mm2": [
+            0.015427999824166054,
+            0.015427999824166054
+          ],
+          "waist_weighted_range_mm2": [
+            0.011956439079417937,
+            0.011956439079417937
+          ],
+          "ball_equator_lit_any_mm2": 0.2085439976232101,
+          "ball_equator_weighted_mm2": 0.1911893233111985
+        },
+        {
+          "contact": 1,
+          "waist_diameter_mm": 0.125,
+          "waist_lit_any_range_mm2": [
+            0.015959999818102814,
+            0.015959999818102814
+          ],
+          "waist_weighted_range_mm2": [
+            0.011960611628389994,
+            0.011960611628389994
+          ],
+          "ball_equator_lit_any_mm2": 0.2061499976504947,
+          "ball_equator_weighted_mm2": 0.19118828017395564
+        },
+        {
+          "contact": 2,
+          "waist_diameter_mm": 0.125,
+          "waist_lit_any_range_mm2": [
+            0.015959999818102814,
+            0.015959999818102814
+          ],
+          "waist_weighted_range_mm2": [
+            0.01196061162838999,
+            0.01196061162838999
+          ],
+          "ball_equator_lit_any_mm2": 0.20668199764443146,
+          "ball_equator_weighted_mm2": 0.19118828017395553
+        },
+        {
+          "contact": 3,
+          "waist_diameter_mm": 0.229,
+          "waist_lit_any_range_mm2": [
+            0.047613999457340066,
+            0.047613999457340066
+          ],
+          "waist_weighted_range_mm2": [
+            0.04013053287596296,
+            0.04013053287596296
+          ],
+          "ball_equator_lit_any_mm2": 0.20668199764443146,
+          "ball_equator_weighted_mm2": 0.1911882801739556
+        },
+        {
+          "contact": 4,
+          "waist_diameter_mm": 0.229,
+          "waist_lit_any_range_mm2": [
+            0.047613999457340066,
+            0.047613999457340066
+          ],
+          "waist_weighted_range_mm2": [
+            0.04014096424839309,
+            0.04014096424839309
+          ],
+          "ball_equator_lit_any_mm2": 0.2061499976504947,
+          "ball_equator_weighted_mm2": 0.19118619389946961
+        },
+        {
+          "contact": 5,
+          "waist_diameter_mm": 0.229,
+          "waist_lit_any_range_mm2": [
+            0.04894399944218197,
+            0.04894399944218197
+          ],
+          "waist_weighted_range_mm2": [
+            0.04013470542493501,
+            0.04013470542493501
+          ],
+          "ball_equator_lit_any_mm2": 0.2085439976232101,
+          "ball_equator_weighted_mm2": 0.19119140958568454
+        }
+      ]
+    },
+    {
+      "piece": "back-W; calibration piece, not a print candidate",
+      "first_lit_layer_0based": 0,
+      "head_layers_checked": 16,
+      "all_six_heads_distinct": true,
+      "last_lit_layer_1based": 103,
+      "last_lit_label_mm": 5.150000095367432,
+      "contacts": [
+        {
+          "contact": 0,
+          "waist_diameter_mm": 0.125,
+          "waist_lit_any_range_mm2": [
+            0.015427999824166054,
+            0.015427999824166054
+          ],
+          "waist_weighted_range_mm2": [
+            0.011956439079417937,
+            0.011956439079417937
+          ],
+          "ball_equator_lit_any_mm2": 0.2085439976232101,
+          "ball_equator_weighted_mm2": 0.19119036644844153
+        },
+        {
+          "contact": 1,
+          "waist_diameter_mm": 0.125,
+          "waist_lit_any_range_mm2": [
+            0.015959999818102814,
+            0.015959999818102814
+          ],
+          "waist_weighted_range_mm2": [
+            0.011959568491146983,
+            0.011959568491146983
+          ],
+          "ball_equator_lit_any_mm2": 0.2061499976504947,
+          "ball_equator_weighted_mm2": 0.19118619389946961
+        },
+        {
+          "contact": 2,
+          "waist_diameter_mm": 0.125,
+          "waist_lit_any_range_mm2": [
+            0.015959999818102814,
+            0.015959999818102814
+          ],
+          "waist_weighted_range_mm2": [
+            0.01195956849114698,
+            0.01195956849114698
+          ],
+          "ball_equator_lit_any_mm2": 0.20668199764443146,
+          "ball_equator_weighted_mm2": 0.19118932331119853
+        },
+        {
+          "contact": 3,
+          "waist_diameter_mm": 0.229,
+          "waist_lit_any_range_mm2": [
+            0.047613999457340066,
+            0.047613999457340066
+          ],
+          "waist_weighted_range_mm2": [
+            0.04012948973871995,
+            0.04013157601320597
+          ],
+          "ball_equator_lit_any_mm2": 0.20668199764443146,
+          "ball_equator_weighted_mm2": 0.19119140958568462
+        },
+        {
+          "contact": 4,
+          "waist_diameter_mm": 0.229,
+          "waist_lit_any_range_mm2": [
+            0.047613999457340066,
+            0.047613999457340066
+          ],
+          "waist_weighted_range_mm2": [
+            0.04013679169942105,
+            0.04013679169942105
+          ],
+          "ball_equator_lit_any_mm2": 0.2061499976504947,
+          "ball_equator_weighted_mm2": 0.19118828017395564
+        },
+        {
+          "contact": 5,
+          "waist_diameter_mm": 0.229,
+          "waist_lit_any_range_mm2": [
+            0.04894399944218197,
+            0.04894399944218197
+          ],
+          "waist_weighted_range_mm2": [
+            0.04013470542493502,
+            0.04013679169942104
+          ],
+          "ball_equator_lit_any_mm2": 0.2085439976232101,
+          "ball_equator_weighted_mm2": 0.19119140958568454
+        }
+      ]
+    }
+  ],
+  "C4": "deferred: A1 slots replaced by A0",
+  "pixel_diff": {
+    "changed_layer_count": 176,
+    "changed_pixels_by_piece": {
+      "back-A0-b2; calibration piece, not a print candidate": 163058,
+      "front-A0-f2; calibration piece, not a print candidate": 163044
+    },
+    "comparison": "Exact greyscale pixel equality; each changed XY pixel counted once per layer. Locations use native mirrored raster coordinates, not world mm.",
+    "header_changes": [
+      {
+        "field": "price",
+        "new": 0.1819470226764679,
+        "old": 0.1818123757839203
+      },
+      {
+        "field": "volume_mm3",
+        "new": 5861.978515625,
+        "old": 5857.640625
+      },
+      {
+        "field": "weight_g",
+        "new": 6.741275310516357,
+        "old": 6.736286640167236
+      }
+    ],
+    "layer_definition_changes_0based": [],
+    "layers_compared": 525,
+    "replicates": [
+      {
+        "destination": "front-A0-f2; calibration piece, not a print candidate",
+        "differing_pixels": 25036,
+        "lit_any_differing_pixels": 8021,
+        "lit_any_outside_one_row_source_destination": [
+          0,
+          0
+        ],
+        "lit_any_pixels_source_destination": [
+          77322811,
+          77323440
+        ],
+        "one_row_diagnostic": "Diagnostic only, not a waiver of the exact replicate equality check",
+        "source": "front-A0; calibration piece, not a print candidate",
+        "source_to_destination_shift_pixels": [
+          2217,
+          0
+        ],
+        "changed_layers": 524,
+        "changed_layer_range_0based": [
+          0,
+          523
+        ],
+        "diff_pixel_bounds_native": {
+          "x": [
+            7643,
+            9428
+          ],
+          "y": [
+            4308,
+            5061
+          ]
+        },
+        "changed_pixels_fraction_of_source_lit": 0.00032378543506391663
+      },
+      {
+        "destination": "back-A0-b2; calibration piece, not a print candidate",
+        "differing_pixels": 65852,
+        "lit_any_differing_pixels": 12491,
+        "lit_any_outside_one_row_source_destination": [
+          0,
+          0
+        ],
+        "lit_any_pixels_source_destination": [
+          77322559,
+          77322496
+        ],
+        "one_row_diagnostic": "Diagnostic only, not a waiver of the exact replicate equality check",
+        "source": "back-A0; calibration piece, not a print candidate",
+        "source_to_destination_shift_pixels": [
+          2217,
+          0
+        ],
+        "changed_layers": 524,
+        "changed_layer_range_0based": [
+          0,
+          523
+        ],
+        "diff_pixel_bounds_native": {
+          "x": [
+            11199,
+            12985
+          ],
+          "y": [
+            1152,
+            1918
+          ]
+        },
+        "changed_pixels_fraction_of_source_lit": 0.000851653137863686
+      }
+    ],
+    "outside_replaced_slots_differing_pixels": 0,
+    "disposition": "Exact equality was expected but is not achieved. Lit-any differences stay within one native pixel row in both directions; this diagnostic does not authorize accepting them. No cause is established."
+  },
+  "area_profile": {
+    "maximum_lit_any_mm2": 777.3498791404915,
+    "maximum_weighted_at_same_layer_mm2": 775.8609738868724,
+    "layer_1based": 2,
+    "lit_any_integrated_volume_mm3": 5861.980526740935,
+    "weighted_integrated_volume_mm3": 5806.966092876787,
+    "stored_volume_mm3": 5861.978515625,
+    "stored_minus_lit_any_mm3": -0.002011115934692498
+  },
+  "replay_review": "gpt-sol built; Claude Opus reviewed; PASS on written-file replay. Not final native-slice review.",
+  "pending": [
+    "Commit frozen table (this worker is not permitted to commit)",
+    "Orchestrator print request, then owner decision"
+  ],
+  "scope": "Horizontal raster areas, not cured strength, forces, physical print success, or physical tilt kinematics.",
+  "final_review": "Independent same-family native-slice review found the plate sound and recommended accepting translated-replicate differences as slicer noise. Orchestrator ruling R-REP accepted them on 2026-11-02. Final review: cross-family PASS (gpt-sol measured, Claude Opus reviewed), as recorded by the orchestrator. Float precision and K provenance findings corrected; no physical results.",
+  "rulings": "R-REP [S], 2026-11-02, orchestrator ruling, not an owner ruling: the pixel differences between the translated A0 copies (front-A0-f2 and back-A0-b2, each against its band's A0 shifted +2217 X px: 25,036 / 8,021 front and 65,852 / 12,491 back grey / lit-unlit pixels) are accepted as slicer rasterization variation, not geometry change. Evidence: unchanged translated pairs differ by similar or larger amounts (front-A0 vs back-A0: 90,998 / 5,154); no ±1 px shift explains them; one-row waist comparisons pass 216/216; zero islands; all 16 pieces start at layer 0. Consequence: the four A0 copies are replicates, with this variation recorded. Released for the print request on 2026-11-02."
+}
