@@ -12,7 +12,7 @@ This document says how ChituBox v1.4.0 stores a project in a `.chitubox` file. I
   - **Verified from samples**: measured from the bytes of the samples and checked by the second decoder.
   - **Inferred**: fits all the samples, but the bytes do not prove it.
 - One more ChituBox-written file, a re-save of a plinth-written file, is in `test-data/chitubox-native/load-test-2026-10-30/` (section 18). It is the 16th native file. Counts in sections 1 to 16 stay over the 15 files above.
-- Only one kind of file has been opened in ChituBox: plinth-written, model-only files with no supports (section 18). "Verified" still means "this is what ChituBox wrote". It does not mean "ChituBox needs this". For anything with supports, only a load test in ChituBox can show what ChituBox requires.
+- Plinth-written files opened in ChituBox: model-only files with no supports (section 18), and calibration plates with supports (section 8.3, preset ids). "Verified" still means "this is what ChituBox wrote". It does not mean "ChituBox needs this". For anything with supports, only a load test in ChituBox can show what ChituBox requires.
 
 Conventions:
 
@@ -261,6 +261,7 @@ This block sits between the model table and the first mesh. The old docs called 
 - In the `03`–`07` decoding, byte 1 = support kind code. Codes seen: 1, 2, 3, 4, 5, 6, 8. Code 7 was never seen. Do not infer a kind 12 from the Magic-supports value without a UI experiment.
 - Inferred kind names, from the owner's placement order in `03`: 1 adaptive, 2 vertical, 3 upright, 4 forked branch, 5 forked joint, 6 forked small, 8 forked tree. No UI test confirmed them.
 - `0x1e00` is on every type-6 (raft) record: kind byte 0x1e, preset byte 0.
+- **Preset id 0 is not drawn (load test 2026-11-10, ChituBox v1.4.0).** A supported model whose preset table holds id 0 and whose non-raft attrs have preset byte 0 (`0x0400`, `0x0100`) loads, counts the support volume, and draws no supports. The same records with table id 1 and attr `0x0104` or `0x0404` draw in full. Kind 1 and kind 4 both draw. Preset ids must be 1 or more, and each attr's preset byte must name an id in the table. `plinth_emit::constructed` (the Round 25 diagnostic path) still writes id 0 / `0x0400`; the calibration crate rewrites it to id 1 / `0x0104` for CAL-2.
 - All records of one support carry the same attr. Base pieces carry their parent support's attr.
 - A brace between two supports of different kinds carries both values, one in each u32 half. In `07`, records 38 and 39 carry `0x0000020400000304`: low half 0x0304 (upright), high half 0x0204 (vertical). Which half is which support is not known.
 - Two m2m supports in `03` both carry kind 6 but have different shapes (section 10.4). So the kind byte does not fix the shape.

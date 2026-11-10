@@ -8,7 +8,7 @@
 use crate::cal2_measure::HeadLoad;
 use crate::cal2_spec::{Cal2Spec, Item, Kind};
 use crate::{cal2_body, cal2_measure, cal2_shape};
-use plinth_chitubox::{Model, Preset, Supports};
+use plinth_chitubox::{Model, Preset, RecordType, Supports};
 use plinth_emit::shapes::{self, FrustumRole, RAFT_ATTR, Spec};
 use plinth_support::{
     construct::{
@@ -27,6 +27,35 @@ const WAIST_HIGH: f64 = 0.8;
 const TAPER_LOW: f64 = 2.0;
 const COLUMN_RADIUS: f32 = 1.0;
 const LAYER: f64 = 0.05;
+
+/// The id of the one preset table entry ("Light") in every coupon. ChituBox numbers presets
+/// from 1 and an attr names its preset as `id << 2` in its low byte: with id 0 (attr low
+/// byte 0, as `plinth_emit::constructed` writes) ChituBox v1.4.0 loads the records, counts
+/// their volume and draws nothing (found 2026-11-10 by opening variants of the CAL-2 file;
+/// the same records with id 1 draw in full). CAL-1's coupons use id 1.
+pub const LIGHT_PRESET_ID: u8 = 1;
+/// The attr of every non-raft support record (kind 1, preset [`LIGHT_PRESET_ID`]): 0x0104,
+/// as in the CAL-1 coupons ChituBox drew.
+#[must_use]
+pub fn support_attr() -> u64 {
+    shapes::attr(1, LIGHT_PRESET_ID)
+}
+
+/// Make a plinth-emitted model's preset table and attrs the form ChituBox draws: one
+/// "Light" preset with id [`LIGHT_PRESET_ID`], and that preset in every non-raft attr.
+fn chitubox_presets(model: &mut Model) {
+    if let Some(s) = &mut model.supports {
+        s.presets = vec![Preset {
+            id: u64::from(LIGHT_PRESET_ID),
+            name: "Light".into(),
+        }];
+        for (attr, r) in s.attrs.iter_mut().zip(&s.records) {
+            if r.record_type != RecordType::RAFT {
+                *attr = support_attr();
+            }
+        }
+    }
+}
 
 /// Area of a written 16-sided section of circumradius `r`.
 #[must_use]
@@ -315,10 +344,11 @@ fn plinth_heads(
         .map_err(|e| format!("raft: {e:?}"))?;
     let plan = routed.freeze().map_err(|e| format!("freeze: {e:?}"))?;
     let load = with_load.then(|| head_load(&plan)).transpose()?;
-    let model = plinth_emit::constructed::project(&plan)
+    let mut model = plinth_emit::constructed::project(&plan)
         .map_err(|e| format!("emit: {e:?}"))?
         .models
         .remove(0);
+    chitubox_presets(&mut model);
     Ok(HeadsBuilt {
         model,
         sites: sites_f32,
@@ -408,7 +438,13 @@ fn plain_columns(
     }));
     let records = shapes::build_all(&specs).map_err(|(i, e)| format!("part {i}: {e:?}"))?;
     let attrs = (0..records.len())
-        .map(|i| if i < supports { 0x0400 } else { RAFT_ATTR })
+        .map(|i| {
+            if i < supports {
+                support_attr()
+            } else {
+                RAFT_ATTR
+            }
+        })
         .collect();
     let model = Model {
         name: String::new(),
@@ -416,7 +452,7 @@ fn plain_columns(
         mesh: body.triangles().to_vec(),
         supports: Some(Supports {
             presets: vec![Preset {
-                id: 0,
+                id: u64::from(LIGHT_PRESET_ID),
                 name: "Light".into(),
             }],
             attrs,
@@ -425,6 +461,104 @@ fn plain_columns(
         }),
     };
     Ok((model, sites))
+}
+
+/// Lowest and highest z of a record's stored mesh.
+fn z_span(r: &plinth_chitubox::SupportRecord) -> (f64, f64) {
+    r.mesh
+        .iter()
+        .flatten()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(f64::from(v[2])), hi.max(f64::from(v[2])))
+        })
+}
+
+fn column_key(p: [f32; 3]) -> [i64; 2] {
+    [p[0], p[1]].map(|v| (f64::from(v) * 1000.0).round() as i64)
+}
+
+/// What ChituBox needs of a written model before its supports draw and reach the plate,
+/// checked on the written records (never on the plan): every non-raft attr names a preset
+/// of the table and not preset 0 (ChituBox draws nothing for id 0, see [`LIGHT_PRESET_ID`]),
+/// and in every support column (one XY) the record meshes form one continuous path from the
+/// body's lowest face down to a raft pad whose underside is the plate, at local
+/// `z = body_min_z - translate_z` (format spec section 6.2). Returns the number of columns.
+///
+/// # Errors
+/// The first column or attr that fails.
+pub fn check_supports_reach_plate(m: &Model) -> Result<usize, String> {
+    const TOUCH: f64 = 0.01;
+    let s = m.supports.as_ref().ok_or("the model has no supports")?;
+    if s.attrs.len() != s.records.len() {
+        return Err("attr array and records differ in length".into());
+    }
+    for (a, r) in s.attrs.iter().zip(&s.records) {
+        if r.record_type == RecordType::RAFT {
+            if *a != RAFT_ATTR {
+                return Err(format!("raft record attr {a:#x}"));
+            }
+        } else {
+            let preset = (a & 0xff) >> 2;
+            if preset == 0 || !s.presets.iter().any(|p| p.id == preset) {
+                return Err(format!(
+                    "attr {a:#x} names preset {preset}, not in the table"
+                ));
+            }
+        }
+    }
+    let body_min = m
+        .mesh
+        .iter()
+        .flatten()
+        .map(|v| f64::from(v[2]))
+        .fold(f64::INFINITY, f64::min);
+    let plate = body_min - f64::from(m.translate[2]);
+    let mut columns: std::collections::BTreeMap<[i64; 2], Vec<(f64, f64)>> = Default::default();
+    for r in s
+        .records
+        .iter()
+        .filter(|r| r.record_type != RecordType::RAFT)
+    {
+        columns
+            .entry(column_key(r.start))
+            .or_default()
+            .push(z_span(r));
+    }
+    let pads: Vec<([i64; 2], (f64, f64))> = s
+        .records
+        .iter()
+        .filter(|r| r.record_type == RecordType::RAFT && column_key(r.start) == column_key(r.end))
+        .map(|r| (column_key(r.start), z_span(r)))
+        .collect();
+    for (key, spans) in &mut columns {
+        let at = format!("support column at {key:?} (1/1000 mm)");
+        spans.sort_by(|a, b| b.1.total_cmp(&a.1));
+        if spans[0].1 < body_min - 1e-4 {
+            return Err(format!(
+                "{at}: its top {:.3} is below the body face {body_min:.3}",
+                spans[0].1
+            ));
+        }
+        let mut low = spans[0].0;
+        for &(lo, hi) in &spans[1..] {
+            if hi < low - TOUCH {
+                return Err(format!("{at}: gap between {hi:.3} and {low:.3}"));
+            }
+            low = low.min(lo);
+        }
+        let Some(&(_, (pad_lo, pad_hi))) = pads.iter().find(|(k, _)| k == key) else {
+            return Err(format!("{at}: no raft pad under it"));
+        };
+        if (pad_lo - plate).abs() > 1e-3 || pad_hi < low - TOUCH {
+            return Err(format!(
+                "{at}: lowest support {low:.3}, pad [{pad_lo:.3}, {pad_hi:.3}], plate {plate:.3}"
+            ));
+        }
+    }
+    if columns.is_empty() {
+        return Err("no support column".into());
+    }
+    Ok(columns.len())
 }
 
 /// Build one coupon. The name is set here; the placement translation is added later.
@@ -625,5 +759,126 @@ mod tests {
         }
         assert!(design(1.2).is_err(), "plinth's head cannot make 1.2 mm");
         assert!(design(0.05).is_err());
+    }
+
+    /// The model as the file holds it: written and parsed back.
+    fn written(m: &Model) -> Model {
+        let p = plinth_chitubox::Project {
+            models: vec![m.clone()],
+            ..plinth_chitubox::Project::default()
+        };
+        plinth_chitubox::parse(&p.to_bytes().unwrap())
+            .unwrap()
+            .models
+            .remove(0)
+    }
+
+    /// The CAL-2 defect (owner, in ChituBox, 2026-11-10): every coupon floated 5 mm above the
+    /// plate with no supports drawn, because the records carried preset id 0. Every coupon
+    /// of the matrix, 1.20 mm columns included, must hold in its written records one
+    /// continuous support path per head from the body face down to a pad on the plate, with
+    /// a preset ChituBox draws (the same preset as CAL-1's coupons).
+    #[test]
+    fn every_coupon_has_a_continuous_drawn_support_path_from_each_head_to_the_plate() {
+        let s = spec();
+        for it in s.items().iter().filter(|i| i.copy == 0) {
+            let b = build_for_layout(&s, it, 3).unwrap();
+            let m = written(&b.model);
+            let name = format!("{:?} {} R{}", it.variant, it.neck_mm, it.ratio);
+            assert_eq!(check_supports_reach_plate(&m), Ok(it.heads), "{name}");
+            let sup = m.supports.as_ref().unwrap();
+            assert_eq!(sup.presets.len(), 1, "{name}");
+            assert_eq!(sup.presets[0].id, u64::from(LIGHT_PRESET_ID), "{name}");
+            for (a, r) in sup.attrs.iter().zip(&sup.records) {
+                let want = if r.record_type == RecordType::RAFT {
+                    RAFT_ATTR
+                } else {
+                    0x0104
+                };
+                assert_eq!(*a, want, "{name}");
+            }
+            // The lowest support point is the plate: local body minimum less the lift.
+            let body_min = m
+                .mesh
+                .iter()
+                .flatten()
+                .map(|v| v[2])
+                .fold(f32::MAX, f32::min);
+            let low = sup
+                .records
+                .iter()
+                .map(|r| z_span(r).0)
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                (low - (f64::from(body_min) - s.lift_mm)).abs() < 1e-3,
+                "{name}: lowest support {low}"
+            );
+        }
+    }
+
+    /// Sabotage: the check sees each way the first CAL-2 file failed or could fail.
+    #[test]
+    fn the_support_path_check_refuses_preset_zero_a_missing_part_and_a_floating_column() {
+        let s = spec();
+        let it = s
+            .items()
+            .into_iter()
+            .find(|i| i.copy == 0 && i.kind == Kind::Head)
+            .unwrap();
+        let m = written(&build_for_layout(&s, &it, 3).unwrap().model);
+        assert!(check_supports_reach_plate(&m).is_ok());
+        // The CAL-2 file as first written: preset id 0, attr kind 4.
+        let mut bad = m.clone();
+        let sup = bad.supports.as_mut().unwrap();
+        sup.presets[0].id = 0;
+        for (a, r) in sup.attrs.iter_mut().zip(&sup.records) {
+            if r.record_type != RecordType::RAFT {
+                *a = 0x0400;
+            }
+        }
+        assert!(
+            check_supports_reach_plate(&bad)
+                .unwrap_err()
+                .contains("preset 0")
+        );
+        // Attr naming a preset that is not in the table.
+        let mut bad = m.clone();
+        bad.supports.as_mut().unwrap().presets[0].id = 2;
+        assert!(check_supports_reach_plate(&bad).is_err());
+        // No column rods and flares (heads only, nothing descends).
+        let mut bad = m.clone();
+        let sup = bad.supports.as_mut().unwrap();
+        let keep: Vec<bool> = sup
+            .records
+            .iter()
+            .map(|r| r.record_type != RecordType::ROD && r.record_type != RecordType::BASE_FLARE)
+            .collect();
+        let mut k = keep.iter();
+        sup.records.retain(|_| *k.next().unwrap());
+        let mut k = keep.iter();
+        sup.attrs.retain(|_| *k.next().unwrap());
+        let e = check_supports_reach_plate(&bad).unwrap_err();
+        assert!(e.contains("gap") || e.contains("lowest support"), "{e}");
+        // Whole model lifted off its pads: the plate is 1 mm below the pad undersides.
+        let mut bad = m.clone();
+        bad.translate[2] += 1.0;
+        assert!(check_supports_reach_plate(&bad).is_err());
+        // Pads removed.
+        let mut bad = m;
+        let sup = bad.supports.as_mut().unwrap();
+        let keep: Vec<bool> = sup
+            .records
+            .iter()
+            .map(|r| r.record_type != RecordType::RAFT)
+            .collect();
+        let mut k = keep.iter();
+        sup.records.retain(|_| *k.next().unwrap());
+        let mut k = keep.iter();
+        sup.attrs.retain(|_| *k.next().unwrap());
+        assert!(
+            check_supports_reach_plate(&bad)
+                .unwrap_err()
+                .contains("no raft pad")
+        );
     }
 }

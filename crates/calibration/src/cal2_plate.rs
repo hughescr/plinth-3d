@@ -98,6 +98,11 @@ fn write(path: &Path, models: Vec<Model>, gap: f64) -> Result<Written> {
     let read = plinth_chitubox::parse(&std::fs::read(path)?)?;
     // The repo's CAL-1 round trip: the file parses and writes back byte for byte.
     let identical = read.to_bytes()? == bytes;
+    // ChituBox is the real consumer: every written model must carry supports it draws and
+    // that reach the plate (the first CAL-2 file had none it drew).
+    for m in &read.models {
+        cal2_head::check_supports_reach_plate(m).map_err(|e| format!("{}: {e}", m.name))?;
+    }
     let gap = plate::validate_gap(&read.models, gap)?;
     let margin = edge_margin(&read.models);
     if margin < plate::EDGE_MARGIN {
