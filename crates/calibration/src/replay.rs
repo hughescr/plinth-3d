@@ -69,7 +69,8 @@ fn value(x: f64) -> Value {
 type Mode = (&'static str, fn(&load::SectionDetail) -> (f64, u32));
 /// Contacts that were in at least one group whose rigid-carrier equilibrium the load model
 /// assessed. For every other contact the model stores `rigid_lever = 0.0` as a marker for
-/// "not assessed" (a lone contact has no group to balance); that zero is never a ratio.
+/// "not assessed" (a lone contact's group, for example, is never assessed); that zero is never
+/// a ratio.
 fn assessed_contacts(d: &load::LoadDetail) -> std::collections::BTreeSet<u32> {
     d.groups
         .iter()
@@ -82,7 +83,7 @@ fn not_assessed() -> Value {
     json!({
         "assessed_U": false,
         "ratio_U": null,
-        "reason_U": "the load model did not assess rigid-carrier equilibrium for any contact of this path (no group of two or more contacts); its stored 0.0 is a marker, not a ratio"
+        "reason_U": "no load group containing this path's contacts had an assessed rigid-carrier equilibrium; its stored 0.0 is a marker, not a ratio"
     })
 }
 /// A ratio as text: `not assessed` where the model did not assess it.
@@ -613,8 +614,8 @@ mod tests {
         let (layout, _) = replay_native::layout(&m, l.grid.origin, l.grid.height).unwrap();
         let good = load::analyse_full(&l.stack, &layout, &load::Extras::default());
         let good = maxima(&good, &layout, 0, l.grid);
-        // A lone contact has no group to balance: the model stores 0.0 for rigid-carrier as
-        // "not assessed". That is reported as such, never as a ratio of 0 or a Patch section.
+        // This path's rigid-carrier equilibrium is not assessed: the model stores 0.0 for it,
+        // which is reported as "not assessed", never as a ratio of 0 or a Patch section.
         assert_eq!(good["rigid_carrier"]["assessed_U"], json!(false));
         assert!(good["rigid_carrier"]["ratio_U"].is_null());
         assert!(good["rigid_carrier"].get("kind").is_none());
