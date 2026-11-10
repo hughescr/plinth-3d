@@ -260,6 +260,27 @@ fn mark(
         let text = format!("{i}{}", extra(i));
         img.label(px as i32 + 11, py as i32 - 16, &text, 1, TEXT);
     }
+    for w in c
+        .data
+        .warnings
+        .iter()
+        .filter(|w| w.kind == "local load path not assessed")
+    {
+        if let Some(xyz) = w.location_mm {
+            let (x, y, _) = cam.project(xyz);
+            if x >= 0.0 && y >= 0.0 && x < f64::from(rect.w) && y < f64::from(rect.h) {
+                let (x, y) = (f64::from(rect.x) + x, f64::from(rect.y) + y);
+                img.ring((x, y), 9.0, WARN, 2.0);
+                img.label(
+                    x as i32 + 10,
+                    y as i32,
+                    &format!("local transfer L{}", w.layers[0]),
+                    1,
+                    TEXT,
+                );
+            }
+        }
+    }
 }
 
 fn unverified_page(name: &str, title: &str, why: &str) -> Picture {
@@ -639,7 +660,7 @@ fn p06_worst_contact(c: &Ctx<'_>) -> Picture {
     let cv = &ld.layout.contacts[w.contact as usize];
     let patch_r = (cv.patch_lower_mm2 / std::f64::consts::PI).sqrt();
     let cap = format!(
-        "Contact {} has the largest tributary ratio, {:.1}, in layer {}. Patch lower bound {:.3} mm2 (drawn as a disc of the same area; the checker's area interval is not part of this data, unverified). The ring is the 3.0 mm contact-surrounding region. The smallest gap outside the regions is {} mm.",
+        "Contact {} has the largest rigid-carrier/additive sizing ratio, {:.1}, in layer {}. Patch lower bound {:.3} mm2 (drawn as a disc of the same area; the checker's area interval is not part of this data, unverified). The ring is the 3.0 mm contact-surrounding region. The smallest gap outside the regions is {} mm.",
         w.contact,
         w.ratio,
         w.worst_layer,
@@ -716,7 +737,7 @@ fn p07_worst_load(c: &Ctx<'_>) -> Picture {
     };
     let peak = ld.detail.peak;
     let cap = format!(
-        "(a) Peel area of each layer against plate height, with the design ratio times the active section capacity; the worst layer is marked. (b) The peeling layer {}: each square is a source area element, coloured by the contact it goes to; the label is assigned area / section = ratio (sizing heuristic, not a load bound). (c) Side view, supports coloured by their largest tributary ratio.",
+        "(a) Layer peel and 12 x active sections; capacity alone does not prove equilibrium. (b) Layer {}: source colours are nearest-3D TRIBUTARY DIAGNOSTIC ONLY. Labels show spring reaction / available section (provisional when unresolved), NOT the coloured source assignment. (c) Rigid-carrier/additive sizing ratios; colour never clears unresolved equilibrium or local transfer. See FR-21 contact numbers in picture 02 (all contacts), picture 04 (rib close-up), and activation histories.",
         peak.map_or_else(
             || "(none)".to_owned(),
             |p| format!(
@@ -907,21 +928,22 @@ fn peak_plan(img: &mut Image, r: Rect, c: &Ctx<'_>, ld: &LoadData) {
         );
     }
     for (i, cv) in ld.layout.contacts.iter().enumerate() {
-        let load: f64 = src
-            .iter()
-            .filter(|e| e.contact == Some(i as u32))
-            .map(|e| e.area)
-            .sum();
+        let Some([load, sec]) = ld.detail.groups.iter().find_map(|g| {
+            (g.layer == pk.layer)
+                .then(|| {
+                    g.active
+                        .iter()
+                        .position(|&id| id == i as u32)
+                        .and_then(|at| g.contact_sections_mm2.get(at).copied())
+                })
+                .flatten()
+        }) else {
+            continue;
+        };
         if load <= 0.0 {
             continue;
         }
         let (x, y) = to(cv.centre[0], cv.centre[1]);
-        let b = ld
-            .detail
-            .groups
-            .iter()
-            .find(|g| g.layer == pk.layer && g.active.contains(&(i as u32)));
-        let sec = b.map_or(0.0, |g| g.section_sum_mm2 / g.active.len() as f64);
         img.ring((x, y), 7.0, TEXT, 2.0);
         img.label(
             x as i32 + 9,
@@ -1175,6 +1197,9 @@ fn p10_need(c: &Ctx<'_>) -> Picture {
 }
 
 fn warning_centre(w: &LoadWarning, cs: &[plinth_support::load::ContactView]) -> Option<V3> {
+    if let Some(p) = w.location_mm {
+        return Some(p);
+    }
     let pts: Vec<V3> = w
         .contacts
         .iter()

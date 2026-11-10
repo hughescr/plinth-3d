@@ -185,6 +185,7 @@ fn the_layout_must_cover_every_sample_that_needs_it_by_its_layer() {
     let ok = LayoutView {
         contacts: vec![view(2)],
         chains: Vec::new(),
+        patch_history: Vec::new(),
     };
     let (cov, w) = check_coverage(&needs, &ok, &stack);
     assert_eq!((cov.needing, cov.covered), (2, 2));
@@ -193,6 +194,7 @@ fn the_layout_must_cover_every_sample_that_needs_it_by_its_layer() {
     let late_layout = LayoutView {
         contacts: vec![view(3)],
         chains: Vec::new(),
+        patch_history: Vec::new(),
     };
     let (cov, w) = check_coverage(&needs, &late_layout, &stack);
     assert_eq!((cov.needing, cov.covered), (2, 0));

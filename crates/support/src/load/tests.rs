@@ -111,6 +111,7 @@ fn layout(cs: Vec<ContactView>, neck: f64, column: f64) -> LayoutView {
     LayoutView {
         contacts: cs,
         chains,
+        patch_history: Vec::new(),
     }
 }
 
@@ -155,6 +156,30 @@ fn shares_sum_to_the_layer_area_and_layers_are_never_summed() {
     assert_eq!(d.report.layers.len(), 3);
     assert!(close(d.report.layers[0].area_mm2, 12.0));
     assert!(close(d.report.layers[0].capacity_mm2, 12.0 * 3.0));
+}
+
+#[test]
+fn per_layer_labels_use_each_contacts_own_worst_section_not_the_group_average() {
+    let stack = body(&[12.0]);
+    let lay = layout(
+        vec![
+            contact(0.5, 2.0, 0, 0.1, 1.0),
+            contact(2.5, 2.0, 0, 0.8, 1.0),
+        ],
+        1.0,
+        1.0,
+    );
+    let d = analyse_full(&stack, &lay, &Extras::default());
+    let g = &d.groups[0];
+    assert!(close(g.contact_sections_mm2[0][1], 0.1));
+    assert!(close(g.contact_sections_mm2[1][1], 0.8));
+    for (&i, &[load, section]) in g.active.iter().zip(&g.contact_sections_mm2) {
+        assert!(close(load / section, d.contacts[i as usize].ratio));
+        assert!(!close(
+            load / (g.section_sum_mm2 / 2.0),
+            d.contacts[i as usize].ratio
+        ));
+    }
 }
 
 #[test]
@@ -546,7 +571,11 @@ fn synthetic_round25_layout(ml: &ModelLayers, needs: &NeedsMap, spacing: f64) ->
             ],
         });
     }
-    LayoutView { contacts, chains }
+    LayoutView {
+        contacts,
+        chains,
+        patch_history: Vec::new(),
+    }
 }
 
 #[test]

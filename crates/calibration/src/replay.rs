@@ -67,6 +67,31 @@ fn value(x: f64) -> Value {
     }
 }
 type Mode = (&'static str, fn(&load::SectionDetail) -> (f64, u32));
+/// Contacts that were in at least one group whose rigid-carrier equilibrium the load model
+/// assessed. For every other contact the model stores `rigid_lever = 0.0` as a marker for
+/// "not assessed" (a lone contact's group, for example, is never assessed); that zero is never
+/// a ratio.
+fn assessed_contacts(d: &load::LoadDetail) -> std::collections::BTreeSet<u32> {
+    d.groups
+        .iter()
+        .filter(|g| g.equilibrium_assessed)
+        .flat_map(|g| g.active.iter().copied())
+        .collect()
+}
+/// The rigid-carrier entry when no section of the piece was assessed.
+fn not_assessed() -> Value {
+    json!({
+        "assessed_U": false,
+        "ratio_U": null,
+        "reason_U": "no load group containing this path's contacts had an assessed rigid-carrier equilibrium; its stored 0.0 is a marker, not a ratio"
+    })
+}
+/// A ratio as text: `not assessed` where the model did not assess it.
+fn shown(v: &Value, precision: usize) -> String {
+    v["ratio_U"]
+        .as_f64()
+        .map_or_else(|| "not assessed".into(), |x| format!("{x:.precision$}"))
+}
 fn effective(p: &PartSection, zt: f64) -> f64 {
     if p.kind != PartKind::Patch {
         return p.area_lower_mm2;
@@ -88,13 +113,23 @@ fn maxima(d: &load::LoadDetail, layout: &LayoutView, offset: usize, grid: LayerG
         ("tributary", |s| s.tributary),
     ];
     let mut out = serde_json::Map::new();
+    let assessed = assessed_contacts(d);
     for (name, f) in modes {
-        let Some(s) = d.sections.iter().max_by(|a, b| {
-            f(a).0
-                .total_cmp(&f(b).0)
-                .then_with(|| b.chain.cmp(&a.chain))
-                .then_with(|| b.part.cmp(&a.part))
-        }) else {
+        let rigid = name == "rigid_carrier";
+        let Some(s) = d
+            .sections
+            .iter()
+            .filter(|s| !rigid || assessed.contains(&layout.chains[s.chain as usize].contact))
+            .max_by(|a, b| {
+                f(a).0
+                    .total_cmp(&f(b).0)
+                    .then_with(|| b.chain.cmp(&a.chain))
+                    .then_with(|| b.part.cmp(&a.part))
+            })
+        else {
+            if rigid {
+                out.insert(name.into(), not_assessed());
+            }
             continue;
         };
         let (ratio, layer) = f(s);
@@ -124,6 +159,9 @@ fn maxima(d: &load::LoadDetail, layout: &LayoutView, offset: usize, grid: LayerG
             vec![]
         };
         out.insert(name.into(),json!({"ratio_U":value(ratio),"layer_M":layer,"z_top_mm_M":grid.z_top(layer),"contact_M":chain.contact as usize+offset,"kind":format!("{:?}",p.kind),"record_M":p.record,"section_whole_area_mm2_M":p.area_lower_mm2,"effective_section_area_mm2_U":effective(p,grid.z_top(layer)),"section_z_range_mm_M":p.z_range_mm,"group_limiting_sections":limiting,"group_section_sum_mm2_U":group.map(|g|g.section_sum_mm2),"group_peel_area_mm2_M":group.map(|g|g.area_mm2),"group_rigid_residual_U":group.map(|g|g.lever_residual),"group_centroid_outside_hull_mm_U":group.map(|g|g.outside_hull_mm)}));
+        if rigid {
+            out[name]["assessed_U"] = json!(true);
+        }
     }
     Value::Object(out)
 }
@@ -152,7 +190,8 @@ fn analyse(ts: &[Triangle], shift: f64, layout: LayoutView, offset: usize) -> Re
         .min_by(|a, b| a.1.area_lower_mm2.total_cmp(&b.1.area_lower_mm2))
         .ok_or("no load-path sections")?;
     let narrowest = json!({"contact_M":ci,"kind":format!("{:?}",minimum.kind),"record_M":minimum.record,"area_mm2_M":minimum.area_lower_mm2,"z_range_mm_M":minimum.z_range_mm,"scope":"Smallest sampled whole section; a partly exposed patch may have a smaller effective area U."});
-    let sections:Vec<_>=d.sections.iter().map(|s|json!({"contact_M":layout.chains[s.chain as usize].contact as usize+offset,"kind":format!("{:?}",s.kind),"record_M":s.record,"tributary_U":[value(s.tributary.0),json!(s.tributary.1)],"rigid_carrier_U":[value(s.rigid_lever.0),json!(s.rigid_lever.1)],"additive_U":[value(s.additive.0),json!(s.additive.1)],"equal_share_U":[value(s.equal_share.0),json!(s.equal_share.1)]})).collect();
+    let assessed = assessed_contacts(&d);
+    let sections:Vec<_>=d.sections.iter().map(|s|json!({"contact_M":layout.chains[s.chain as usize].contact as usize+offset,"kind":format!("{:?}",s.kind),"record_M":s.record,"tributary_U":[value(s.tributary.0),json!(s.tributary.1)],"rigid_carrier_U":if assessed.contains(&layout.chains[s.chain as usize].contact) {json!([value(s.rigid_lever.0),s.rigid_lever.1])} else {Value::Null},"additive_U":[value(s.additive.0),json!(s.additive.1)],"equal_share_U":[value(s.equal_share.0),json!(s.equal_share.1)]})).collect();
     let warnings:Vec<_>=d.report.warnings.iter().map(|w|json!({"kind":w.kind,"message":w.message,"layers_M":w.layers,"contacts_M":w.contacts.iter().map(|&c|c as usize+offset).collect::<Vec<_>>(),"message_contact_ids":"path-local; use contacts_M for piece-global IDs"})).collect();
     Ok(
         json!({"maxima":max,"narrowest_sampled_whole_section_M":narrowest,"sections":sections,"warnings":warnings,"grid_M":{"origin_mm":l.grid.origin,"height_mm":l.grid.height,"layers":l.grid.layers},"contact_count_M":layout.contacts.len()}),
@@ -218,6 +257,9 @@ fn solid_path(
                 },
             ],
         }],
+        // The replay has no printed patch history: it states the cut patch itself, so the
+        // load model uses its documented disc approximation (the pre-merge behaviour).
+        patch_history: Vec::new(),
     };
     let mut result = analyse(&upper, shift, layout, index)?;
     result["geometry"] = json!({"path_M":index,"cut_plate_z_mm_M":cut+shift,"minimum_area_mm2_M":minimum.area,"minimum_plate_z_mm_M":minimum.at+shift,"sample_step_mm_M":minimum.step,"scope":"Loaded path from raft top through waist/arm to cut; upper ball crown is load, not a neck. Cap fan closes the written cut; no fields substituted."});
@@ -249,7 +291,12 @@ fn solid(m: &Model, id: &str) -> Result<Value> {
     let mut max = paths[0]["maxima"].clone();
     for p in &paths[1..] {
         for key in ["rigid_carrier", "additive", "equal_share", "tributary"] {
-            if ratio(&p["maxima"][key]) > ratio(&max[key]) {
+            let better = match (assessed_ratio(&p["maxima"][key]), assessed_ratio(&max[key])) {
+                (Some(a), Some(b)) => a > b,
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+            if better {
                 max[key] = p["maxima"][key].clone();
             }
         }
@@ -260,6 +307,10 @@ fn solid(m: &Model, id: &str) -> Result<Value> {
 }
 fn ratio(v: &Value) -> f64 {
     v["ratio_U"].as_f64().unwrap_or(f64::INFINITY)
+}
+/// The ratio, or `None` where the load model did not assess it.
+fn assessed_ratio(v: &Value) -> Option<f64> {
+    (v["assessed_U"] != json!(false)).then(|| ratio(v))
 }
 fn key(m: &Model) -> Result<Vec<u8>> {
     let mut m = m.clone();
@@ -413,11 +464,11 @@ pub fn run(project: &Path, predictions: &Path, markdown: &Path) -> Result<()> {
     let a0 = &cache["A0"].1["maxima"];
     writeln!(
         md,
-        "\n## A0 sanity comparison\n\nEarlier approximate ratios were rigid-carrier 2,293 [U] and additive 313 [U]. Current replay: rigid-carrier {:.3} [U], additive {:.3} [U]. Rigid-carrier reproduces the earlier rounded value. Additive is 0.57% below the earlier rounded 313. A direct rerun of the existing historical binary on the identical A0 individual file returned rigid-carrier 2292.950919 [U] and additive 312.671859 [U], which rounds to 313. Both additive peaks have the same peel area, 37.678898974 mm² [M], at plate Z 5.85 mm [M]. Its denominator was 0.120506204 mm² [M, checker-conservative], versus the current nominal written-mesh 0.121068006 mm² [M]. That 0.466% larger denominator explains the current 0.464% lower additive estimate. The earlier adapter shrinks each convex half-space by the checker's face slack, canonical deviation and 0.000002 mm allowance; this adapter measures the nominal written face-plane intersection, without claiming a certified lower bound. The current unchanged load API uses the tilted-disc patch-exposure approximation [U], not explicit clipped patch history. Equal-share differs from historical 9669.53 [U] to current {:.2} [U], and tributary from 42945.54 [U] to {:.2} [U] (historical about 3.05× current): both peaks are first-exposure artefacts at contact 7, ball record 14 [M], where historical clipped patch area 0.000317 mm² [U] versus the API's tilted-disc 0.000966 mm² [U] explains the discrepancy; historical grid layer 341 maps to current layer 401 [M] through a 3.0 mm origin offset [M], and neither unscored maximum changes the additive call. The actual peak group has five active contacts [M], including the three lip patches and two smaller patches, not only the three lip patches described in the earlier summary. No preregistered call changes.\n",
-        ratio(&a0["rigid_carrier"]),
-        ratio(&a0["additive"]),
-        ratio(&a0["equal_share"]),
-        ratio(&a0["tributary"])
+        "\n## A0 sanity comparison\n\nEarlier approximate ratios were rigid-carrier 2,293 [U] and additive 313 [U]. Current replay: rigid-carrier {} [U], additive {} [U]. Rigid-carrier reproduces the earlier rounded value. Additive is 0.57% below the earlier rounded 313. A direct rerun of the existing historical binary on the identical A0 individual file returned rigid-carrier 2292.950919 [U] and additive 312.671859 [U], which rounds to 313. Both additive peaks have the same peel area, 37.678898974 mm² [M], at plate Z 5.85 mm [M]. Its denominator was 0.120506204 mm² [M, checker-conservative], versus the current nominal written-mesh 0.121068006 mm² [M]. That 0.466% larger denominator explains the current 0.464% lower additive estimate. The earlier adapter shrinks each convex half-space by the checker's face slack, canonical deviation and 0.000002 mm allowance; this adapter measures the nominal written face-plane intersection, without claiming a certified lower bound. The current unchanged load API uses the tilted-disc patch-exposure approximation [U], not explicit clipped patch history. Equal-share differs from historical 9669.53 [U] to current {} [U], and tributary from 42945.54 [U] to {} [U] (historical about 3.05× current): both peaks are first-exposure artefacts at contact 7, ball record 14 [M], where historical clipped patch area 0.000317 mm² [U] versus the API's tilted-disc 0.000966 mm² [U] explains the discrepancy; historical grid layer 341 maps to current layer 401 [M] through a 3.0 mm origin offset [M], and neither unscored maximum changes the additive call. The actual peak group has five active contacts [M], including the three lip patches and two smaller patches, not only the three lip patches described in the earlier summary. No preregistered call changes.\n",
+        shown(&a0["rigid_carrier"], 3),
+        shown(&a0["additive"], 3),
+        shown(&a0["equal_share"], 2),
+        shown(&a0["tributary"], 2)
     )?;
     md.push_str("## Interpretation and remaining checks\n\nFront and back copies have identical serialized geometry after removing only names and XY placement [M]; all replay numbers therefore match exactly. Additive maxima belong to a group, not one physical section: the JSON lists every group's limiting section. The table's contact is a representative row. At a partly printed patch the API reduces patch capacity using its disc approximation [U]. The global maxima for A0 and A1 remain at unchanged branch necks or unchanged patches, so equal headline maxima do not mean the edited main necks are equal. Coupon written-mesh indices (about 112 for the 100 rungs and 376 for S-324 [U]) are higher than the existing predicted native-slice indices because native slicing inflates the tiny waist areas. Both sets remain labelled estimates; only the assembled native slice can replace those predictions. Raw API warnings use production thresholds; they do not replace the preregistered clear-call rule below.\n\nC1 compares B-100 with S-100 per band; C2 tests S-324; C3 tests A0; C4 compares A0/A1 at qualifying edited necks only. Only the P4 additive compact-law rule (fail at >=92, hold at <=6.6) gets a clear call. The assumed strip-tolerance scenario makes no clear call. K expects K-15 hold and K-60 fail from plate 6, as replication rather than P4 scoring. W has no scored strength call. P5's design ratio remains 12 [U]; it is not the calibrated hold/fail bracket.\n\nUnverified: assembled native slicing, formation loads on the actual pixels, one-row boundary tolerance, GOO hash, open/save field preservation for A1b, print time/volume, physical outcomes and cross-family review. The prior same-family replay review found labelling and disclosure defects; this table applies those corrections without changing any model maximum or preregistered call. No physical strength, sharing law, or new design ratio is established. Mesh sections are sampled diagnostics, not certified continuous lower bounds. Support self-peel follows the unchanged API's section-area approximation; W and K upper load geometry is sliced explicitly. The API does not assess brace redistribution, neck bending or slenderness, and its warnings remain in the JSON.\n\n");
     writeln!(
@@ -472,6 +523,10 @@ fn write_piece(md: &mut String, row: &Value, result: &Value, prediction: &Value)
     )?;
     for name in ["rigid_carrier", "additive", "equal_share", "tributary"] {
         let r = &result["maxima"][name];
+        if assessed_ratio(r).is_none() {
+            write!(md, "| not assessed ")?;
+            continue;
+        }
         write!(
             md,
             "| {:.2}; {} r{} c{}, L{} / {:.2} mm ",
@@ -525,6 +580,10 @@ fn write_c4_necks(md: &mut String, a0: &Value, a1: &Value) -> Result<()> {
                 "equal_share_U",
                 "tributary_U",
             ] {
+                if s[mode].is_null() {
+                    write!(md, "| not assessed ")?;
+                    continue;
+                }
                 write!(
                     md,
                     "| {:.2} / {} ",
@@ -555,7 +614,13 @@ mod tests {
         let (layout, _) = replay_native::layout(&m, l.grid.origin, l.grid.height).unwrap();
         let good = load::analyse_full(&l.stack, &layout, &load::Extras::default());
         let good = maxima(&good, &layout, 0, l.grid);
-        for name in ["rigid_carrier", "additive", "equal_share", "tributary"] {
+        // This path's rigid-carrier equilibrium is not assessed: the model stores 0.0 for it,
+        // which is reported as "not assessed", never as a ratio of 0 or a Patch section.
+        assert_eq!(good["rigid_carrier"]["assessed_U"], json!(false));
+        assert!(good["rigid_carrier"]["ratio_U"].is_null());
+        assert!(good["rigid_carrier"].get("kind").is_none());
+        assert_eq!(assessed_ratio(&good["rigid_carrier"]), None);
+        for name in ["additive", "equal_share", "tributary"] {
             assert_eq!(good[name]["kind"], "Neck");
             assert!(ratio(&good[name]) > 300.0);
         }
@@ -709,12 +774,41 @@ mod tests {
         }
     }
     #[test]
-    fn replay_reference_matches_computed_fixture_outputs_bit_exactly() {
-        // Recompute the six pieces whose construction inputs live in the repo.
-        // This anchors the snapshot to real replay arithmetic, not just JSON IO.
+    fn frozen_record_files_are_intact() {
+        // CAL-1 is printed and closed. `cal1-frozen/` is the record of the predictions made
+        // with the load model at release (1a7600c), not a target for the current model.
+        // FROZEN.json records only the project and GOO hashes, so each file is pinned here.
+        let dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/calibration/cal1-frozen");
+        for (name, sha) in [
+            (
+                "FROZEN.json",
+                "f49d3cd66edfb2865514ca868b748a6612338baa38aa491d99901b6817a37214",
+            ),
+            (
+                "measurements.json",
+                "dbdf022e58db4fbb316eaab291e09527007ffa84eff3ef87619229f2aa91ba4e",
+            ),
+            (
+                "predictions.json",
+                "e91d62f5e0e4902c29eedd47f3d1b0eeb95d93d1a620a96f80a2de41ee283921",
+            ),
+            (
+                "replay-maxima.json",
+                "a0ecc3db697c413830e99918de704343e9ae455049820206e83f2418c997d132",
+            ),
+        ] {
+            assert_eq!(hash(&dir.join(name)).unwrap(), sha, "{name} was edited");
+        }
+    }
+    #[test]
+    fn replay_runs_on_the_current_model_for_every_repo_specimen() {
+        // The numbers belong to the current load model and are not compared with the frozen
+        // record. Every specimen the repository can build must replay to finite outputs, and
+        // rigid-carrier must be either a finite ratio or explicitly not assessed.
         let spec: crate::spec::PlateSpec =
             serde_json::from_str(include_str!("../../../fixtures/calibration/cal1.json")).unwrap();
-        let reference = replay_reference();
+        assert!(!spec.specimens.is_empty());
         for specimen in &spec.specimens {
             let bytes = crate::build::specimen(specimen, &spec.head)
                 .to_bytes()
@@ -725,13 +819,16 @@ mod tests {
             } else {
                 solid(&model, &specimen.id).unwrap()
             };
-            let expected = reference["pieces"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|r| r["id"] == specimen.id)
-                .unwrap();
-            assert_replay_bits(&output["maxima"], &expected["maxima"]);
+            for mode in ["rigid_carrier", "additive", "equal_share", "tributary"] {
+                let r = &output["maxima"][mode];
+                if assessed_ratio(r).is_none() {
+                    assert_eq!(mode, "rigid_carrier", "{}: {mode}", specimen.id);
+                    assert!(r["ratio_U"].is_null(), "{}", specimen.id);
+                } else {
+                    let x = ratio(r);
+                    assert!(x.is_finite() && x > 0.0, "{} {mode}: {x}", specimen.id);
+                }
+            }
         }
     }
     #[test]

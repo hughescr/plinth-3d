@@ -29,8 +29,14 @@ fn checker_json(c: Option<&Checked>) -> Json {
 /// What a file is called in the report: a transport file, or (candidate mode, published only
 /// after the checker passed it with no applicable rule unverified or violated) a print
 /// candidate.
-fn kind_of(candidate: bool) -> &'static str {
-    if candidate { "candidate" } else { "transport" }
+fn kind_of(candidate: bool, supported: bool) -> &'static str {
+    if supported {
+        "supported"
+    } else if candidate {
+        "candidate"
+    } else {
+        "transport"
+    }
 }
 
 fn label_of(candidate: bool) -> &'static str {
@@ -68,15 +74,27 @@ fn model_json(candidate: bool, m: &ModelRun) -> Json {
             checked.as_ref(),
         ),
     };
-    let blockers = checked.map_or_else(Vec::new, Checked::candidate_blockers);
-    let is_candidate = candidate && status == "published";
+    let mut blockers = checked.map_or_else(Vec::new, Checked::candidate_blockers);
+    if m.planning_blockers {
+        blockers.push("placement or load measurements unresolved".into());
+    }
+    let is_candidate = status == "published"
+        && checked
+            .is_some_and(|c| crate::run::candidate_allowed(candidate, c, m.planning_blockers));
     Json::obj([
         ("input", path(&m.input)),
         ("output_name", Json::str(format!("{}.chitubox", m.stem))),
         ("status", Json::str(status)),
-        ("kind", Json::str(kind_of(candidate))),
+        ("kind", Json::str(kind_of(candidate, m.supported))),
         ("print_candidate", Json::Bool(is_candidate)),
-        ("label", Json::str(label_of(is_candidate))),
+        (
+            "label",
+            Json::str(if m.supported && !is_candidate {
+                "supported, not a print candidate"
+            } else {
+                label_of(is_candidate)
+            }),
+        ),
         (
             "candidate_blockers",
             Json::Arr(blockers.iter().map(Json::str).collect()),
@@ -87,6 +105,7 @@ fn model_json(candidate: bool, m: &ModelRun) -> Json {
         ("failed_stage", stage),
         ("error", error),
         ("checker", checker_json(checked)),
+        ("fr21", m.fr21.clone().unwrap_or(Json::Null)),
     ])
 }
 
@@ -132,6 +151,9 @@ fn steps_json(m: &ModelRun) -> Json {
 #[must_use]
 pub fn to_json(cfg: &Config, run: &Run) -> Json {
     let failed = run.models.len() - run.published();
+    let supported = run.models.iter().any(|m| m.supported);
+    let candidate=cfg.candidate && !run.models.is_empty() && run.models.iter().all(|m|matches!(&m.outcome,
+        Outcome::Published { checked,.. } if crate::run::candidate_allowed(true,checked,m.planning_blockers)));
     Json::obj([
         ("report_version", Json::Uint(REPORT_VERSION)),
         (
@@ -141,12 +163,16 @@ pub fn to_json(cfg: &Config, run: &Run) -> Json {
                 ("version", Json::str(env!("CARGO_PKG_VERSION"))),
             ]),
         ),
-        ("kind", Json::str(kind_of(cfg.candidate))),
+        ("kind", Json::str(kind_of(cfg.candidate, supported))),
+        ("print_candidate", Json::Bool(candidate)),
         (
-            "print_candidate",
-            Json::Bool(cfg.candidate && failed == 0 && !run.models.is_empty()),
+            "label",
+            Json::str(if supported && !candidate {
+                "supported, not a print candidate"
+            } else {
+                label_of(candidate)
+            }),
         ),
-        ("label", Json::str(label_of(cfg.candidate && failed == 0))),
         (
             "models",
             Json::Arr(
@@ -185,8 +211,8 @@ pub fn to_json(cfg: &Config, run: &Run) -> Json {
 pub const LIGHT_NECK_MM2: f64 = 0.031;
 
 /// Why the tributary ratio is not a load bound (design sections 4.3 and 4.7).
-pub const TRIBUTARY_LABEL: &str = "Tributary ratio: a sizing heuristic under one sharing \
-    assumption, not a bound on the force in any section.";
+pub const TRIBUTARY_LABEL: &str = "Tributary ratio: a nearest-3D sensitivity diagnostic only. \
+    It does not size contacts or trigger intervention by its value alone; it is not a reaction bound.";
 
 /// The uncertainty statement (design section 3).
 pub const UNCERTAINTY: [&str; 4] = [
@@ -234,13 +260,13 @@ pub const ASSUMPTIONS: [(&str, &str, &str); 12] = [
     ),
     (
         "A6",
-        "Tributary sharing sizes contacts; it is not a reaction bound.",
-        "All four sharing results and the moment-balance test are classified. The owner reports which contacts failed.",
+        "Rigid-carrier tension-only springs (stiffness proportional to the certified section available at each layer) plus the additive group requirement size contacts. This is an unmeasured approximation, not a reaction bound.",
+        "All four models are reported separately; equilibrium and conditioning must pass. Singular, ill-conditioned or unbalanced responses remain unresolved. Tributary is diagnostic only. The owner reports which contacts failed.",
     ),
     (
         "A7",
         "A contact carries only the patch printed so far.",
-        "Geometric; tested on synthetic shapes. The printed part of the patch is a disc in the plane the patch's height range implies.",
+        "Native in-sphere surface-patch lower bounds are clipped to the exposure half-space in one geometry batch. Future patch area never holds earlier layers. Synthetic inputs without these histories remain unverified.",
     ),
     (
         "A8",
@@ -299,6 +325,11 @@ fn warning_json(w: &plinth_support::load::LoadWarning) -> Json {
                     .collect(),
             ),
         ),
+        (
+            "location_mm",
+            w.location_mm
+                .map_or(Json::Null, |p| Json::Arr(p.map(num).to_vec())),
+        ),
         ("message", Json::str(&w.message)),
     ])
 }
@@ -332,17 +363,22 @@ fn ranked_sections(
 ) -> Vec<Json> {
     let mut s: Vec<_> = ld.detail.sections.iter().collect();
     s.sort_by(|a, b| {
-        b.tributary
+        b.sizing
             .0
-            .total_cmp(&a.tributary.0)
+            .total_cmp(&a.sizing.0)
             .then(a.chain.cmp(&b.chain))
             .then(a.part.cmp(&b.part))
     });
+    // One limiting section per contact/exposure. Equal ratios on the neck,
+    // cone and throat must not crowd other critical places out of the table.
+    let mut seen = std::collections::BTreeSet::new();
     s.iter()
+        .filter(|d| seen.insert((d.chain, d.sizing.1)))
         .take(10)
         .enumerate()
         .map(|(i, d)| {
-            let load = d.tributary.0 * d.area_mm2;
+            let load = d.load_mm2;
+            let assessed = ld.detail.groups.iter().any(|g| g.layer == d.sizing.1 && g.active.contains(&d.chain) && g.equilibrium_assessed);
             Json::obj([
                 ("rank", count(i + 1)),
                 ("contact", Json::Uint(u64::from(d.chain))),
@@ -351,17 +387,20 @@ fn ranked_sections(
                     "native_record",
                     d.record.map_or(Json::Null, |r| Json::Uint(u64::from(r))),
                 ),
-                ("worst_layer", Json::Uint(u64::from(d.tributary.1))),
-                ("plate_z_mm", num(plate_z(data, ld, d.tributary.1))),
+                ("worst_layer", Json::Uint(u64::from(d.sizing.1))),
+                ("plate_z_mm", num(plate_z(data, ld, d.sizing.1))),
+                ("equilibrium_and_conditioning_pass", Json::Bool(assessed)),
+                ("row_definition", Json::str("Distinct contact/exposure, limiting section only; all models at its largest rigid-carrier/additive sizing exposure, not independent maxima")),
+                ("sizing_ratio", num(d.sizing.0)),
                 ("section_area_mm2", num(d.area_mm2)),
                 ("load_area_mm2", num(load)),
-                ("tributary_ratio", num(d.tributary.0)),
+                ("tributary_ratio", num(d.at_worst.tributary)),
                 ("tributary_label", Json::str(TRIBUTARY_LABEL)),
-                ("additive_ratio", num(d.additive.0)),
-                ("equal_share_ratio", num(d.equal_share.0)),
-                ("rigid_lever_ratio", num(d.rigid_lever.0)),
+                ("additive_ratio", num(d.at_worst.additive)),
+                ("equal_share_ratio", num(d.at_worst.equal_share)),
+                ("rigid_lever_ratio", if assessed { num(d.at_worst.rigid_lever) } else { Json::Null }),
                 ("light_tip_ratio_at_this_load", num(load / LIGHT_NECK_MM2)),
-                ("picture", Json::str(format!("7c, contact {}", d.chain))),
+                ("picture", Json::str(format!("02, contact {} (all contacts numbered)", d.chain))),
             ])
         })
         .collect()
@@ -385,6 +424,23 @@ fn load_json(
     Json::obj([
         ("design_ratio_p5", num(ld.detail.report.design_ratio)),
         ("peak_layer", peak),
+        (
+            "per_model_maxima_all_layers",
+            crate::load_report::maxima(data, ld),
+        ),
+        ("critical_locations", crate::load_report::critical(data, ld)),
+        (
+            "numerical_assessment_rules",
+            Json::str(crate::load_report::NUMERICAL_RULES),
+        ),
+        (
+            "limitations_and_print_observations",
+            Json::str(crate::load_report::LIMITATIONS),
+        ),
+        (
+            "written_support_metrics",
+            crate::load_report::written_json(data.written_metrics.as_ref()),
+        ),
         ("largest_ratios", Json::Arr(ranked_sections(data, ld))),
         (
             "sensitivity",
@@ -406,9 +462,7 @@ fn load_json(
         ),
         (
             "sharing_models",
-            Json::str(
-                "tributary (sizes contacts), additive group ratio, equal share, rigid lever; the last three are reported beside it and any of them above the design ratio is an intervention (above 25 for the additive ratio, unprintable)",
-            ),
+            Json::str(crate::load_report::SHARING_CHANGE),
         ),
     ])
 }
@@ -519,6 +573,13 @@ pub fn fr21_json(data: &plinth_support::report_data::ReportData) -> Json {
         ("layer_height_source", Json::str(&p.layer_height_source)),
         ("pixel_pitch_mm", Json::Arr(vec![num(0.014), num(0.019)])),
         ("lift_mm", num(p.lift_mm)),
+        ("model_layer_origin_plate_mm", num(p.lift_mm)),
+        (
+            "layer_index_convention",
+            Json::str(
+                "model-relative layer k; plate height = model layer origin + k * height; plate origin 0 mm",
+            ),
+        ),
     ]);
     let (load, structure) = match &data.load_data {
         Some(ld) => (load_json(data, ld), structure_json(ld)),
@@ -538,6 +599,26 @@ pub fn fr21_json(data: &plinth_support::report_data::ReportData) -> Json {
             data.unverified.as_ref().map_or(Json::Null, Json::str),
         ),
         ("process", process),
+        (
+            "identity",
+            Json::obj([
+                ("written_sha256", Json::str(&data.identity.generated_sha256)),
+                ("approved_sha256", Json::str(&data.identity.approved_sha256)),
+                ("pose", Json::str(&data.identity.pose)),
+            ]),
+        ),
+        (
+            "search_audit",
+            Json::Arr(
+                data.run
+                    .rejections
+                    .iter()
+                    .map(|(name, count)| {
+                        Json::obj([("event", Json::str(name)), ("count", Json::Uint(*count))])
+                    })
+                    .collect(),
+            ),
+        ),
         ("load", load),
         ("structure", structure),
         ("warnings", Json::Arr(warnings)),
@@ -586,6 +667,11 @@ pub fn fr21_text(data: &plinth_support::report_data::ReportData) -> String {
     if let Some(why) = &data.unverified {
         let _ = writeln!(s, "UNVERIFIED: {why}. No number below is a result.");
     }
+    let _ = writeln!(
+        s,
+        "FILE IDENTITY\n  Written SHA256 {}.\n  Pose: {}\n  Model-relative layer origin {:.3} mm above plate; plate origin 0 mm. Profile: {}.",
+        data.identity.generated_sha256, data.identity.pose, p.lift_mm, p.layer_height_source
+    );
     let _ = writeln!(s, "PROCESS VALUES");
     let _ = writeln!(
         s,
@@ -617,10 +703,15 @@ pub fn fr21_text(data: &plinth_support::report_data::ReportData) -> String {
             pk.active_contacts
         );
     }
-    let _ = writeln!(s, "  {TRIBUTARY_LABEL}");
     let _ = writeln!(
         s,
-        "  The 10 largest ratios (tributary, then additive / equal share / rigid lever; Light tip = same load on a Light-sized tip, 0.031 mm²):"
+        "  {}\n  {TRIBUTARY_LABEL}",
+        crate::load_report::SHARING_CHANGE
+    );
+    crate::load_report::text(&mut s, data, ld);
+    let _ = writeln!(
+        s,
+        "  The 10 largest sizing ratios (ordered by max(rigid-carrier, additive); simultaneous tributary / additive / equal share / rigid lever, invalid rigid = Unresolved; Light tip = same reaction on 0.031 mm²):"
     );
     for r in ranked_sections(data, ld) {
         let g = |k: &str| {
@@ -630,16 +721,23 @@ pub fn fr21_text(data: &plinth_support::report_data::ReportData) -> String {
         };
         let _ = writeln!(
             s,
-            "    #{} contact {} {} layer {}: {:.1}  ({:.1} / {:.1} / {:.1}; Light tip {:.0})",
+            "    #{} contact {} {} layer {}: sizing {:.1}  ({:.1} / {:.1} / {:.1} / {}; Light tip {:.0}), marker 02 contact {}, plate {:.2} mm",
             r.get("rank").and_then(Json::as_u64).unwrap_or(0),
             r.get("contact").and_then(Json::as_u64).unwrap_or(0),
             r.get("part").and_then(Json::as_str).unwrap_or("?"),
             r.get("worst_layer").and_then(Json::as_u64).unwrap_or(0),
+            g("sizing_ratio"),
             g("tributary_ratio"),
             g("additive_ratio"),
             g("equal_share_ratio"),
-            g("rigid_lever_ratio"),
+            if g("rigid_lever_ratio").is_nan() {
+                "Unresolved".into()
+            } else {
+                format!("{:.1}", g("rigid_lever_ratio"))
+            },
             g("light_tip_ratio_at_this_load"),
+            r.get("contact").and_then(Json::as_u64).unwrap_or(0),
+            g("plate_z_mm"),
         );
     }
     let v = &ld.sensitivity;
@@ -775,7 +873,17 @@ pub fn progress_line(candidate: bool, m: &ModelRun) -> String {
             "plinth: {} -> {} ({}; checker: {}) {secs:.2} s",
             m.input.display(),
             path.display(),
-            label_of(candidate),
+            if m.supported
+                && !crate::run::candidate_allowed(candidate, checked, m.planning_blockers)
+            {
+                "supported, not a print candidate"
+            } else {
+                label_of(crate::run::candidate_allowed(
+                    candidate,
+                    checked,
+                    m.planning_blockers,
+                ))
+            },
             checked.verdict.name()
         ),
         Outcome::Failed { stage, message, .. } => {
@@ -805,6 +913,9 @@ mod tests {
             triangles: 12,
             steps: vec![],
             parallel: None,
+            supported: false,
+            planning_blockers: false,
+            fr21: None,
             outcome,
         };
         let run = Run {
@@ -904,6 +1015,7 @@ mod tests {
                 contact: 0,
                 parts: vec![part(PartKind::Patch, 0.5), part(PartKind::Neck, 0.5)],
             }],
+            patch_history: Vec::new(),
         };
         plinth_support::report_data::LoadData::build(
             &stack,
@@ -940,6 +1052,20 @@ mod tests {
             .and_then(Json::as_arr)
             .expect("ratios");
         assert!(!top.is_empty() && top.len() <= 10);
+        let distinct: std::collections::BTreeSet<_> = top
+            .iter()
+            .map(|r| {
+                (
+                    r.get("contact").and_then(Json::as_u64),
+                    r.get("worst_layer").and_then(Json::as_u64),
+                )
+            })
+            .collect();
+        assert_eq!(
+            distinct.len(),
+            top.len(),
+            "one exposure must not repeat for five sections"
+        );
         // 4 mm² on a section of 0.5 mm² is 8; the worst layer is a layer index, the height is on the plate.
         let first = &top[0];
         assert_eq!(
@@ -963,7 +1089,17 @@ mod tests {
             Some(12)
         );
         let text = fr21_text(&data);
-        assert!(text.contains("PROCESS VALUES") && text.contains("sizing heuristic"));
+        assert!(text.contains("PROCESS VALUES") && text.contains("sensitivity diagnostic only"));
+        assert!(
+            text.contains("Sharing-model change [O]")
+                && text.contains("PER-MODEL MAXIMA OVER ALL LAYERS")
+        );
+        assert!(load.get("per_model_maxima_all_layers").is_some());
+        assert!(
+            load.get("critical_locations")
+                .and_then(Json::as_arr)
+                .is_some()
+        );
         assert!(text.contains("Design ratio (P5, owner): 12"));
     }
 

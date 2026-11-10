@@ -50,11 +50,16 @@ both emitted inputs, predictions.json is the compact 16-row preregistration,
 and measurements.json matches the review folder's slice-check.json byte-for-byte.
 No owner project or GOO binary is stored here. replay-maxima.json is a small
 snapshot of output from cal1-replay rebuilt with serde_json float_roundtrip;
-its source project/output hashes are recorded. Tests compare all frozen rows
-bit-for-bit with those output maxima and recompute the six specimen types from
-cal1.json. A0's owner mesh is not a repository fixture; its snapshot arithmetic
-was independently rerun on the hashed source outside the repo. A consistent
-one-ULP drift across index, maxima and call still fails the frozen-row test.
+its source project/output hashes are recorded. These files are the record of the
+predictions made with the load model at CAL-1 release (1a7600c); CAL-1 is closed
+and later load models do not reproduce them (rigid-carrier replaced the rigid-lever
+solve; a lone contact is now "not assessed"). Tests compare all frozen rows
+bit-for-bit with those output maxima (the record agrees with itself), pin the
+sha256 of every file in cal1-frozen/, and replay the specimen types from cal1.json
+on the current model for finite outputs only. A0's owner mesh is not a repository
+fixture; its snapshot arithmetic was independently rerun on the hashed source
+outside the repo. A consistent one-ULP drift across index, maxima and call still
+fails the frozen-row test.
 The native-raster differences were accepted under R-REP on 2026-11-02; the
 plate was released for the print request.
 

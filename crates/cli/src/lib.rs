@@ -9,6 +9,7 @@ pub mod args;
 pub mod check;
 pub mod json;
 pub mod jsonin;
+mod load_report;
 pub mod loop_canary;
 pub mod mem;
 pub mod names;

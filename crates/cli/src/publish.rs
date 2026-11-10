@@ -122,6 +122,58 @@ pub fn publish(temp: &Path, dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Sync the complete staging tree and publish it with ONE directory rename on
+/// the output volume. Before that rename the destination is absent; afterwards
+/// it contains the entire bundle. Hidden stale staging trees are never reused.
+/// Existing destinations are left untouched.
+pub fn publish_bundle(temp: &Path, dest: &Path) -> io::Result<()> {
+    fn files(dir: &Path, relative: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+        for entry in fs::read_dir(dir.join(relative))? {
+            let entry = entry?;
+            let path = relative.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                files(dir, &path, out)?;
+            } else if entry.file_type()?.is_file() {
+                File::open(entry.path())?.sync_all()?;
+                out.push(path);
+            } else {
+                return Err(io::Error::other("bundle contains a non-regular file"));
+            }
+        }
+        File::open(dir.join(relative))?.sync_all()
+    }
+    let mut paths = Vec::new();
+    files(temp, Path::new(""), &mut paths)?;
+    let is_model = |p: &PathBuf| p.extension().is_some_and(|x| x == "chitubox");
+    if paths.iter().filter(|p| is_model(p)).count() != 1 {
+        return Err(io::Error::other(
+            "bundle needs exactly one model commit record",
+        ));
+    }
+    // Serialize publishers with a kernel-held directory lock, not a lockfile
+    // that a crash can leave behind. This also protects the no-replace check on
+    // systems where rename would otherwise replace an empty directory.
+    let parent = dest
+        .parent()
+        .ok_or_else(|| io::Error::other("no bundle parent"))?;
+    let directory = File::open(parent)?;
+    let _lock = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+        .map_err(|(_, e)| io::Error::from_raw_os_error(e as i32))?;
+    match fs::symlink_metadata(dest) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "bundle destination exists",
+            ));
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    fs::rename(temp, dest)?;
+    let _ = File::open(parent).and_then(|f| f.sync_all());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +244,79 @@ mod tests {
         assert!(name.len() < 80, "{name}");
         assert!(name.starts_with(".plinth-model.tmp-"), "{name}");
         assert_ne!(t, temp_path(Path::new("out"), "model"));
+    }
+
+    #[test]
+    fn supported_bundle_is_portable_and_never_replaces_a_directory() {
+        let d = dir("bundle");
+        let staged = d.join("stage");
+        let dest = d.join("ready");
+        fs::create_dir_all(staged.join("pictures")).unwrap();
+        fs::write(staged.join("pictures/01.png"), b"picture").unwrap();
+        fs::write(staged.join("model.fr21.json"), b"report").unwrap();
+        fs::write(staged.join("model.chitubox"), b"model").unwrap();
+        fs::create_dir(&dest).unwrap();
+        assert_eq!(
+            publish_bundle(&staged, &dest).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert!(names(&dest).is_empty());
+        fs::remove_dir(&dest).unwrap();
+        publish_bundle(&staged, &dest).unwrap();
+        assert!(
+            !fs::symlink_metadata(&dest)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!staged.exists(), "no temporary backing directory");
+        // Relocating the whole visible directory cannot break any file link.
+        let moved = d.join("moved");
+        fs::rename(&dest, &moved).unwrap();
+        assert_eq!(fs::read(moved.join("model.chitubox")).unwrap(), b"model");
+        assert_eq!(fs::read(moved.join("pictures/01.png")).unwrap(), b"picture");
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn abandoned_partial_staging_does_not_block_retry_or_expose_a_final_directory() {
+        let d = dir("bundle-retry");
+        let dest = d.join("ready");
+        let abandoned = temp_path(&d, "bundle");
+        fs::create_dir(&abandoned).unwrap();
+        fs::write(abandoned.join("report.json"), b"partial").unwrap();
+        assert!(!dest.exists());
+        let retry = temp_path(&d, "bundle");
+        fs::create_dir(&retry).unwrap();
+        fs::write(retry.join("model.chitubox"), b"complete model").unwrap();
+        fs::write(retry.join("report.json"), b"complete report").unwrap();
+        publish_bundle(&retry, &dest).unwrap();
+        assert!(!retry.exists());
+        assert_eq!(
+            fs::read(dest.join("report.json")).unwrap(),
+            b"complete report"
+        );
+        assert_eq!(
+            fs::read(dest.join("model.chitubox")).unwrap(),
+            b"complete model"
+        );
+        assert!(
+            abandoned.exists(),
+            "a retry never consumes another run's staging tree"
+        );
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn invalid_bundle_never_exposes_a_model() {
+        let d = dir("invalid-bundle");
+        let staged = d.join("stage");
+        fs::create_dir(&staged).unwrap();
+        fs::write(staged.join("model.chitubox"), b"model").unwrap();
+        std::os::unix::fs::symlink("missing-picture", staged.join("01.png")).unwrap();
+        assert!(publish_bundle(&staged, &d.join("ready")).is_err());
+        assert!(!d.join("ready").exists());
+        fs::remove_dir_all(d).unwrap();
     }
 
     #[test]

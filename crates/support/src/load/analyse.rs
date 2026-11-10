@@ -2,9 +2,9 @@
 //!
 //! For each layer and each print-order component:
 //!
-//! * every source area element goes to the nearest active contact of that component
-//!   (Euclidean 3D; exact ties split equally): the tributary result that sizes contacts;
-//! * beside it, the additive group ratio, the equal-share result and the rigid-lever index;
+//! * tension-only rigid-carrier springs (stiffness proportional to certified
+//!   section available in that layer), together with the additive requirement;
+//! * nearest-3D tributary is a sensitivity diagnostic ONLY, beside equal share;
 //! * the load-centroid test against the spread of the active contacts.
 //!
 //! One layer peels at a time: nothing is summed over layers. A contact is active from the
@@ -39,17 +39,17 @@ pub struct ContactLoad {
     pub component: Option<u32>,
     /// First layer in which it is active.
     pub first_layer: u32,
-    /// Layer with the largest tributary ratio over its sections.
+    /// Layer with the largest rigid-carrier/additive sizing ratio over its sections.
     pub worst_layer: u32,
-    /// Tributary load through it at that layer (with the upstream support's own material), mm².
+    /// Reaction plus upstream self-peel, mm² (provisional if the solve is unresolved).
     pub load_mm2: f64,
-    /// Largest tributary ratio over its sections and layers.
+    /// Largest rigid-carrier/additive sizing ratio; unresolved solves remain flagged.
     pub ratio: f64,
     /// Where its tributary area is centred at that layer (x, y), mm.
     pub tributary_xy: [f64; 2],
     /// Distance from the contact to that centre, mm.
     pub offset_mm: f64,
-    /// Number of layers with a tributary ratio above the design ratio.
+    /// Number of layers with a sizing ratio above the design ratio.
     pub layers_over: u32,
     /// First layer above the design ratio, if any.
     pub first_over: Option<u32>,
@@ -78,6 +78,29 @@ pub struct SectionDetail {
     pub equal_share: (f64, u32),
     /// Largest rigid-lever ratio and its layer.
     pub rigid_lever: (f64, u32),
+    /// Largest sizing ratio (rigid-carrier and additive) and its layer.
+    pub sizing: (f64, u32),
+    /// All four models at THAT layer, not four unrelated maxima.
+    pub at_worst: Sharing,
+    /// Reaction (or explicitly unresolved provisional share) plus own peel, mm².
+    pub load_mm2: f64,
+}
+
+/// One contact at one exposure; used for located activation/patch-growth histories.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContactState {
+    /// Contact index.
+    pub contact: u32,
+    /// Limiting loaded part index.
+    pub part: u32,
+    /// Printed patch area, mm².
+    pub patch_mm2: f64,
+    /// Limiting section area, mm².
+    pub section_mm2: f64,
+    /// Assigned reaction plus upstream self-peel, mm² (provisional if unresolved).
+    pub load_mm2: f64,
+    /// Four simultaneous ratios; rigid-lever is not valid when the group is unresolved.
+    pub ratios: Sharing,
 }
 
 /// One component in one layer.
@@ -95,6 +118,9 @@ pub struct GroupLoad {
     /// own area only: the support's own material is not in it. The values add up to
     /// `area_mm2`.
     pub loads_mm2: Vec<f64>,
+    /// [load including upstream support peel, section area] at each active
+    /// contact's worst section in THIS layer, same order as `active`.
+    pub contact_sections_mm2: Vec<[f64; 2]>,
     /// Sum of their limiting section areas, mm².
     pub section_sum_mm2: f64,
     /// Additive area ratio `A / sum B` (infinite when `sum B` is 0).
@@ -107,6 +133,21 @@ pub struct GroupLoad {
     pub outside_hull_mm: f64,
     /// Relative residual of the rigid-lever equilibrium.
     pub lever_residual: f64,
+    /// Separate equilibrium and conditioning results (thresholds in lever.rs [S]).
+    pub force_residual: f64,
+    /// Normalised moment residual.
+    pub moment_residual: f64,
+    /// Principal tilt stiffness condition number.
+    pub condition: f64,
+    /// Reaction sensitivity to the pre-run 0.01 mm resultant-position probe.
+    pub position_sensitivity: f64,
+    /// An unresolved solve must never be called a low-ratio pass.
+    pub equilibrium_assessed: bool,
+    /// Simultaneous section and patch history at this exposure.
+    pub states: Vec<ContactState>,
+    /// Every downstream section at this exposure, not only each contact's worst.
+    /// Complete candidate replay uses this to prevent hiding another violation.
+    pub section_states: Vec<ContactState>,
 }
 
 /// The layer with the most peel area.
@@ -177,6 +218,7 @@ struct Ctx {
     first_layer: u32,
     patch_lower: f64,
     patch_z: [f64; 2],
+    patch_history: Vec<(f64, f64)>,
     parts: Vec<Part>,
     braces: Vec<Part>,
 }
@@ -189,6 +231,14 @@ fn disc_fraction(t: f64) -> f64 {
 
 impl Ctx {
     fn patch_printed(&self, z_top: f64) -> f64 {
+        if !self.patch_history.is_empty() {
+            return self
+                .patch_history
+                .iter()
+                .rev()
+                .find(|(z, _)| *z <= z_top + 1e-9)
+                .map_or(0.0, |(_, a)| *a);
+        }
         let [lo, hi] = self.patch_z;
         let t = if hi - lo <= 1e-9 {
             f64::from(u8::from(z_top >= lo))
@@ -320,6 +370,13 @@ fn prepare(stack: &LayerStack, layout: &LayoutView) -> Vec<Ctx> {
                 first_layer: c.first_layer,
                 patch_lower: c.patch_lower_mm2,
                 patch_z,
+                patch_history: layout
+                    .patch_history
+                    .get(i)
+                    .into_iter()
+                    .flatten()
+                    .map(|&(k, a)| (stack.layer_origin_mm + f64::from(k + 1) * h, a))
+                    .collect(),
                 parts,
                 braces: Vec::new(),
             }
@@ -346,6 +403,8 @@ struct Acc {
     lever: (f64, u32),
     area: f64,
     at_worst: Sharing,
+    sizing: (f64, u32),
+    load: f64,
     seen: bool,
 }
 
@@ -358,15 +417,22 @@ impl Acc {
             lever: (0.0, 0),
             area: 0.0,
             at_worst: Sharing::default(),
+            sizing: (0.0, 0),
+            load: 0.0,
             seen: false,
         }
     }
 
-    fn push(&mut self, k: u32, s: Sharing, area: f64) {
+    fn push(&mut self, k: u32, s: Sharing, area: f64, load: f64) {
         if !self.seen || s.tributary > self.tributary.0 {
             self.tributary = (s.tributary, k);
+        }
+        let sizing = s.rigid_lever.max(s.additive);
+        if !self.seen || sizing > self.sizing.0 {
+            self.sizing = (sizing, k);
             self.at_worst = s;
             self.area = area;
+            self.load = load;
         }
         if !self.seen || s.additive > self.additive.0 {
             self.additive = (s.additive, k);
@@ -516,12 +582,20 @@ impl Pass<'_> {
                 area_mm2: cs.area,
                 active: Vec::new(),
                 loads_mm2: Vec::new(),
+                contact_sections_mm2: Vec::new(),
                 section_sum_mm2: 0.0,
                 x_group: f64::INFINITY,
                 utilisation: f64::INFINITY,
                 centroid_xy: centroid(&cs.sources),
                 outside_hull_mm: f64::INFINITY,
-                lever_residual: 0.0,
+                lever_residual: f64::INFINITY,
+                force_residual: 1.0,
+                moment_residual: f64::INFINITY,
+                condition: f64::INFINITY,
+                position_sensitivity: f64::INFINITY,
+                equilibrium_assessed: false,
+                states: Vec::new(),
+                section_states: Vec::new(),
             });
             return 0.0;
         }
@@ -542,9 +616,18 @@ impl Pass<'_> {
             x_group,
             equal: cs.area / n as f64,
         };
-        for (a, &i) in list.iter().enumerate() {
-            self.contact_sections(lyr, i, split[a], lever.force[a], shares);
-        }
+        let mut section_states = Vec::with_capacity(list.len() * 7);
+        let states: Vec<_> = list
+            .iter()
+            .enumerate()
+            .map(|(a, &i)| {
+                let (worst, all) =
+                    self.contact_sections(lyr, i, split[a], (lever.force[a], lever.valid), shares);
+                section_states.extend(all);
+                worst
+            })
+            .collect();
+        let contact_sections_mm2 = states.iter().map(|s| [s.load_mm2, s.section_mm2]).collect();
         #[allow(clippy::cast_possible_truncation)]
         self.groups.push(GroupLoad {
             layer: k,
@@ -552,12 +635,20 @@ impl Pass<'_> {
             area_mm2: cs.area,
             active: list.iter().map(|&i| i as u32).collect(),
             loads_mm2: split.iter().map(|s| s[0]).collect(),
+            contact_sections_mm2,
             section_sum_mm2: bsum,
             x_group,
             utilisation: x_group / super::DESIGN_RATIO,
             centroid_xy: c_xy,
             outside_hull_mm: distance_to_hull(&xy, c_xy),
             lever_residual: lever.residual,
+            force_residual: lever.force_residual,
+            moment_residual: lever.moment_residual,
+            condition: lever.condition,
+            position_sensitivity: lever.position_sensitivity,
+            equilibrium_assessed: lever.valid,
+            states,
+            section_states,
         });
         bsum
     }
@@ -567,9 +658,10 @@ impl Pass<'_> {
         lyr: Lyr,
         i: usize,
         mine: [f64; 3],
-        lever_force: f64,
+        lever: (f64, bool),
         sh: Shares,
-    ) {
+    ) -> (ContactState, Vec<ContactState>) {
+        let (lever_force, valid) = lever;
         let Lyr { k, zb, zt } = lyr;
         let c = &self.ctx[i];
         let own: Vec<f64> = c
@@ -585,7 +677,16 @@ impl Pass<'_> {
             .sum();
         let patch_now = c.patch_printed(zt);
         let mut upstream = 0.0;
-        let mut worst: Option<(f64, usize, f64)> = None;
+        let mut worst = ContactState {
+            contact: i as u32,
+            part: 0,
+            patch_mm2: patch_now,
+            section_mm2: patch_now,
+            load_mm2: 0.0,
+            ratios: Sharing::default(),
+        };
+        let mut worst_ratio = -1.0_f64;
+        let mut all = Vec::with_capacity(c.parts.len());
         for (j, p) in c.parts.iter().enumerate() {
             upstream += own[j];
             let extra = upstream
@@ -603,14 +704,33 @@ impl Pass<'_> {
                 tributary: ratio(mine[0] + extra, denom),
                 additive: sh.x_group,
                 equal_share: ratio(sh.equal + extra, denom),
-                rigid_lever: ratio(lever_force + extra, denom),
+                // Zero here is a storage sentinel, NEVER a passing result:
+                // the group's assessed flag accompanies every reported value.
+                rigid_lever: if valid {
+                    ratio(lever_force + extra, denom)
+                } else {
+                    0.0
+                },
             };
-            self.acc[i][j].push(k, s, denom);
-            if worst.is_none_or(|w| s.tributary > w.0) {
-                worst = Some((s.tributary, j, mine[0] + extra));
+            let load = lever_force + extra;
+            self.acc[i][j].push(k, s, denom, load);
+            let state = ContactState {
+                contact: i as u32,
+                part: j as u32,
+                patch_mm2: patch_now,
+                section_mm2: denom,
+                load_mm2: load,
+                ratios: s,
+            };
+            all.push(state);
+            let r = s.rigid_lever.max(s.additive);
+            if r > worst_ratio {
+                worst_ratio = r;
+                worst = state;
             }
         }
-        let Some((r, _, load)) = worst else { return };
+        let r = worst_ratio;
+        let load = worst.load_mm2;
         let cl = &mut self.contacts[i];
         if r > super::DESIGN_RATIO + 1e-9 {
             cl.layers_over += 1;
@@ -630,6 +750,7 @@ impl Pass<'_> {
             cl.tributary_xy = xy;
             cl.offset_mm = (xy[0] - c.centre[0]).hypot(xy[1] - c.centre[1]);
         }
+        (worst, all)
     }
 
     fn finish(self) -> (LoadDetail, Collected) {
@@ -661,11 +782,14 @@ impl Pass<'_> {
                     additive: a.additive,
                     equal_share: a.equal,
                     rigid_lever: a.lever,
+                    sizing: a.sizing,
+                    at_worst: a.at_worst,
+                    load_mm2: a.load,
                 });
                 report_sections.push(SectionLoad {
                     chain: ci,
                     part: pj,
-                    worst_layer: a.tributary.1,
+                    worst_layer: a.sizing.1,
                     ratios: a.at_worst,
                 });
             }

@@ -144,6 +144,9 @@ pub struct LayoutView {
     pub contacts: Vec<ContactView>,
     /// One chain per contact (same order), plus any brace chains after them.
     pub chains: Vec<PartChain>,
+    /// Certified lower patch area per exposure, in contact order. Empty entries
+    /// are permitted only for controlled synthetic inputs (disc approximation).
+    pub patch_history: Vec<Vec<(u32, f64)>>,
 }
 
 /// How a result is classified (design section 4.8).
@@ -168,6 +171,8 @@ pub struct LoadWarning {
     pub layers: Vec<u32>,
     /// Contacts affected (indices into [`LayoutView::contacts`]).
     pub contacts: Vec<u32>,
+    /// Specific model-space XY / layer-space Z location, when known.
+    pub location_mm: Option<[f64; 3]>,
     /// What is unknown or what to change, in plain sentences.
     pub message: String,
 }
@@ -175,7 +180,7 @@ pub struct LoadWarning {
 /// The four sharing results for one section, as ratios of load to section area.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Sharing {
-    /// The tributary result (sizes contacts; a heuristic, not a bound).
+    /// Nearest-3D tributary sensitivity diagnostic; never a sizing constraint.
     pub tributary: f64,
     /// The additive group area ratio `X_group`.
     pub additive: f64,

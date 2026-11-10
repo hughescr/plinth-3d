@@ -8,7 +8,10 @@ use std::path::PathBuf;
 
 /// Every case: the table in the parent module and the controls of `mesh_verdict`.
 pub(crate) fn all_cases() -> impl Iterator<Item = &'static Case> {
-    CASES.iter().chain(super::mesh_verdict::CASES)
+    CASES
+        .iter()
+        .chain(super::mesh_verdict::CASES)
+        .chain(super::lens::CASES)
 }
 
 pub(crate) fn scratch(tag: &str) -> PathBuf {

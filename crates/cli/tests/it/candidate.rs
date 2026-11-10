@@ -116,8 +116,8 @@ fn broken_candidate_a_violated_rule_is_blocked_and_named() {
 #[test]
 fn broken_candidate_control_a_clean_pass_is_published() {
     let w = scratch("cand-pass");
-    // Every rule decided; H8 is the owner's ChituBox record, not the checker's measurement.
-    let fake = answer("pass", 0, "pass", &[("H8", "not_applicable")]);
+    // Every rule decided, including a measured H8 record on the same file.
+    let fake = answer("pass", 0, "pass", &[]);
     let cfg = candidate_cfg(&w, &fake, "fake-pass");
     let r = go(&cfg);
     assert!(matches!(r.models[0].outcome, Outcome::Published { .. }));
@@ -183,7 +183,7 @@ fn broken_candidate_binary_exits_nonzero_and_reports_no_candidate() {
 #[test]
 fn broken_candidate_binary_control_a_pass_exits_zero_and_reports_a_candidate() {
     let w = scratch("cand-bin-pass");
-    let fake = answer("pass", 0, "pass", &[("H8", "not_applicable")]);
+    let fake = answer("pass", 0, "pass", &[]);
     let (code, report, files) = binary(&w, &fake, "fake-pass");
     assert_eq!(code, 0);
     assert_eq!(files, ["a.chitubox"]);

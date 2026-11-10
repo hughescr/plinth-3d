@@ -130,7 +130,7 @@ fn contacts(scene: &Scene, patches: &PatchOut, z0: f64) -> Vec<Contact> {
 /// The audit as report JSON.
 #[must_use]
 pub fn run(scene: &Scene, patches: &PatchOut) -> Json {
-    let scope = "whole model as one load group; per-component grouping is not built, so a poorly held component's ratio is understated";
+    let scope = "whole model as one load group; per-component grouping is not built, so a poorly held component's ratio is understated; only model-contact sections are counted: redundant incidental support contacts carry no strength credit";
     if scene.parts.is_empty() {
         return Json::obj([
             (

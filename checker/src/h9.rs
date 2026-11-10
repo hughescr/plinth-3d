@@ -60,6 +60,8 @@
 //!
 //! A part whose mesh is not the native shape is unverified.
 
+mod incidental;
+
 use crate::chains::JOIN_MM;
 use crate::json::Json;
 use crate::outcome::{MAX_LOCATED, MEASURED_ON, Outcome, VERDICT_SCOPE, at};
@@ -692,10 +694,19 @@ enum Join {
 /// The overlap of `p` and `q`, each seen as the polytope of the (grown) half-spaces `gp`, `gq`.
 fn overlap_of(p: &Body, q: &Body, gp: &[HalfSpace], gq: &[HalfSpace]) -> Join {
     let mut pts: Vec<V> = Vec::new();
+    let (mut moment, mut area) = ([0.0; 3], 0.0);
     for (of, other) in [(p, gq), (q, gp)] {
         for t in of.tris {
             let piece = poly::clip_all(t, other);
             if poly::area(&piece) > 1e-12 {
+                for i in 1..piece.len() - 1 {
+                    let a = 0.5 * len(cross(sub(piece[i], piece[0]), sub(piece[i + 1], piece[0])));
+                    moment = add(
+                        moment,
+                        mul(add(add(piece[0], piece[i]), piece[i + 1]), a / 3.0),
+                    );
+                    area += a;
+                }
                 pts.extend(piece);
             }
         }
@@ -703,8 +714,9 @@ fn overlap_of(p: &Body, q: &Body, gp: &[HalfSpace], gq: &[HalfSpace]) -> Join {
     if pts.is_empty() {
         return Join::Apart;
     }
-    let n = pts.len() as f64;
-    let inside = mul(pts.iter().fold([0.0; 3], |s, v| add(s, *v)), 1.0 / n);
+    // Surface-area centroid of the actual clipped contact region, not either record's box.
+    // It is inside the convex intersection and is independent of surface triangulation.
+    let inside = mul(moment, 1.0 / area);
     let mut lo = [f64::INFINITY; 3];
     let mut hi = [f64::NEG_INFINITY; 3];
     for v in &pts {
@@ -871,7 +883,7 @@ fn cover(pair: &Pair, lo: V, hi: V, half: f64) -> Result<f64, String> {
 /// cone's end on a rod's start) compare as in contact and are inside the union, not on its
 /// boundary; a real gap is not closed by it. The allowance is part of the bound's error
 /// (`delta`). A failed witness is followed by the cover that proves a thin join.
-fn join_fate(p: &Body, q: &Body, limit: f64, touch: f64, allow: f64) -> Option<Fate> {
+fn join_fate(p: &Body, q: &Body, limit: f64, touch: f64, allow: f64) -> Option<(Fate, V)> {
     let (gp, gq) = (grown(p, touch), grown(q, touch));
     let Join::Overlap { inside, lo, hi } = overlap_of(p, q, &gp, &gq) else {
         return None;
@@ -890,24 +902,32 @@ fn join_fate(p: &Body, q: &Body, limit: f64, touch: f64, allow: f64) -> Option<F
         delta,
     };
     if let Some(w) = witness(&pair, inside, lo, hi, half) {
-        return Some(Fate::Wide {
-            lb: 2.0 * w,
-            ub: f64::INFINITY,
-        });
+        return Some((
+            Fate::Wide {
+                lb: 2.0 * w,
+                ub: f64::INFINITY,
+            },
+            inside,
+        ));
     }
-    Some(match cover(&pair, lo, hi, half) {
-        Ok(worst) => Fate::Thin {
-            ub: 2.0 * worst,
-            at: inside,
+    Some((
+        match cover(&pair, lo, hi, half) {
+            Ok(worst) => Fate::Thin {
+                ub: 2.0 * worst,
+                at: inside,
+            },
+            Err(why) => Fate::Undecided { lb: 0.0, why },
         },
-        Err(why) => Fate::Undecided { lb: 0.0, why },
-    })
+        inside,
+    ))
 }
 
 // ---- findings --------------------------------------------------------------------------
 
 struct Finding {
     rec: usize,
+    partner: Option<usize>,
+    incidental: bool,
     role: Role,
     what: &'static str,
     /// The width of the written mesh: the verdict.
@@ -953,6 +973,8 @@ fn frustum_finding(scene: &Scene, p: &Part, limit: f64) -> Option<Finding> {
     };
     Some(Finding {
         rec: p.rec,
+        partner: None,
+        incidental: false,
         role: p.role,
         what: "section",
         fate,
@@ -1012,6 +1034,8 @@ fn ball_finding(scene: &Scene, p: &Part, limit: f64) -> Option<Finding> {
     };
     Some(Finding {
         rec: p.rec,
+        partner: None,
+        incidental: false,
         role: p.role,
         what: "ball",
         fate: mesh_fate,
@@ -1047,6 +1071,8 @@ fn raft_finding(p: &Part, limit: f64) -> Finding {
     };
     Finding {
         rec: p.rec,
+        partner: None,
+        incidental: false,
         role: p.role,
         what: "raft part",
         fate,
@@ -1058,36 +1084,6 @@ fn raft_finding(p: &Part, limit: f64) -> Finding {
 /// Is the pair (`i`, `j`) already measured by an axial scan (a ball on a frustum's axis)?
 fn accounted(a: &Part, b: &Part) -> bool {
     axial_position(a, b).is_some() || axial_position(b, a).is_some()
-}
-
-/// Findings for every overlapping pair of written meshes that no axial scan covers.
-fn join_findings(scene: &Scene, limit: f64) -> Vec<Finding> {
-    let mut out = Vec::new();
-    let valid: Vec<&Part> = scene.parts.iter().filter(|p| p.is_valid()).collect();
-    let bodies: Vec<Option<Body>> = valid.iter().map(|p| body(p)).collect();
-    for (i, p) in valid.iter().enumerate() {
-        for (j, q) in valid.iter().enumerate().skip(i + 1) {
-            if accounted(p, q) || !p.bbox.inflated(1e-6).overlaps(&q.bbox) {
-                continue;
-            }
-            let (Some(bp), Some(bq)) = (&bodies[i], &bodies[j]) else {
-                continue;
-            };
-            let allow = allowance_mm(p.bbox.max_abs().max(q.bbox.max_abs()));
-            let Some(fate) = join_fate(bp, bq, limit, TOUCH_MM, allow) else {
-                continue;
-            };
-            out.push(Finding {
-                rec: p.rec,
-                role: p.role,
-                what: "join",
-                fate,
-                analytic: None,
-                at: p.bbox.centre(),
-            });
-        }
-    }
-    out
 }
 
 /// H9.
@@ -1117,7 +1113,7 @@ pub fn measure(scene: &Scene) -> Outcome {
     // parts and sections are not thin.
     let skip_joins = findings.iter().any(|f| matches!(f.fate, Fate::Thin { .. }));
     if !skip_joins {
-        findings.extend(join_findings(scene, limit));
+        findings.extend(incidental::join_findings(scene, limit));
     }
     finish(scene, limit, &findings, unverified)
 }
@@ -1175,9 +1171,9 @@ fn analytic_information(findings: &[Finding]) -> Json {
 fn finish(scene: &Scene, limit: f64, findings: &[Finding], mut unverified: Vec<String>) -> Outcome {
     let thin: Vec<&Finding> = findings
         .iter()
-        .filter(|f| matches!(f.fate, Fate::Thin { .. }))
+        .filter(|f| !f.incidental && matches!(f.fate, Fate::Thin { .. }))
         .collect();
-    for f in findings {
+    for f in findings.iter().filter(|f| !f.incidental) {
         if let Fate::Undecided { why, .. } = &f.fate {
             unverified.push(format!(
                 "record {} ({} {}): {why}",
@@ -1187,9 +1183,13 @@ fn finish(scene: &Scene, limit: f64, findings: &[Finding], mut unverified: Vec<S
             ));
         }
     }
-    let thinnest = findings.iter().min_by(|a, b| a.ub().total_cmp(&b.ub()));
+    let thinnest = findings
+        .iter()
+        .filter(|f| !f.incidental)
+        .min_by(|a, b| a.ub().total_cmp(&b.ub()));
     let lowest = findings
         .iter()
+        .filter(|f| !f.incidental)
         .map(Finding::lb)
         .fold(f64::INFINITY, f64::min);
     let detail = Json::obj([
@@ -1197,6 +1197,15 @@ fn finish(scene: &Scene, limit: f64, findings: &[Finding], mut unverified: Vec<S
         ("measured_on", Json::str(MEASURED_ON)),
         ("verdict_scope", Json::str(VERDICT_SCOPE)),
         ("analytic_information", analytic_information(findings)),
+        (
+            "incidental_contacts",
+            incidental::contacts_json(scene, findings, true),
+        ),
+        ("joins", incidental::contacts_json(scene, findings, false)),
+        (
+            "incidental_contact_credit",
+            Json::str("redundant incidental contacts carry no strength credit in the load audit"),
+        ),
         ("measured", Json::Uint(findings.len() as u64)),
         ("thinnest_section_mm", least(findings, |f| f.what != "join")),
         ("thinnest_join_mm", least(findings, |f| f.what == "join")),
@@ -1236,8 +1245,10 @@ fn finish(scene: &Scene, limit: f64, findings: &[Finding], mut unverified: Vec<S
                     Some(scene.world(f.at)),
                     None,
                     format!(
-                        "{} ({}) is at most {:.5} mm across, under the {limit} mm limit",
+                        "{}{} ({}) is at most {:.5} mm across, under the {limit} mm limit",
                         f.role.name(),
+                        f.partner
+                            .map_or_else(String::new, |r| format!(" with record {r}")),
                         f.what,
                         f.ub()
                     ),
@@ -1261,7 +1272,8 @@ fn finish(scene: &Scene, limit: f64, findings: &[Finding], mut unverified: Vec<S
         .with_detail(detail);
     }
     Outcome::pass(format!(
-        "every support part and join is certified at least {limit} mm across (lower bound {lowest:.5} mm)"
+        "every support part and required join is certified at least {limit} mm across (lower bound {lowest:.5} mm); {} redundant incidental contact(s), with no load credit",
+        findings.iter().filter(|f| f.incidental).count()
     ))
     .with_detail(detail)
 }

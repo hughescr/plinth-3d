@@ -930,19 +930,6 @@ fn h9_ball_and_coaxial_frustum() -> Built {
     cube10(recs, LIFT)
 }
 
-/// Two radius 0.3 posts side by side, `offset` apart in x, on overlapping raft pads. Their
-/// meshes (16-gons) share a lens whose thickness is `0.6 - offset` (a little more for a
-/// polygon's flats).
-fn h9_two_posts(offset: f32) -> Built {
-    let z0 = plate(LIFT);
-    let mut recs = head(0.0, 0.0, LIFT, 0.25, 0.05);
-    for x in [6.0, 6.0 + offset] {
-        recs.push(rod([x, 6.0, z0 + 0.198], [x, 6.0, z0 + 3.0], 0.3));
-        recs.push(pad(x, 6.0, LIFT));
-    }
-    cube10(recs, LIFT)
-}
-
 /// Two coaxial radius 0.3 posts on the plate, the upper one starting `gap_ulps` units in the
 /// last place of its start coordinate above the end of the lower one (round-4 review: a
 /// growth of both solids by 2e-6 mm made a join of a real end-face gap of 9e-7 mm, and the
@@ -967,16 +954,6 @@ fn h3_end_face_gap_of_one_micron() -> Built {
 
 fn h9_end_faces_meeting_exactly_control() -> Built {
     h9_posts_with_an_end_face_gap(0)
-}
-
-fn h9_thin_offset_lens_between_thick_rods() -> Built {
-    // Offset 0.59: the two 16-gon rods share a lens about 0.01 mm thick and 0.05 mm high.
-    h9_two_posts(0.59)
-}
-
-fn h9_deep_overlap_between_thick_rods_control() -> Built {
-    // Offset 0.5: a fat join, nothing thin.
-    h9_two_posts(0.5)
 }
 
 /// A rod record whose written mesh is the native shape drawn at radius `mesh_r` about the
@@ -1346,12 +1323,6 @@ pub(crate) const CASES: &[Case] = &[
     ),
     case(
         "H9",
-        "thick rods joined by a thin offset lens",
-        V,
-        h9_thin_offset_lens_between_thick_rods,
-    ),
-    case(
-        "H9",
         "mesh narrower than its fields",
         U,
         h9_mesh_narrower_than_the_fields,
@@ -1446,12 +1417,6 @@ pub(crate) const CASES: &[Case] = &[
         P,
         h9_end_faces_meeting_exactly_control,
     ),
-    case(
-        "H9",
-        "thick rods overlapping deeply (control)",
-        P,
-        h9_deep_overlap_between_thick_rods_control,
-    ),
     case("H9", "rod radius 0.052 (control)", P, h9_rod_0_052_control),
     case(
         "H9",
@@ -1469,7 +1434,8 @@ pub(crate) const REVIEW_CASES: &[(&str, &str)] = &[
     ("H3", "0.02 mm air gap between coaxial posts"),
     ("H3", "model with no support under it"),
     ("H6", "tip cone closing on the wall after the ball"),
-    ("H9", "thick rods joined by a thin offset lens"),
+    ("H9", "thick rod held only by a thin offset lens"),
+    ("H9", "thick rods held only by a cycle of thin lenses"),
     ("H9", "mesh narrower than its fields"),
     ("H9", "mesh wider than the fields at a large coordinate"),
     ("H1", "rod cap inside the model by the envelope"),
@@ -1494,6 +1460,7 @@ pub(crate) const REVIEW_CASES: &[(&str, &str)] = &[
 
 // ---- running and judging: see run.rs ----------------------------------------------------
 
+mod lens;
 mod mesh_verdict;
 mod run;
 pub(crate) use run::{all_cases, check_bytes, scratch};
