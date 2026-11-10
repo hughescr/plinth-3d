@@ -69,7 +69,7 @@ pub fn bounds(m: &Model) -> Bounds {
     }
     out
 }
-struct Random(u64);
+pub(crate) struct Random(pub(crate) u64);
 impl Random {
     fn next(&mut self) -> u64 {
         // Explicit xorshift64; a version-independent seeded shuffle, not a platform RNG.
@@ -78,7 +78,7 @@ impl Random {
         self.0 ^= self.0 << 17;
         self.0
     }
-    fn below(&mut self, n: usize) -> usize {
+    pub(crate) fn below(&mut self, n: usize) -> usize {
         let n = n as u64;
         let limit = u64::MAX - u64::MAX % n;
         loop {

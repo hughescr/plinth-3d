@@ -2,6 +2,13 @@
 //! No production planner, construction API, load classifier or checker exceptions live here.
 
 pub mod build;
+pub mod cal2_body;
+pub mod cal2_head;
+pub mod cal2_layout;
+pub mod cal2_map;
+pub mod cal2_measure;
+pub mod cal2_plate;
+pub mod cal2_spec;
 pub mod goo;
 pub mod goo_grid;
 pub mod light;

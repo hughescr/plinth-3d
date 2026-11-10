@@ -409,3 +409,49 @@ Each needs its own controlled pair, with a common formed carrier and a common ac
 ## 11. Questions for the owner
 
 The answers of 2026-11-01/02 are recorded in §6.5 and §7.3. The last two were answered on 2026-11-09: the resin label shows no lot number, and the printer holds the tank at 30 °C (30–33 °C while printing). No questions remain open.
+
+---
+
+## 12. Plate CAL-2: where load paths break against the additive ratio
+
+Status: generated 2026-11-10 and not yet printed. Command: `cal2-plate fixtures/calibration/cal2.json <empty-directory>` (crate `plinth-calibration`; spec and rules in `cal2_spec.rs`, separate from the CAL-1 spec, which is unchanged). Output: one `.chitubox`, `cal2-report.json`, `plate-map.svg`.
+
+**Question.** The additive ratio is R = mm² of model area that peels in one layer ÷ mm² of total limiting section. For a head the section is the one where the cone leaves the ball (`neck_area` in `checker/src/h6.rs`). The design limit is 12 and the unprintable limit is 40 (`limits.toml`, `warn.rs`). Where do real coupons break between R 30 and R 95?
+
+**Two owner directions (2026-11-10) that shape the plate.**
+
+1. Plinth should use more, smaller supports, not fewer large ones. So the main coupons raise R by adding heads at a fixed neck size, and the body grows with the head count. Bodies stay large enough to handle: the smallest main body is 6.1 mm (control, R 40); the others run 7.7 to 20.5 mm.
+2. Plinth will count on the model's own thicker parts to carry peel load. So some coupons carry large sections (0.80 mm heads and 1.20 mm columns) to test whether the ratio rule still holds when the section is large.
+
+**Matrix** (R = 30, 40, 55, 70, 95 unless stated; priority order):
+
+| Row | Section | Heads | R | Copies | Coupons |
+|---|---|---|---|---|---|
+| R1 | 0.40 mm neck | 16 (4×4) | all five | 3 | 15 |
+| R2 | 0.55 mm neck | 9 (3×3) | all five | 3 | 15 |
+| R3 | 0.80 mm neck | 4 (2×2) | all five | 2 | 10 |
+| R4 | 1.20 mm section | 4 (2×2) | 40, 70, 95 | 2 | 6 |
+| R5 | 0.55 mm neck, control | 4 (2×2) | 40, 70 | 2 | 4 |
+| R6 | formation witness | 1 | 6 | 1 per neck size | 3 |
+
+53 coupons fit with the 6 mm gap; nothing is cut. If a future change makes the plate too full, the generator cuts copies from the lowest-priority row first, never below two copies for R1 to R3, and records the cut in the report and on the map.
+
+**Coupon.** A flat-bottomed, flat-topped square body, 3.0 mm thick, sides parallel to the vat tilt axis (the front edge, −Y, peels first). Every body has the same thickness. The body bottom is 5.0 mm above the plate (H4 lift, as in CAL-1), so the loaded layer is layer 101 and the layers below it hold supports only. Body area at the loaded layer = R × heads × the measured section of one head, so the side is √(R × heads × section), rounded to 0.01 mm. Heads sit on an even grid at the centres of equal cells, vertical, with columns to a raft. A raised corner tab (front-left) and the raised coupon number sit on the top face, above the loaded layer, so they add no area to the layer that peels first. Raft IDs are not made: a native raft cut is not proved safe in ChituBox, so the map is the key.
+
+**Heads are plinth's own.** `head_candidate` (public wrapper of the planner's `candidate()` in `crates/support/src/place/search.rs`) gives the ball, standoff, cone and joint. `PlanBuilder` admits them, `freeze` routes columns and the raft, and `plinth_emit` writes them. The only free input is the cone-start radius, solved so the section where the cone leaves the ball has the designed diameter (0.40, 0.55, 0.80 mm). Plinth's head path makes 0.40 and 0.80 mm: the 0.40 head is below the planner's current smallest (0.55) and its 16-head grid at R 30 has a head pitch of 1.9 mm, and 0.80 mm is at the top of the ball-radius limit (0.42 mm). It cannot make 1.20 mm (the ball would be 0.64 mm, over the 0.42 mm limit and the H1 patch maximum). So **row R4 is a plain waisted column**: base flare, pillar, taper, 1.20 mm waist cylinder, taper, ending 0.1 mm inside the body. It is calibration-only; its top is wider than H1 allows for a real contact. Every column, flare and raft section is larger than the neck.
+
+**Placement.** Three front-to-back zones. The copies of one cell are in different zones, so the front-to-back position of a copy is not confounded with the cell. Coupons are packed on shelves; the order within a shelf and the zone assignment come from the recorded seed (20261110, xorshift64, as in CAL-1). Moves are whole owner-grid pixel steps. Clearance (at least 6 mm, bounding boxes, conservative) is verified on the re-read file.
+
+**What the generator checks, from the re-read file.** For every coupon: the body area at the loaded layer (sliced from the written body mesh), the section where every cone leaves its ball (sliced from the written cone mesh), the ball face section, the column, the flare, the smallest horizontal section above the raft, the achieved ratio (rejected if more than 3% from the target), and the ratio of every layer (the layers below the loaded layer hold no model area; no layer has a higher ratio than the loaded layer). The project must parse and write back byte for byte.
+
+**Known property of plinth's heads (finding).** The ball's section in the plane of the body face is 6 to 8% smaller than the section where the cone leaves the ball (ratio 0.92 to 0.94). Plinth sizes the planar patch at the cone-start radius, and the cone widens before it leaves the ball. So the strictly smallest section of a head is the face patch, not the neck. Ratios against the smaller of the two are 6 to 8% higher than the labels (R 95 acts as about 101). The report gives both. This is smaller than the step between ratio rungs, but a break at one rung and not the next should be read with it in mind.
+
+**Decision reads** (per coupon, copies compared):
+
+- Any head break at R ≤ 40: lower the unprintable limit (40) in `warn.rs`.
+- All copies intact at 55, and none failing at 40: 55 is a candidate for the limit, pending a second plate.
+- The 4-head 0.55 controls (R5) differ from the 9-head 0.55 coupons (R2) at the same R: load is not shared evenly across heads, so the additive rule over-counts the heads.
+- The neck sizes (0.40, 0.55, 0.80, 1.20 mm) break at different R: the ratio-only model does not scale with section size. That matters for counting on thick model parts to carry peel load.
+- Witnesses (R6) that do not form say that head size cannot be made; read the other cells of that size as untested, not as passing.
+
+**Not claimed.** This plate is not a print candidate for any model. It has not been sliced or printed. No ChituBox open, save and slice check has run; the repo's round trip (parse, then write, byte-identical) has.
