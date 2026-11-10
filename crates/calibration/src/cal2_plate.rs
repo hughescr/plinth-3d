@@ -43,13 +43,18 @@ fn number(m: &Model) -> Result<u32> {
 }
 
 fn label(spec: &Cal2Spec, k: usize, i: &Item) -> String {
+    // A witness's "R6" would read as row R6.
+    let ratio = if i.kind == Kind::Witness {
+        format!("ratio {:.0}", i.ratio)
+    } else {
+        format!("R{:.0}", i.ratio)
+    };
     format!(
-        "C{:02} {} {:.2} mm x{} R{:.0} {} copy {}",
+        "C{:02} {} {:.2} mm x{} {ratio} {} copy {}",
         k + 1,
         spec.rows[i.row].id,
         i.neck_mm,
         i.heads,
-        i.ratio,
         i.variant.name(),
         i.copy + 1
     )
@@ -155,8 +160,10 @@ fn annotate(
     j["heads"] = json!(item.heads);
     j["designed_body"] = built.dims.clone();
     j["sized_to_section_mm2"] = json!({
-        "minimum_per_head": built.sections.minimum,
-        "face_patch_per_head": built.sections.patch,
+        "load_model_capacity_per_head": built.sections.minimum,
+        "certified_patch_per_head": built.sections.certified_patch,
+        "mesh_face_patch_per_head": built.sections.mesh_patch,
+        "mesh_minimum_per_head": built.sections.mesh_minimum,
         "cone_exit_per_head": built.sections.cone_exit,
         "full_area_mm2": built.full_area,
     });
@@ -218,7 +225,7 @@ pub fn assemble(spec_path: &Path, out: &Path) -> Result<()> {
             return Err("written model order differs from the layout".into());
         }
         let item = &items[k];
-        let mut j = cal2_measure::coupon(&spec, item, m, grid)?;
+        let mut j = cal2_measure::coupon(&spec, item, m, grid, built[k].load.as_ref())?;
         annotate(&mut j, &spec, (k, item), &built[k], (slot, foot[k]));
         map.push(map_coupon(
             &spec,
@@ -314,8 +321,9 @@ fn cells(coupons: &[Value]) -> Vec<Value> {
                     .filter_map(|j| j[p].as_f64())
                     .collect::<Vec<_>>()
             };
-            let (min, cone) = (
-                f("achieved_ratio_min_section"),
+            let (model, mesh, cone) = (
+                f("achieved_ratio_model"),
+                f("achieved_ratio_mesh_section"),
                 f("achieved_ratio_cone_exit"),
             );
             let range = |a: &[f64]| {
@@ -331,7 +339,8 @@ fn cells(coupons: &[Value]) -> Vec<Value> {
                 "heads": group[0]["heads"],
                 "target_ratio": group[0]["target_ratio"],
                 "copies_on_plate": group.len(),
-                "achieved_ratio_min_section": range(&min),
+                "achieved_ratio_model": range(&model),
+                "achieved_ratio_mesh_section": range(&mesh),
                 "achieved_ratio_cone_exit": range(&cone),
                 "designed_body": group[0]["designed_body"],
             })
@@ -366,7 +375,11 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(k, i)| {
-                cal2_layout::footprint(&cal2_head::build(&spec, i, k as u32 + 1).unwrap().model)
+                cal2_layout::footprint(
+                    &cal2_head::build_for_layout(&spec, i, k as u32 + 1)
+                        .unwrap()
+                        .model,
+                )
             })
             .collect();
         let a = cal2_layout::plan(&items, &foot, spec.shuffle_seed).unwrap();
@@ -377,7 +390,9 @@ mod tests {
     }
 
     #[test]
-    fn whole_plate_is_complete_in_tolerance_clear_and_round_trips() {
+    // An `e2e_` name: the whole matrix (67 coupons built, written, re-read, load-modelled)
+    // takes longer than the 6 s unit cap in .config/nextest.toml.
+    fn e2e_cal2_whole_plate_is_complete_in_tolerance_clear_and_round_trips() {
         let (a, dir_a) = run("a", SPEC);
         assert_eq!(a["round_trip_byte_identical"], true);
         assert!(a["minimum_bbox_gap_mm"].as_f64().unwrap() >= plate::GAP - 1e-9);
@@ -392,8 +407,10 @@ mod tests {
             assert!((-3.0..=0.01).contains(&e), "{e}");
             assert_eq!(j["ratio_by_layer"]["no_layer_over_target"], true);
             assert_eq!(j["columns_and_flares_strictly_larger_than_neck"], true);
-            // The cone-exit ratio is below the min-section ratio: the minimum is the patch.
+            // The physical ratios are below the model's: the certified patch is smaller
+            // than the written ball's mesh section, which is smaller than the cone exit.
             if j["kind"] == "head" {
+                assert!(j["achieved_ratio_mesh_section"].as_f64() < j["achieved_ratio"].as_f64());
                 assert!(j["achieved_ratio_cone_exit"].as_f64() < j["achieved_ratio"].as_f64());
             }
         }

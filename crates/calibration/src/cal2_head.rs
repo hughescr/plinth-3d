@@ -3,17 +3,20 @@
 //! `plinth_emit`. The one input chosen here is the cone-start radius, solved so the section
 //! where the cone leaves the ball (as `neck_area` in the checker measures it) is the
 //! designed diameter. Only the 1.2 mm section is a plain waisted column. The body is sized
-//! to the per-contact minimum section, measured from a trial build of one head.
+//! to the capacity plinth's load model takes per contact (the certified patch lower bound or
+//! a smaller section of the path), read from the load view of a trial build of one head.
+use crate::cal2_measure::HeadLoad;
 use crate::cal2_spec::{Cal2Spec, Item, Kind};
 use crate::{cal2_body, cal2_measure, cal2_shape};
 use plinth_chitubox::{Model, Preset, Supports};
 use plinth_emit::shapes::{self, FrustumRole, RAFT_ATTR, Spec};
 use plinth_support::{
     construct::{
-        KeepUpRecord, Limits, MemberProposal, MemberQuoteBatch, PlanBuilder, PosedModel,
-        ProcessRecord, QuoteBatch, Section,
+        Contact, KeepUpRecord, Limits, MemberProposal, MemberQuoteBatch, PlanBuilder, PosedModel,
+        ProcessRecord, QuoteBatch, Section, SupportPlan,
     },
-    place::head_candidate,
+    load::LayerStack,
+    place::{add_members, head_candidate, layout_from_contacts},
 };
 
 /// Largest cone-start radius plinth admits (ball radius limit 0.42 mm / 1.06).
@@ -94,21 +97,33 @@ pub struct Built {
     pub sites: Vec<[f32; 2]>,
     /// Designed body dimensions and profile, for the report.
     pub dims: serde_json::Value,
-    /// Body area at full load, mm^2: ratio x heads x per-head minimum section, less the guard.
+    /// Body area at full load, mm^2: ratio x heads x per-head load-model capacity, less the
+    /// guard.
     pub full_area: f64,
     /// The per-head sections the body was sized to, from a trial build of one head, mm^2.
     pub sections: HeadSections,
     /// Plinth's certified patch interval per head (none for plain columns), mm^2.
     pub patch: Vec<[f64; 2]>,
     pub head: Option<HeadDesign>,
+    /// The load view of the frozen plan (none for plain columns).
+    pub load: Option<HeadLoad>,
 }
 
-/// The sections of one head chain, mm^2. `minimum` is what plinth's load model takes as the
-/// contact's limiting section: the smallest of the face patch, the cone exit and the path.
+/// The sections of one head chain, mm^2. `minimum` is what plinth's load model divides by in
+/// the first loaded layer: the smallest of the certified patch printed by then (a little
+/// under its lower bound) and every section of the path, taken from the load view. The patch
+/// only grows, so no later layer has less. `mesh_patch`, `cone_exit` and `mesh_minimum` are
+/// measured from the written record meshes, for comparison.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HeadSections {
     pub cone_exit: f64,
-    pub patch: f64,
+    /// Ball section in the plane of the body face, sliced from the written ball.
+    pub mesh_patch: f64,
+    /// plinth's certified patch lower bound (the mesh patch for a plain column).
+    pub certified_patch: f64,
+    /// Smallest section on the path as sliced from the written records.
+    pub mesh_minimum: f64,
+    /// The load model's capacity per contact.
     pub minimum: f64,
 }
 
@@ -137,15 +152,30 @@ fn head_sections(
     head: Option<HeadDesign>,
 ) -> crate::Result<HeadSections> {
     let (tris, sites) = trial_body();
-    let model = match head {
-        Some(h) => plinth_heads(spec, &tris, &sites, h)?.0,
-        None => plain_columns(spec, item.neck_mm, &tris, &sites)?.0,
+    let (model, load) = match head {
+        Some(h) => {
+            let b = plinth_heads(spec, &tris, &sites, h, true)?;
+            (b.model, b.load)
+        }
+        None => (plain_columns(spec, item.neck_mm, &tris, &sites)?.0, None),
     };
     let c = cal2_measure::first_chain(&model, item.kind)?;
+    // The load model's capacity of the one head in the first loaded layer: the smallest
+    // section of its chain, the patch as printed by then (a little under its certified
+    // lower bound for the first layers).
+    let (certified_patch, minimum) = match &load {
+        Some(l) => (
+            l.layout.contacts[0].patch_lower_mm2,
+            l.first_layer_capacity(0),
+        ),
+        None => (c.patch, c.minimum()),
+    };
     Ok(HeadSections {
         cone_exit: c.neck,
-        patch: c.patch,
-        minimum: c.minimum(),
+        mesh_patch: c.patch,
+        certified_patch,
+        mesh_minimum: c.minimum(),
+        minimum,
     })
 }
 
@@ -163,16 +193,67 @@ fn posed(spec: &Cal2Spec, tris: &[cal2_body::Tri]) -> crate::Result<(PosedModel,
     Ok((model, limits))
 }
 
-/// The model, its head sites, and plinth's certified patch interval per head.
-type HeadsBuilt = (Model, Vec<[f32; 2]>, Vec<[f64; 2]>);
+/// The model, its head sites, plinth's certified patch interval per head, and the load view.
+struct HeadsBuilt {
+    model: Model,
+    sites: Vec<[f32; 2]>,
+    patch: Vec<[f64; 2]>,
+    load: Option<HeadLoad>,
+}
+
+/// The load view of a frozen plan, made as the planner and the report make it
+/// (`layout_from_contacts` and `add_members`), with the planner's certified patch history:
+/// the patch printed by each layer's top, `ball_patches_below` capped at the contact's lower
+/// bound. The body's first layer starts at its lowest point (the face the heads touch).
+fn head_load(plan: &SupportPlan) -> crate::Result<HeadLoad> {
+    let shift = -f64::from(plan.model().plate_z());
+    let contacts: Vec<&Contact> = plan.contacts().iter().collect();
+    let stack = LayerStack {
+        layer_height_mm: LAYER,
+        ..LayerStack::default()
+    };
+    let mut layout = layout_from_contacts(&contacts, &[], &stack, shift);
+    add_members(plan, &mut layout);
+    let mesh = plan.model().mesh();
+    let face = mesh.bounds().min[2];
+    let (mut queries, mut owners) = (Vec::new(), Vec::new());
+    for (i, c) in contacts.iter().enumerate() {
+        let ball = c
+            .inner_ball()
+            .map_err(|e| format!("contact {i}: no certified ball: {e:?}"))?;
+        // Layers up to the one holding the ball's top; the patch is whole by then, and the
+        // last entry holds for every layer above.
+        let layers = ((ball.centre[2] + ball.radius - face) / LAYER)
+            .ceil()
+            .max(1.0) as usize;
+        for j in 1..=layers {
+            queries.push((ball, face + j as f64 * LAYER));
+            owners.push(i);
+        }
+    }
+    let bvh = plinth_geom::Bvh::build(mesh).map_err(|e| format!("body bvh: {e:?}"))?;
+    let mut bounds = Vec::new();
+    plinth_geom::patch::ball_patches_below_with_workers(&bvh, &queries, &mut bounds, 1);
+    let mut history = vec![Vec::new(); contacts.len()];
+    for (((_, z), i), area) in queries.iter().zip(owners).zip(bounds) {
+        let lower = area
+            .known()
+            .map_or(0.0, |a| a.lo)
+            .min(contacts[i].patch().lower());
+        history[i].push((z + shift, lower));
+    }
+    Ok(HeadLoad { layout, history })
+}
 
 fn plinth_heads(
     spec: &Cal2Spec,
     tris: &[cal2_body::Tri],
     sites: &[[f64; 2]],
     design: HeadDesign,
+    with_load: bool,
 ) -> crate::Result<HeadsBuilt> {
     let (body, limits) = posed(spec, tris)?;
+    let sites_f32: Vec<[f32; 2]> = sites.iter().map(|s| s.map(|v| v as f32)).collect();
     let face = f64::from(body.mesh().bounds().min[2] as f32);
     let cands: Vec<_> = sites
         .iter()
@@ -231,15 +312,17 @@ fn plinth_heads(
         .raft_connected()
         .map_err(|e| format!("raft: {e:?}"))?;
     let plan = routed.freeze().map_err(|e| format!("freeze: {e:?}"))?;
+    let load = with_load.then(|| head_load(&plan)).transpose()?;
     let model = plinth_emit::constructed::project(&plan)
         .map_err(|e| format!("emit: {e:?}"))?
         .models
         .remove(0);
-    Ok((
+    Ok(HeadsBuilt {
         model,
-        sites.iter().map(|s| s.map(|v| v as f32)).collect(),
+        sites: sites_f32,
         patch,
-    ))
+        load,
+    })
 }
 
 fn frustum(role: FrustumRole, start: [f32; 3], end: [f32; 3], r: (f32, f32)) -> Spec {
@@ -347,6 +430,20 @@ fn plain_columns(
 /// # Errors
 /// plinth refusing a head, or any geometry the writer cannot take.
 pub fn build(spec: &Cal2Spec, item: &Item, number: u32) -> crate::Result<Built> {
+    build_with(spec, item, number, true)
+}
+
+/// The same coupon without the certified patch history of its heads (`load` is none for
+/// plinth-headed coupons), which is the slow part of a build. For layout and footprints
+/// only: such a coupon cannot be measured.
+///
+/// # Errors
+/// As [`build`].
+pub fn build_for_layout(spec: &Cal2Spec, item: &Item, number: u32) -> crate::Result<Built> {
+    build_with(spec, item, number, false)
+}
+
+fn build_with(spec: &Cal2Spec, item: &Item, number: u32, with_load: bool) -> crate::Result<Built> {
     let name = format!(
         "C{number:02} {} n{:.2} x{} R{:.0} {}; {}",
         spec.rows[item.row].id,
@@ -359,8 +456,8 @@ pub fn build(spec: &Cal2Spec, item: &Item, number: u32) -> crate::Result<Built> 
     let head = (item.kind != Kind::Column)
         .then(|| design(item.neck_mm))
         .transpose()?;
-    // Size the body to plinth's own limiting section: the smallest section on each
-    // contact's path, which for these heads is the face patch.
+    // Size the body to the capacity plinth's load model takes per contact: the certified
+    // patch lower bound, or any smaller section on its path.
     let sections = head_sections(spec, item, head)?;
     let full_area = item.ratio * item.heads as f64 * sections.minimum * (1.0 - GUARD);
     let plan = cal2_shape::plan(item, spec.hold_layers, full_area)?;
@@ -370,11 +467,14 @@ pub fn build(spec: &Cal2Spec, item: &Item, number: u32) -> crate::Result<Built> 
         .filter(|&(lo, hi, _)| cal2_body::Features::fit(hi[0] - lo[0], hi[1] - lo[1]))
         .map(|(lo, hi, z)| cal2_body::Features { lo, hi, z, number });
     let tris = cal2_body::body(&plan.parts, features.as_ref());
-    let (model, sites, patch) = match head {
-        Some(h) => plinth_heads(spec, &tris, &plan.sites, h)?,
+    let (model, sites, patch, load) = match head {
+        Some(h) => {
+            let b = plinth_heads(spec, &tris, &plan.sites, h, with_load)?;
+            (b.model, b.sites, b.patch, b.load)
+        }
         None => {
             let (m, s) = plain_columns(spec, item.neck_mm, &tris, &plan.sites)?;
-            (m, s, vec![])
+            (m, s, vec![], None)
         }
     };
     let mut model = model;
@@ -387,6 +487,7 @@ pub fn build(spec: &Cal2Spec, item: &Item, number: u32) -> crate::Result<Built> 
         sections,
         patch,
         head,
+        load,
     })
 }
 
@@ -406,7 +507,7 @@ mod tests {
             .iter()
             .filter(|i| i.copy == 0 && i.kind != Kind::Column)
         {
-            let b = build(&s, it, 3).unwrap();
+            let b = build_for_layout(&s, it, 3).unwrap();
             let want = head_candidate(
                 0,
                 [0.0; 3],
@@ -469,8 +570,10 @@ mod tests {
         let b = build(&s, &it, 3).unwrap();
         let sec = b.sections;
         // Recorded finding: the face patch is 6 to 8 percent under the cone exit.
-        assert!(sec.minimum <= sec.patch && sec.minimum < sec.cone_exit);
-        let ratio = sec.patch / sec.cone_exit;
+        assert!(sec.minimum <= sec.certified_patch && sec.minimum < sec.cone_exit);
+        // plinth's certified lower bound is under the written ball's plane section.
+        assert!(sec.certified_patch < sec.mesh_patch);
+        let ratio = sec.mesh_patch / sec.cone_exit;
         assert!(ratio > 0.90 && ratio < 0.96, "{ratio}");
         let want = it.ratio * it.heads as f64 * sec.minimum;
         assert!(b.full_area < want && b.full_area > want * 0.999);

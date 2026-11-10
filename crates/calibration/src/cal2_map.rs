@@ -115,6 +115,12 @@ fn coupon(s: &mut String, c: &MapCoupon) -> Result<()> {
         Kind::Witness => " witness",
         Kind::Head => "",
     };
+    // "R6" would read as row R6; a witness's own ratio is spelled out.
+    let ratio = if c.kind == Kind::Witness {
+        format!(", ratio {:.0}", c.ratio)
+    } else {
+        format!(" R{:.0}", c.ratio)
+    };
     let variant = if c.kind == Kind::Witness {
         "formation witness"
     } else if c.control {
@@ -124,12 +130,11 @@ fn coupon(s: &mut String, c: &MapCoupon) -> Result<()> {
     };
     writeln!(
         s,
-        "<text x=\"{mid:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"15\" font-weight=\"bold\" fill=\"{col}\">C{:02} {:.2}x{}{kind} R{:.0}</text><text x=\"{mid:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"15\" fill=\"#171717\">{variant} ({})</text>",
+        "<text x=\"{mid:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"15\" font-weight=\"bold\" fill=\"{col}\">C{:02} {:.2}x{}{kind}{ratio}</text><text x=\"{mid:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"15\" fill=\"#171717\">{variant} ({})</text>",
         base + 17.0,
         c.number,
         c.neck_mm,
         c.heads,
-        c.ratio,
         base + 34.0,
         c.row,
     )?;
@@ -146,7 +151,7 @@ pub fn svg(coupons: &[MapCoupon], cut: &str, seed: u64) -> Result<String> {
     );
     writeln!(
         s,
-        "<text x=\"100\" y=\"60\" font-size=\"44\" font-weight=\"bold\">CAL-2 calibration plate: NOT a print candidate</text><text x=\"100\" y=\"104\" font-size=\"26\">Top view as ChituBox shows it. {} coupons, each labelled number, neck mm x heads, R (peak layer ratio against the minimum section), variant (row). Shuffle seed {seed}.</text>",
+        "<text x=\"100\" y=\"60\" font-size=\"44\" font-weight=\"bold\">CAL-2 calibration plate: NOT a print candidate</text><text x=\"100\" y=\"104\" font-size=\"26\">Top view as ChituBox shows it. {} coupons, each labelled number, neck mm x heads, R (peak layer ratio, as plinth's load model computes it), variant (row). Shuffle seed {seed}.</text>",
         coupons.len()
     )?;
     let [x0, y0] = px([-plate::BUILD[0] / 2.0, plate::BUILD[1] / 2.0]);
@@ -167,7 +172,10 @@ pub fn svg(coupons: &[MapCoupon], cut: &str, seed: u64) -> Result<String> {
         ),
         ("#dd6b20", "0.80 mm necks, 4 heads"),
         ("#805ad5", "1.20 mm plain waisted columns, 4 per coupon"),
-        ("#c53030", "formation witness: one head, small body, R9"),
+        (
+            "#c53030",
+            "formation witness: one head, small body (row R9)",
+        ),
     ];
     for (i, (col, text)) in legend.iter().enumerate() {
         let y = 1456.0 + 28.0 * i as f64;
