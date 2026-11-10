@@ -288,7 +288,7 @@ fn load_only_keep_rule_requires_improvement_and_refuses_a_worse_violation_elsewh
         !replay_improves(&before, &after, (0, 0)),
         "load-only additions cannot worsen an existing intervention numerically"
     );
-    after.groups[1].x_group = 25.1;
+    after.groups[1].x_group = 40.1;
     assert!(
         !replay_improves(&before, &after, (0, 0)),
         "no new unprintable exposure"
@@ -329,7 +329,12 @@ fn mandatory_island_capacity_is_not_an_optional_parent_sharing_refinement() {
         island_capacity_improves(&before, &after, 0),
         "independent island capacity must survive a new reported parent intervention"
     );
-    after.groups[1].x_group = 25.1;
+    after.groups[1].x_group = 39.9;
+    assert!(
+        island_capacity_improves(&before, &after, 0),
+        "a parent just under the unprintable limit of 40 is an intervention, not unprintable"
+    );
+    after.groups[1].x_group = 40.1;
     assert!(
         !island_capacity_improves(&before, &after, 0),
         "never create another unprintable deficit"

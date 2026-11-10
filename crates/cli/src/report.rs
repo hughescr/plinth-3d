@@ -216,10 +216,12 @@ pub const TRIBUTARY_LABEL: &str = "Tributary ratio: a nearest-3D sensitivity dia
 
 /// The uncertainty statement (design section 3).
 pub const UNCERTAINTY: [&str; 4] = [
-    "The snapping ratio of about 25 was measured on flat horizontal caps 2 to 12.5 mm across \
-     with vertical arms 4 to 6 mm long and one resin, and fails at the narrowest section above \
-     the contact. It was not measured on thin tilted strips, or on angled, bent or merged \
-     members, or off-axis loads.",
+    "The unprintable limit of 40 is the owner's choice (ruling 2026-11-10), not a measured \
+     breaking point. Supports survived at ratios of about 33.5 (ChituBox Better supports on \
+     Round 25) and 60 (CAL-1 K-60 coupon), and 40 keeps margin below 60. The older snapping \
+     ratio of about 25 was read by eye on flat horizontal caps 2 to 12.5 mm across with \
+     vertical arms 4 to 6 mm long and one resin, and fails at the narrowest section above \
+     the contact. The cap tests did not cover angled, bent or merged members, or off-axis loads.",
     "The design ratio of 12 is the owner's starting policy (P5), not a claim that 12 is safe or \
      needed. Heads were lost at 9 on one plate; another way of measuring gives 11 to 14.",
     "Load sharing among up to 6 arms within about 14 mm under a stiff part was measured (P6). \

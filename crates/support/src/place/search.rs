@@ -987,7 +987,8 @@ fn island_capacity_improves(
     let mut new = 0.0_f64;
     for (b, a) in before.groups.iter().zip(&after.groups) {
         if (b.component, b.layer) != (a.component, a.layer)
-            || (a.x_group > 25.0 && a.x_group > b.x_group.max(25.0) + 1e-7)
+            || (a.x_group > load::warn::UNPRINTABLE_RATIO
+                && a.x_group > b.x_group.max(load::warn::UNPRINTABLE_RATIO) + 1e-7)
             || (!b.active.is_empty() && a.active.is_empty())
         {
             return false;

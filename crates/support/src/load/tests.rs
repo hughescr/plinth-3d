@@ -313,19 +313,45 @@ fn a_centre_off_a_straight_row_is_an_intervention_even_with_low_ratios() {
 }
 
 #[test]
-fn sixty_mm2_over_two_mm2_of_section_is_ratio_30_utilisation_2_5_and_unprintable() {
-    let stack = body(&[60.0]);
+fn ratio_38_and_42_fall_either_side_of_the_unprintable_limit_of_40() {
+    for (area, beyond) in [(76.0, false), (84.0, true)] {
+        let stack = body(&[area]);
+        let d = analyse_full(
+            &stack,
+            &layout(vec![contact(1.0, 2.0, 0, 2.0, 2.0)], 2.0, 2.0),
+            &Extras::default(),
+        );
+        let hit = kinds(&d.report, WarningClass::Unprintable)
+            .iter()
+            .any(|k| k == "additive area ratio beyond the unprintable limit");
+        assert_eq!(hit, beyond, "area {area}: x_group {}", d.groups[0].x_group);
+    }
+}
+
+#[test]
+fn ninety_mm2_over_two_mm2_of_section_is_ratio_45_utilisation_3_75_and_unprintable() {
+    let stack = body(&[90.0]);
     let d = analyse_full(
         &stack,
         &layout(vec![contact(1.0, 2.0, 0, 2.0, 2.0)], 2.0, 2.0),
         &Extras::default(),
     );
     let g = &d.groups[0];
-    assert!(close(g.x_group, 30.0) && close(g.utilisation, 2.5), "{g:?}");
     assert!(
-        kinds(&d.report, WarningClass::Unprintable)
-            .iter()
-            .any(|k| k == "additive area ratio beyond breaking")
+        close(g.x_group, 45.0) && close(g.utilisation, 3.75),
+        "{g:?}"
+    );
+    let w = d
+        .report
+        .warnings
+        .iter()
+        .find(|w| w.kind == "additive area ratio beyond the unprintable limit")
+        .expect("ratio 45 is beyond 40");
+    assert_eq!(w.class, WarningClass::Unprintable);
+    assert!(
+        w.message.contains("owner's limit of 40") && !w.message.contains("snapped"),
+        "{}",
+        w.message
     );
     // The unprintable case takes precedence: no intervention for the same layer.
     let iv = kinds(&d.report, WarningClass::Intervention);
@@ -348,7 +374,7 @@ fn positive_area_over_zero_section_is_unprintable_not_zero() {
     assert!(
         kinds(&d.report, WarningClass::Unprintable)
             .iter()
-            .any(|k| k == "additive area ratio beyond breaking")
+            .any(|k| k == "additive area ratio beyond the unprintable limit")
     );
 }
 

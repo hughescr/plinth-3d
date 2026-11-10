@@ -26,13 +26,13 @@ The replay adapter (`plinth-slots/bench/crates/cli/examples/magic.rs`, uncommitt
 |---|---|---|---|
 | Contacts | 17: 10 main (ball 0.5 mm, cone start 0.40 mm, column 1.2 mm) + 7 branch (ball 0.2, rod 0.10) | 17: 10 main (ball 0.8, cone start 0.60, column 1.5) + 7 branch (ball 0.2, rod 0.10–0.15) | — |
 | Largest rigid-lever ratio | **2,293**, on the 0.10 mm rods of two branch supports under the lower underside flank | **1,211**, on a patch at its first printed layer | 12 |
-| Largest additive group ratio | **313**, bottom lip, about 2.8 mm above its lowest point; held by three patches of 0.03–0.04 mm² | **44** | 12 (P4 breaking about 25) |
+| Largest additive group ratio | **313**, bottom lip, about 2.8 mm above its lowest point; held by three patches of 0.03–0.04 mm² | **44** | 12 (P4 unprintable limit 40) |
 | Layer groups the rigid-lever solve cannot balance | 125, layers 0–171 | 143, layers 0–171 | — |
 | Plinth checker | H9: parts 0.098 mm across flats; H1, H2, H6 unverified (open joint-ball mesh) | H1, H6, H9 violations | — |
 
 Two readings (not exclusive; both can be partly true):
 
-1. **Load is overstated for thin strips.** The model loads contacts with the full cured layer area (assumption A2). P4 measured breaking near 25 on flat caps 2–12.5 mm across. Round 25 layers are strips 1–4 mm wide. Old evidence hints that thin walls peel with far less force per mm² (plate 1 slender-wall bound about 1 kPa against 67–101 kPa under flat discs, `docs/lessons/lessons-physics.md` §1b) **[M, low confidence]**.
+1. **Load is overstated for thin strips.** The model loads contacts with the full cured layer area (assumption A2). Plate 5 measured breaking near 25 on flat caps 2–12.5 mm across (the unprintable limit is now 40, owner ruling 2026-11-10). Round 25 layers are strips 1–4 mm wide. Old evidence hints that thin walls peel with far less force per mm² (plate 1 slender-wall bound about 1 kPa against 67–101 kPa under flat discs, `docs/lessons/lessons-physics.md` §1b) **[M, low confidence]**.
 2. **The sharing rule is wrong.** The rigid-lever rule gives small contacts far from stiff ones very large ratios, whatever their own size.
 
 This plate tests the Light layout directly and looks at the first reading. It does not choose a sharing rule (§10).
