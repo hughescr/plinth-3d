@@ -1,6 +1,6 @@
 # Round 25 side-by-side print (PRD §8.4): record and frozen predictions
 
-**Status:** Written on 2026-11-09, after the print started and before any result. The predictions below are frozen; the results section is a blank template. Later edits fill the template only. They do not change a prediction.
+**Status:** Written on 2026-11-09, after the print started and before any result. The predictions below are frozen. Results were filled in on 2026-11-10 from the owner's report. Later edits fill the template only. They do not change a prediction.
 
 [O] is an owner observation or statement; [M] is measured from files; [S] is an orchestrator ruling or inference; [U] is an unverified model estimate. Support figures from the adapter (`plinth-review/2026-11-09-three-ways*/`) are [U] where noted: its notes say rotated ChituBox parts failed native validation, so fallback patch bounds are unverified.
 
@@ -46,7 +46,7 @@ Counted from the support records unless marked. Copies of one version agree exce
 | Plinth 65° | 39 | 0.54–0.83; 0.83 × 19 | 0.51–0.81; 0.79 × 20 | 52.24 (19.5) | 28 | 1.87 | 4.40 |
 | Better auto | 21 | 0.20 × 15; 0.80 × 6 | 0.10 × 8; 0.15 × 7; 0.66–0.69 × 6 | 48.87 (12.9) | 13 | 3.76 | 22.12 |
 
-Worst additive layer [U] (design ratio 12): Better 65° ratio 43.63 at Z 12.3 mm (layer 185), 8 active tips, 6.40 mm² per tip; plinth 17.33 at Z 6.65 mm (layer 32), 4 active tips, 5.80 mm² per tip, lowest lip, median over all contacts 6.95; Better auto 124.44 at Z 11.4 mm on one tip of a 0.95 mm² component the adapter did not assess, and 24.02 on the main body there, median 43.92. Raft-layer lit area [M]: Better 65° 89.5 and 90.0 mm²; plinth 181.0 mm² each; Better auto 80.7 mm² each. Largest lit area above the lift [M]: 59.3 and 59.1; 71.2 and 71.2; 49.1 and 49.2 mm².
+Worst additive layer [U] (design ratio 12): Better 65° ratio 33.5 (43.63 before the ball-exit section correction; see What this changes) at Z 12.3 mm (layer 185), 8 active tips, 6.40 mm² per tip; plinth 17.33 at Z 6.65 mm (layer 32), 4 active tips, 5.80 mm² per tip, lowest lip, median over all contacts 6.95; Better auto 124.44 at Z 11.4 mm on one tip of a 0.95 mm² component the adapter did not assess, and 24.02 on the main body there, median 43.92. Raft-layer lit area [M]: Better 65° 89.5 and 90.0 mm²; plinth 181.0 mm² each; Better auto 80.7 mm² each. Largest lit area above the lift [M]: 59.3 and 59.1; 71.2 and 71.2; 49.1 and 49.2 mm².
 
 [M] `goo-analysis.json` counts islands of 2 pixels or more with no overlap in the layer below. Better auto copies (models 4 and 5) have one each: layer 228, Z 11.40 mm, 73 and 72 pixels (about 0.02 mm²), at the disc's local Y about +1.4 mm, 0.23 mm from support records 147 and 148. That is about 8.4 mm above the disc's lowest edge (11.40 minus the 3 mm lift). The slice shows lit material there with nothing under it in the layer below; it does not show whether a support catches it.
 
@@ -61,36 +61,65 @@ Qualitative on purpose. The numbers above are inputs, not calibrated forecasts. 
 5. **No prediction on front against back.** The front (−Y) releases first and moves farthest [O], and the Z rotations differ. One copy per cell, so any front/back difference is a lead, not a result.
 6. **Run time** should be near the header's 3936 s. Plate fit is not in doubt.
 
-## Results (fill in after the print)
+## Results
 
-Fill in every cell, including "none". Do not rewrite the predictions. Date and time of inspection: ______. Inspector: ______.
+Date and time of inspection: 2026-11-10 (time not reported). Inspector: owner. Source: the owner's report of 2026-11-10 [O], unless marked.
 
-Per copy, for models 0 to 5 in turn (6 blocks of this form; the plan shows block 0):
+The owner called the vertical pair "light". The plate holds Better auto copies (models 4 and 5) and no Light copy, per the `.chitubox` and `.goo` files, so they are recorded here as Better auto.
 
-| Field | Model 0: Better 65°, back |
-|---|---|
-| Printed or failed; where | |
-| Supports snapped; where (tip / mid / base) | |
-| Removal ease (easy / normal / hard) and damage | |
-| Extra smoothing, and time | |
-| Manual edits, and time | |
-| Resin; vat film | |
-| Print height measured | |
-| Run time | |
-| Was the failure or weak spot at a spot the file warned about? | |
-| Did the auto-copy island at Z 11.40 mm show in the part? (models 4, 5) | |
-| Photos | |
+The owner suspects the plate was not cleaned before printing. The owner decided not to reprint this plate.
 
-Counts by version (PRD §8.4): printed ___ / failed ___ / waived ___; failures at a warned spot ___; failures at an unwarned spot ___; warnings that needed action ___; warnings on regions that printed fine ___. A blanket of warnings does not prove prediction.
+Per copy, models 0 to 5 (one column each):
+
+| Field | 0: Better 65°, back | 1: Better 65°, front | 2: Plinth 65°, back | 3: Plinth 65°, front | 4: Better auto, back | 5: Better auto, front |
+|---|---|---|---|---|---|---|
+| Printed or failed; where | Printed | Printed | Failed at layer 1 (plate adhesion). Nothing on the plate here: no raft, no support legs. Waived: adhesion failure at layer 1 (owner suspects plate not cleaned) | Failed at layer 1 (plate adhesion). Nothing on the plate here. Waived: adhesion failure at layer 1 (owner suspects plate not cleaned) | One of models 4 and 5 printed; the other failed at layer 1 (plate adhesion) and is waived. Which is which is not identified | Same as model 4 |
+| Supports snapped; where (tip / mid / base) | None; did not detach from its supports | None; did not detach from its supports | n/a: no support result | n/a: no support result | Printed copy: none; did not detach. Failed copy: n/a | Same as model 4 |
+| Removal ease (easy / normal / hard) and damage | Not reported | Not reported | n/a (no part) | n/a (no part) | Printed copy: not reported. Failed copy: n/a (no part) | Same as model 4 |
+| Extra smoothing, and time | Not reported | Not reported | n/a (no part) | n/a (no part) | Printed copy: not reported. Failed copy: n/a (no part) | Same as model 4 |
+| Manual edits, and time | Not reported | Not reported | n/a (no part) | n/a (no part) | Printed copy: not reported. Failed copy: n/a (no part) | Same as model 4 |
+| Resin; vat film | Not reported per copy | Not reported per copy | Not reported per copy | Not reported per copy | Not reported per copy | Not reported per copy |
+| Print height measured | Not reported | Not reported | n/a (no part) | n/a (no part) | Printed copy: not reported. Failed copy: n/a (no part) | Same as model 4 |
+| Run time | Not reported | Not reported | Not reported | Not reported | Not reported | Not reported |
+| Was the failure or weak spot at a spot the file warned about? | No failure or weak spot reported | No failure or weak spot reported | n/a: adhesion failure, not a support result | n/a: adhesion failure, not a support result | Printed copy: no failure or weak spot reported. Failed copy: n/a (adhesion failure) | Same as model 4 |
+| Did the auto-copy island at Z 11.40 mm show in the part? (models 4, 5) | n/a | n/a | n/a | n/a | Printed copy: not inspected. Failed copy: no part | Same as model 4 |
+| Photos | Plate photo only | Plate photo only | Plate photo only | Plate photo only | Plate photo only | Plate photo only |
+
+Resin and vat film are plate-level only, as in the Print record. Run time is not reported for the plate or any copy. Models 4 and 5: the owner does not know whether the failed auto copy would also have come out clean, or whether the plinth copies would have.
+
+Counts by version (PRD §8.4): printed 3 / failed 0 (no support failures) / waived 3 (Better 65° 2 / 0 / 0; Plinth 65° 0 / 0 / 2; Better auto 1 / 0 / 1, with the printed copy not identified); failures at a warned spot 0; failures at an unwarned spot 0; warnings that needed action not reported; warnings on regions that printed fine not reported. The three waived copies are adhesion failures at layer 1, not support failures. A blanket of warnings does not prove prediction.
+
+### Prediction check
+
+1. **Untested.** Both plinth copies failed at layer 1 (plate adhesion, waived), so there is no support result to test.
+2. **BROKEN.** Better 65° was predicted most likely to fail or deform, first at the lowest lips. Both copies printed and did not detach from their supports. Its worst additive ratio about 33.5 after the section correction [S], against the breaking warning level of 25 (`BREAKING_RATIO` in `crates/support/src/load/warn.rs`).
+3. **Partly broken.** The printed Better auto copy (one of models 4 and 5) survived and carried the ~124 component [U]. The island at Z 11.40 mm was not inspected, so that part is untested. The failed copy is an adhesion failure, not a support result.
+4. **Consistent.** Both ChituBox versions printed at least one copy, and no ranking was predicted. "Neither beats plinth" is untested, because both plinth copies were waived.
+5. **Untested.** No front or back result (contrast D: cannot tell).
+6. **Not reported.** The owner gave no run time.
+
+### What this changes
+
+[S] These results contradict the load model's limits. DESIGN_RATIO is 12 (`crates/support/src/load/mod.rs`) and BREAKING_RATIO is 25 (`crates/support/src/load/warn.rs`). Three copies printed and stayed attached to their supports: both Better 65° copies, and one Better auto copy. The adapter puts the worst additive ratio of the Better 65° copies at about 33.5 [S], using the section where the cone leaves the ball (see the paragraph below). The surviving auto copy also carried a tip at about 124 [U] on a component the adapter did not assess.
+
+By this doc's own rule, the adapter figures are [U], and a result that disagrees with them is a finding about the adapter first. So the first suspect is the adapter's estimate of ChituBox's supports, and only then the limits.
+
+[S] The ChituBox adapter measured each large (0.80 mm ball) contact at the cone's narrowest radius, which lies inside the ball (`plinth-review/2026-11-09-three-ways/adapter-source.rs`, `section()`, min(ra, rb)). The section checker (`checker/src/h6.rs`, `neck_area`) measures where the cone leaves the ball instead. With that section, Better 65°'s worst ratio is about 33.5 (layer 185: 51.22 mm² / 1.528 mm²), not 43.6. These figures are still an estimate of the written geometry, not of cured strength. The "~43 at every tip" was one group ratio repeated for each active contact. The 17 per-contact maxima, uncorrected, are 8 at 43.6, 2 at 43.2, 2 at 30.4, 2 at 22.1 and 3 at 21.5. The 25 "breaking" figure is the cone bracket from plate 5 (25.00 to 25.34): one specimen at each end of the range, read by eye (PRD.md P4; `docs/lessons/lessons-physics.md`). CAL-1's K-60 control piece, at ratio 60.15 (`docs/design/calibration-prints.md`, K-60 row), survived in both bands (`docs/experiments/cal-1-results.md`), although the same piece was gone on plate 6. Conclusion: the code's rule that a ratio above 25 is unprintable (`BREAKING_RATIO` in `crates/support/src/load/warn.rs`) is contradicted by survivors at about 33.5 (both Better 65° copies, 2 of 2) and at 60.15 (K-60, 2 of 2, on CAL-1). Owner ruling, 2026-11-10: raise the unprintable limit from 25 to 40. He trusts these two recent prints (CAL-1 and this one) more than the older plates, and 40 leaves margin below the 60.15 survivor. DESIGN_RATIO stays 12.
+
+The waived adhesion failures say nothing about the supports, so they count neither for nor against the limits. This is one plate and one run.
 
 ## Contrasts to score
 
 Each version has two copies. Score a contrast only on outcomes both copies of a version share; a split pair is reported as a split (1 of 2).
 
 - **A. Plinth against Better 65°.** Same model, same tilt; isolates the support design. Confounds: lift 5 against 3 mm, different Z rotations, one copy per half.
+  - **Result: cannot tell.** Both plinth copies failed at layer 1 (plate adhesion, waived), so there is no plinth support result to compare. Plinth warned about the spot: not applicable. Predictions: 1 untested; 2 breaks (both Better 65° copies printed).
 - **B. Plinth against Better auto.** Isolates support design plus ChituBox's own choice of orientation.
+  - **Result: cannot tell.** Both plinth copies failed at layer 1 (plate adhesion, waived). Better auto is a split, 1 of 2 printed, reported as a split. Plinth warned about the spot: not applicable. Predictions: 1 untested; 3 partly broken (the printed auto copy carried the ~124 component; island not inspected).
 - **C. Better 65° against Better auto.** The orientation effect on ChituBox's own supports. Confounds: both orientation and its generated supports change together.
+  - **Result: cannot tell.** Both 65° copies printed; Better auto is a split, 1 of 2 printed. The auto failure is an adhesion failure (owner suspects the plate), so it does not score the orientation. Both versions printed at least one copy. Plinth warned about the spot: not applicable. Predictions: 2 breaks; 4 consistent.
 - **D. Front against back**, within each version. Peel direction and position only; one copy per cell.
+  - **Result: cannot tell.** Better 65°: both printed. Plinth: both failed at layer 1 (adhesion, waived). Better auto: 1 of 2 printed, and the owner did not say which copy printed, so front against back cannot be read for that version. Plinth warned about the spot: not applicable. Predictions: 5 untested.
 
 Score each contrast: plinth better / no difference / ChituBox better / cannot tell. For each result, say whether plinth warned about the spot, and tick which prediction above it supports or breaks.
 
@@ -103,11 +132,11 @@ Score each contrast: plinth better / no difference / ChituBox better / cannot te
 
 ## Photos
 
-Planned folder: `plate-photos/r25-side-by-side/` (JPEG, longest side 2000 px). Take all of these; mark any not taken.
+Planned folder: `plate-photos/r25-side-by-side/` (JPEG, longest side 2000 px). Each item is marked taken or not taken.
 
-- Plate from above and from the front edge, before removal and before washing.
-- Plate from the back edge, before removal.
-- One close-up of each copy's lowest lip supports and lower rim, as printed, with the model number visible.
-- Models 4 and 5: the disc at Z 11.40 mm (inner face), with a coin or ruler for scale.
-- Each copy after support removal, and any smoothed spot.
-- Any snapped support, and the tank-clean sheet.
+- Plate from above and from the front edge, before removal and before washing. **Taken:** from above, before removal: `plate-photos/r25-side-by-side/plate-above-after-print.jpg`. **Not taken:** from the front edge.
+- Plate from the back edge, before removal. **Not taken.**
+- One close-up of each copy's lowest lip supports and lower rim, as printed, with the model number visible. **Not taken.**
+- Models 4 and 5: the disc at Z 11.40 mm (inner face), with a coin or ruler for scale. **Not taken.**
+- Each copy after support removal, and any smoothed spot. **Not taken.**
+- Any snapped support, and the tank-clean sheet. **Not taken.**
