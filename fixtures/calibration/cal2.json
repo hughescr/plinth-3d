@@ -3,15 +3,20 @@
   "plate": "CAL-2",
   "shuffle_seed": 20261110,
   "lift_mm": 5.0,
-  "body_thickness_mm": 3.0,
+  "hold_layers": 40,
   "gap_mm": 6.0,
   "ratio_tolerance": 0.03,
   "rows": [
-    {"id": "R1", "kind": "head", "necks_mm": [0.4], "grid": 4, "ratios": [30.0, 40.0, 55.0, 70.0, 95.0], "copies": 3},
-    {"id": "R2", "kind": "head", "necks_mm": [0.55], "grid": 3, "ratios": [30.0, 40.0, 55.0, 70.0, 95.0], "copies": 3},
-    {"id": "R3", "kind": "head", "necks_mm": [0.8], "grid": 2, "ratios": [30.0, 40.0, 55.0, 70.0, 95.0], "copies": 2},
-    {"id": "R4", "kind": "column", "necks_mm": [1.2], "grid": 2, "ratios": [40.0, 70.0, 95.0], "copies": 2},
-    {"id": "R5", "kind": "head", "necks_mm": [0.55], "grid": 2, "ratios": [40.0, 70.0], "copies": 2},
-    {"id": "R6", "kind": "witness", "necks_mm": [0.4, 0.55, 0.8], "grid": 1, "ratios": [6.0], "copies": 1}
+    {"id": "R1", "priority": 1, "kind": "head", "variant": "standard", "necks_mm": [0.4], "heads": 16, "ratios": [25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 70.0], "copies": 2},
+    {"id": "R2", "priority": 2, "kind": "head", "variant": "standard", "necks_mm": [0.55], "heads": 9, "ratios": [25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 70.0], "copies": 2},
+    {"id": "R3a", "priority": 3, "kind": "head", "variant": "short_hold", "necks_mm": [0.55], "heads": 9, "ratios": [40.0, 50.0], "copies": 2},
+    {"id": "R3b", "priority": 3, "kind": "head", "variant": "long_hold", "necks_mm": [0.55], "heads": 9, "ratios": [40.0, 50.0], "copies": 2},
+    {"id": "R4", "priority": 4, "kind": "head", "variant": "late_load", "necks_mm": [0.55], "heads": 9, "ratios": [40.0, 50.0], "copies": 2},
+    {"id": "R5a", "priority": 5, "kind": "head", "variant": "strip", "necks_mm": [0.55], "heads": 8, "ratios": [40.0, 50.0], "copies": 2},
+    {"id": "R5b", "priority": 5, "kind": "head", "variant": "ring", "necks_mm": [0.55], "heads": 12, "ratios": [40.0, 50.0], "copies": 2},
+    {"id": "R6", "priority": 6, "kind": "head", "variant": "standard", "necks_mm": [0.8], "heads": 4, "ratios": [25.0, 35.0, 40.0, 50.0, 70.0], "copies": 2},
+    {"id": "R7", "priority": 7, "kind": "column", "variant": "standard", "necks_mm": [1.2], "heads": 4, "ratios": [40.0, 70.0], "copies": 2},
+    {"id": "R8", "priority": 8, "kind": "head", "variant": "standard", "necks_mm": [0.55], "heads": 4, "ratios": [40.0], "copies": 2},
+    {"id": "R9", "priority": 9, "kind": "witness", "variant": "standard", "necks_mm": [0.4, 0.55, 0.8], "heads": 1, "ratios": [6.0], "copies": 1}
   ]
 }

@@ -8,6 +8,7 @@ pub mod cal2_layout;
 pub mod cal2_map;
 pub mod cal2_measure;
 pub mod cal2_plate;
+pub mod cal2_shape;
 pub mod cal2_spec;
 pub mod goo;
 pub mod goo_grid;

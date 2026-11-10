@@ -2,9 +2,10 @@
 //! standoff, cone and joint, `PlanBuilder` admits them, and the frozen plan is written by
 //! `plinth_emit`. The one input chosen here is the cone-start radius, solved so the section
 //! where the cone leaves the ball (as `neck_area` in the checker measures it) is the
-//! designed diameter. Only the 1.2 mm section is a plain waisted column.
-use crate::cal2_body;
+//! designed diameter. Only the 1.2 mm section is a plain waisted column. The body is sized
+//! to the per-contact minimum section, measured from a trial build of one head.
 use crate::cal2_spec::{Cal2Spec, Item, Kind};
+use crate::{cal2_body, cal2_measure, cal2_shape};
 use plinth_chitubox::{Model, Preset, Supports};
 use plinth_emit::shapes::{self, FrustumRole, RAFT_ATTR, Spec};
 use plinth_support::{
@@ -91,30 +92,61 @@ pub fn design(neck_mm: f64) -> crate::Result<HeadDesign> {
 pub struct Built {
     pub model: Model,
     pub sites: Vec<[f32; 2]>,
-    pub side: f64,
-    /// Designed section area of one head, mm^2.
-    pub design_area: f64,
+    /// Designed body dimensions and profile, for the report.
+    pub dims: serde_json::Value,
+    /// Body area at full load, mm^2: ratio x heads x per-head minimum section, less the guard.
+    pub full_area: f64,
+    /// The per-head sections the body was sized to, from a trial build of one head, mm^2.
+    pub sections: HeadSections,
     /// Plinth's certified patch interval per head (none for plain columns), mm^2.
     pub patch: Vec<[f64; 2]>,
     pub head: Option<HeadDesign>,
 }
 
-/// Body side from the target ratio, rounded to 0.01 mm.
-fn side_for(item: &Item, area: f64) -> f64 {
-    let heads = (item.grid * item.grid) as f64;
-    ((item.ratio * heads * area).sqrt() * 100.0).round() / 100.0
+/// The sections of one head chain, mm^2. `minimum` is what plinth's load model takes as the
+/// contact's limiting section: the smallest of the face patch, the cone exit and the path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeadSections {
+    pub cone_exit: f64,
+    pub patch: f64,
+    pub minimum: f64,
 }
 
-fn grid_sites(side: f64, n: usize) -> Vec<[f64; 2]> {
-    let h = side / n as f64;
-    (0..n * n)
-        .map(|i| {
-            [
-                -side / 2.0 + (i % n) as f64 * h + h / 2.0,
-                -side / 2.0 + (i / n) as f64 * h + h / 2.0,
-            ]
-        })
-        .collect()
+/// Fraction of the target area held back when sizing, so rounding and slicing noise can
+/// never put a layer over the target ratio.
+pub const GUARD: f64 = 0.0005;
+
+/// A 4 mm, 2 mm tall square with one site at its centre, for measuring one head.
+fn trial_body() -> (Vec<cal2_body::Tri>, Vec<[f64; 2]>) {
+    let rect = cal2_body::Shape::Rect {
+        lo: [-2.0; 2],
+        hi: [2.0; 2],
+    };
+    let part = cal2_body::Part {
+        shape: rect,
+        z0: 0.0,
+        z1: 2.0,
+    };
+    (cal2_body::body(&[part], None), vec![[0.0, 0.0]])
+}
+
+/// Build one head by the same path as the coupon and measure it from the built records.
+fn head_sections(
+    spec: &Cal2Spec,
+    item: &Item,
+    head: Option<HeadDesign>,
+) -> crate::Result<HeadSections> {
+    let (tris, sites) = trial_body();
+    let model = match head {
+        Some(h) => plinth_heads(spec, &tris, &sites, h)?.0,
+        None => plain_columns(spec, item.neck_mm, &tris, &sites)?.0,
+    };
+    let c = cal2_measure::first_chain(&model, item.kind)?;
+    Ok(HeadSections {
+        cone_exit: c.neck,
+        patch: c.patch,
+        minimum: c.minimum(),
+    })
 }
 
 fn posed(spec: &Cal2Spec, tris: &[cal2_body::Tri]) -> crate::Result<(PosedModel, Limits)> {
@@ -136,15 +168,12 @@ type HeadsBuilt = (Model, Vec<[f32; 2]>, Vec<[f64; 2]>);
 
 fn plinth_heads(
     spec: &Cal2Spec,
-    item: &Item,
-    side: f64,
-    number: Option<u32>,
+    tris: &[cal2_body::Tri],
+    sites: &[[f64; 2]],
     design: HeadDesign,
 ) -> crate::Result<HeadsBuilt> {
-    let tris = cal2_body::body(side, spec.body_thickness_mm, number);
-    let (body, limits) = posed(spec, &tris)?;
+    let (body, limits) = posed(spec, tris)?;
     let face = f64::from(body.mesh().bounds().min[2] as f32);
-    let sites = grid_sites(side, item.grid);
     let cands: Vec<_> = sites
         .iter()
         .enumerate()
@@ -264,21 +293,17 @@ fn column_specs(xy: [f32; 2], face: f32, plate: f32, waist_r: f32) -> Vec<Spec> 
 
 fn plain_columns(
     spec: &Cal2Spec,
-    item: &Item,
-    side: f64,
-    number: Option<u32>,
+    neck_mm: f64,
+    tris: &[cal2_body::Tri],
+    sites: &[[f64; 2]],
 ) -> crate::Result<(Model, Vec<[f32; 2]>)> {
-    let tris = cal2_body::body(side, spec.body_thickness_mm, number);
-    let (body, _) = posed(spec, &tris)?;
+    let (body, _) = posed(spec, tris)?;
     let face = body.mesh().bounds().min[2] as f32;
     let plate = body.plate_z();
-    let sites: Vec<[f32; 2]> = grid_sites(side, item.grid)
-        .iter()
-        .map(|s| s.map(|v| v as f32))
-        .collect();
+    let sites: Vec<[f32; 2]> = sites.iter().map(|s| s.map(|v| v as f32)).collect();
     let mut specs: Vec<Spec> = sites
         .iter()
-        .flat_map(|&xy| column_specs(xy, face, plate, (item.neck_mm / 2.0) as f32))
+        .flat_map(|&xy| column_specs(xy, face, plate, (neck_mm / 2.0) as f32))
         .collect();
     let supports = specs.len();
     let mut bridges = Vec::new();
@@ -323,45 +348,46 @@ fn plain_columns(
 /// plinth refusing a head, or any geometry the writer cannot take.
 pub fn build(spec: &Cal2Spec, item: &Item, number: u32) -> crate::Result<Built> {
     let name = format!(
-        "C{number:02} {} n{:.2} x{} R{:.0}; {}",
+        "C{number:02} {} n{:.2} x{} R{:.0} {}; {}",
         spec.rows[item.row].id,
         item.neck_mm,
-        item.grid * item.grid,
+        item.heads,
         item.ratio,
+        item.variant.name(),
         crate::LABEL
     );
-    let shown = (item.kind != Kind::Witness).then_some(number);
-    let mut built = match item.kind {
-        Kind::Column => {
-            let area = polygon_area(item.neck_mm / 2.0);
-            let side = side_for(item, area);
-            let (model, sites) = plain_columns(spec, item, side, shown)?;
-            Built {
-                model,
-                sites,
-                side,
-                design_area: area,
-                patch: vec![],
-                head: None,
-            }
-        }
-        Kind::Head | Kind::Witness => {
-            let head = design(item.neck_mm)?;
-            let area = polygon_area(head.exit_radius);
-            let side = side_for(item, area);
-            let (model, sites, patch) = plinth_heads(spec, item, side, shown, head)?;
-            Built {
-                model,
-                sites,
-                side,
-                design_area: area,
-                patch,
-                head: Some(head),
-            }
+    let head = (item.kind != Kind::Column)
+        .then(|| design(item.neck_mm))
+        .transpose()?;
+    // Size the body to plinth's own limiting section: the smallest section on each
+    // contact's path, which for these heads is the face patch.
+    let sections = head_sections(spec, item, head)?;
+    let full_area = item.ratio * item.heads as f64 * sections.minimum * (1.0 - GUARD);
+    let plan = cal2_shape::plan(item, spec.hold_layers, full_area)?;
+    let features = (item.kind != Kind::Witness)
+        .then_some(plan.top)
+        .flatten()
+        .filter(|&(lo, hi, _)| cal2_body::Features::fit(hi[0] - lo[0], hi[1] - lo[1]))
+        .map(|(lo, hi, z)| cal2_body::Features { lo, hi, z, number });
+    let tris = cal2_body::body(&plan.parts, features.as_ref());
+    let (model, sites, patch) = match head {
+        Some(h) => plinth_heads(spec, &tris, &plan.sites, h)?,
+        None => {
+            let (m, s) = plain_columns(spec, item.neck_mm, &tris, &plan.sites)?;
+            (m, s, vec![])
         }
     };
-    built.model.name = name;
-    Ok(built)
+    let mut model = model;
+    model.name = name;
+    Ok(Built {
+        model,
+        sites,
+        dims: plan.dims,
+        full_area,
+        sections,
+        patch,
+        head,
+    })
 }
 
 #[cfg(test)]
@@ -411,7 +437,7 @@ mod tests {
                 .iter()
                 .filter(|r| r.record_type == plinth_chitubox::RecordType::TIP_BALL)
                 .count();
-            assert_eq!(balls, it.grid * it.grid);
+            assert_eq!(balls, it.heads);
         }
     }
 
@@ -424,9 +450,30 @@ mod tests {
             .find(|i| i.kind == Kind::Column)
             .unwrap();
         let b = build(&s, &it, 3).unwrap();
-        let want = it.ratio * 4.0 * polygon_area(0.6);
-        assert!((b.side * b.side / want - 1.0).abs() < 0.005);
+        // The waist is the minimum section of a column.
+        assert!((b.sections.minimum / polygon_area(0.6) - 1.0).abs() < 0.01);
+        let side = b.dims["width_mm"].as_f64().unwrap();
+        let want = it.ratio * 4.0 * b.sections.minimum;
+        assert!(side * side <= want && side * side / want > 0.99);
         assert!(b.head.is_none() && b.patch.is_empty());
+    }
+
+    #[test]
+    fn heads_are_sized_to_the_face_patch_not_the_cone_exit() {
+        let s = spec();
+        let it = s
+            .items()
+            .into_iter()
+            .find(|i| i.kind == Kind::Head && (i.neck_mm - 0.55).abs() < 1e-9)
+            .unwrap();
+        let b = build(&s, &it, 3).unwrap();
+        let sec = b.sections;
+        // Recorded finding: the face patch is 6 to 8 percent under the cone exit.
+        assert!(sec.minimum <= sec.patch && sec.minimum < sec.cone_exit);
+        let ratio = sec.patch / sec.cone_exit;
+        assert!(ratio > 0.90 && ratio < 0.96, "{ratio}");
+        let want = it.ratio * it.heads as f64 * sec.minimum;
+        assert!(b.full_area < want && b.full_area > want * 0.999);
     }
 
     #[test]

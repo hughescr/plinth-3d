@@ -5,7 +5,7 @@ use crate::{
     cal2_layout::{self, Footprint},
     cal2_map::{self, MapCoupon},
     cal2_measure,
-    cal2_spec::{Cal2Spec, Item, Kind},
+    cal2_spec::{Cal2Spec, Item, Kind, LAYER, SHORT_FULL_LAYERS, Variant},
     goo_grid::Grid,
     plate,
 };
@@ -44,12 +44,13 @@ fn number(m: &Model) -> Result<u32> {
 
 fn label(spec: &Cal2Spec, k: usize, i: &Item) -> String {
     format!(
-        "C{:02} {} {:.2} mm x{} R{:.0} copy {}",
+        "C{:02} {} {:.2} mm x{} R{:.0} {} copy {}",
         k + 1,
         spec.rows[i.row].id,
         i.neck_mm,
-        i.grid * i.grid,
+        i.heads,
         i.ratio,
+        i.variant.name(),
         i.copy + 1
     )
 }
@@ -91,18 +92,86 @@ fn map_coupon(spec: &Cal2Spec, item: &Item, n: u32, m: &Model, sites: Vec<[f64; 
             hi[k] = hi[k].max(f64::from(p[k]) + t[k]);
         }
     }
+    let zmin = m
+        .mesh
+        .iter()
+        .flatten()
+        .map(|p| f64::from(p[2]))
+        .fold(f64::INFINITY, f64::min);
+    let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+    // A ring's inner radius is the nearest bottom-face corner to the centre.
+    let ring_inner = (item.variant == Variant::Ring).then(|| {
+        m.mesh
+            .iter()
+            .flatten()
+            .filter(|p| f64::from(p[2]) < zmin + 1e-6)
+            .map(|p| (f64::from(p[0]) + t[0] - centre[0]).hypot(f64::from(p[1]) + t[1] - centre[1]))
+            .fold(f64::INFINITY, f64::min)
+    });
+    // A stem is the footprint of every vertex above the full layers.
+    let stem = (item.variant == Variant::ShortHold).then(|| {
+        let cut = zmin + (SHORT_FULL_LAYERS as f64 + 0.5) * LAYER;
+        let (mut slo, mut shi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+        for p in m.mesh.iter().flatten().filter(|p| f64::from(p[2]) > cut) {
+            for k in 0..2 {
+                slo[k] = slo[k].min(f64::from(p[k]) + t[k]);
+                shi[k] = shi[k].max(f64::from(p[k]) + t[k]);
+            }
+        }
+        [slo, shi]
+    });
     MapCoupon {
         number: n,
         row: spec.rows[item.row].id.clone(),
         kind: item.kind,
+        variant: item.variant,
         neck_mm: item.neck_mm,
-        heads: item.grid * item.grid,
+        heads: item.heads,
         ratio: item.ratio,
         foot: [[b.lo[0], b.lo[1]], [b.hi[0], b.hi[1]]],
         body: [lo, hi],
+        ring_inner,
+        stem,
         sites: sites.iter().map(|s| [s[0] + t[0], s[1] + t[1]]).collect(),
-        control: item.row == 4,
+        control: spec.rows[item.row].id == "R8",
     }
+}
+
+/// Identity, design and placement fields of one coupon's report entry.
+fn annotate(
+    j: &mut Value,
+    spec: &Cal2Spec,
+    (k, item): (usize, &Item),
+    built: &cal2_head::Built,
+    (slot, foot): (&cal2_layout::Slot, Footprint),
+) {
+    let patch = &built.patch;
+    j["id"] = json!(label(spec, k, item));
+    j["number"] = json!(k + 1);
+    j["row"] = json!(spec.rows[item.row].id);
+    j["kind"] = json!(item.kind);
+    j["neck_mm_designed"] = json!(item.neck_mm);
+    j["variant"] = json!(item.variant);
+    j["heads"] = json!(item.heads);
+    j["designed_body"] = built.dims.clone();
+    j["sized_to_section_mm2"] = json!({
+        "minimum_per_head": built.sections.minimum,
+        "face_patch_per_head": built.sections.patch,
+        "cone_exit_per_head": built.sections.cone_exit,
+        "full_area_mm2": built.full_area,
+    });
+    j["copy"] = json!(item.copy + 1);
+    j["zone"] = json!(["front", "middle", "back"][slot.zone]);
+    j["centre_mm"] = json!(slot.centre);
+    j["footprint_mm"] = json!([foot.width, foot.height]);
+    j["head_path"] = json!(match item.kind {
+        Kind::Column => "plain waisted column (plinth's head cannot make 1.2 mm)",
+        _ => "plinth head: head_candidate + PlanBuilder + freeze + emit",
+    });
+    j["plinth_certified_patch_mm2"] = json!({
+        "lower_min": patch.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min),
+        "upper_max": patch.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max),
+    });
 }
 
 /// Build, lay out, write, re-read, measure and report into the empty `out` directory.
@@ -150,25 +219,7 @@ pub fn assemble(spec_path: &Path, out: &Path) -> Result<()> {
         }
         let item = &items[k];
         let mut j = cal2_measure::coupon(&spec, item, m, grid)?;
-        let patch = &built[k].patch;
-        j["id"] = json!(label(&spec, k, item));
-        j["number"] = json!(k + 1);
-        j["row"] = json!(spec.rows[item.row].id);
-        j["kind"] = json!(item.kind);
-        j["neck_mm_designed"] = json!(item.neck_mm);
-        j["heads"] = json!(item.grid * item.grid);
-        j["copy"] = json!(item.copy + 1);
-        j["zone"] = json!(["front", "middle", "back"][slot.zone]);
-        j["centre_mm"] = json!(slot.centre);
-        j["footprint_mm"] = json!([foot[k].width, foot[k].height]);
-        j["head_path"] = json!(match item.kind {
-            Kind::Column => "plain waisted column (plinth's head cannot make 1.2 mm)",
-            _ => "plinth head: head_candidate + PlanBuilder + freeze + emit",
-        });
-        j["plinth_certified_patch_mm2"] = json!({
-            "lower_min": patch.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min),
-            "upper_max": patch.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max),
-        });
+        annotate(&mut j, &spec, (k, item), &built[k], (slot, foot[k]));
         map.push(map_coupon(
             &spec,
             item,
@@ -192,6 +243,14 @@ pub fn assemble(spec_path: &Path, out: &Path) -> Result<()> {
         out.join("plate-map.svg"),
         cal2_map::svg(&map, &cut_text, spec.shuffle_seed)?,
     )?;
+    // Tallest part, from the written file: top of the highest triangle above the plate.
+    let tallest = written
+        .project
+        .models
+        .iter()
+        .map(|m| plate::bounds(m).hi[2])
+        .fold(0.0, f64::max);
+    let layers = (tallest / LAYER - 1e-6).ceil();
     std::fs::write(
         out.join("cal2-report.json"),
         serde_json::to_vec_pretty(&json!({
@@ -204,18 +263,80 @@ pub fn assemble(spec_path: &Path, out: &Path) -> Result<()> {
             "minimum_bbox_gap_mm": written.gap,
             "coupon_count": coupons.len(),
             "cut_for_fit": cut,
+            "tallest_part_mm": tallest,
+            "estimated_layers": layers,
             "ratio_tolerance": spec.ratio_tolerance,
+            "cells": cells(&coupons),
             "coupons": coupons,
         }))?,
     )?;
     println!(
-        "CAL-2: {} coupons, {} cut, minimum bounding-box gap {:.3} mm, sha256 {}",
+        "CAL-2: {} coupons, {} cut, minimum bounding-box gap {:.3} mm, tallest {:.2} mm ({} layers), sha256 {}",
         written.project.models.len(),
         plan.cut.len(),
         written.gap,
+        tallest,
+        layers,
         written.hash
     );
     Ok(())
+}
+
+/// One line per cell (row, neck, ratio): copies on the plate, both achieved ratios and the
+/// designed body, so the report reads without the per-coupon detail.
+fn cells(coupons: &[Value]) -> Vec<Value> {
+    let mut keys: Vec<(String, String, String)> = Vec::new();
+    for j in coupons {
+        let key = (
+            j["row"].to_string(),
+            j["neck_mm_designed"].to_string(),
+            j["target_ratio"].to_string(),
+        );
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys.iter()
+        .map(|key| {
+            let group: Vec<&Value> = coupons
+                .iter()
+                .filter(|j| {
+                    (
+                        j["row"].to_string(),
+                        j["neck_mm_designed"].to_string(),
+                        j["target_ratio"].to_string(),
+                    ) == *key
+                })
+                .collect();
+            let f = |p: &str| {
+                group
+                    .iter()
+                    .filter_map(|j| j[p].as_f64())
+                    .collect::<Vec<_>>()
+            };
+            let (min, cone) = (
+                f("achieved_ratio_min_section"),
+                f("achieved_ratio_cone_exit"),
+            );
+            let range = |a: &[f64]| {
+                json!([
+                    a.iter().copied().fold(f64::INFINITY, f64::min),
+                    a.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+                ])
+            };
+            json!({
+                "row": group[0]["row"],
+                "variant": group[0]["variant"],
+                "neck_mm": group[0]["neck_mm_designed"],
+                "heads": group[0]["heads"],
+                "target_ratio": group[0]["target_ratio"],
+                "copies_on_plate": group.len(),
+                "achieved_ratio_min_section": range(&min),
+                "achieved_ratio_cone_exit": range(&cone),
+                "designed_body": group[0]["designed_body"],
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -263,16 +384,22 @@ mod tests {
         let coupons = a["coupons"].as_array().unwrap();
         assert_eq!(
             coupons.len() + a["cut_for_fit"].as_array().unwrap().len(),
-            53
+            67
         );
         for j in coupons {
-            assert!(j["achieved_ratio_error_percent"].as_f64().unwrap().abs() <= 3.0);
-            assert_eq!(j["ratio_by_layer"]["no_earlier_layer_higher"], true);
+            // Never over the target; at most the 3 percent tolerance under it.
+            let e = j["achieved_ratio_error_percent"].as_f64().unwrap();
+            assert!((-3.0..=0.01).contains(&e), "{e}");
+            assert_eq!(j["ratio_by_layer"]["no_layer_over_target"], true);
             assert_eq!(j["columns_and_flares_strictly_larger_than_neck"], true);
+            // The cone-exit ratio is below the min-section ratio: the minimum is the patch.
+            if j["kind"] == "head" {
+                assert!(j["achieved_ratio_cone_exit"].as_f64() < j["achieved_ratio"].as_f64());
+            }
         }
         // Copies of one cell never share a front-to-back zone.
         let mut seen = std::collections::BTreeSet::new();
-        for j in coupons.iter().filter(|j| j["row"] != "R6") {
+        for j in coupons.iter().filter(|j| j["row"] != "R9") {
             let key = (
                 j["row"].to_string(),
                 j["neck_mm_designed"].to_string(),
@@ -285,9 +412,9 @@ mod tests {
                 j["id"]
             );
         }
-        // Rows 1 to 3 keep at least two copies of every cell, whatever was cut.
-        for row in ["R1", "R2", "R3"] {
-            for ratio in [30.0, 40.0, 55.0, 70.0, 95.0] {
+        // Rows of priority 1 to 5 keep two copies of every cell, whatever was cut.
+        for row in ["R1", "R2"] {
+            for ratio in crate::cal2_spec::RATIOS {
                 let n = coupons
                     .iter()
                     .filter(|j| j["row"] == row && j["target_ratio"] == ratio)
@@ -295,6 +422,17 @@ mod tests {
                 assert!(n >= 2, "{row} R{ratio}: {n} copies");
             }
         }
+        for row in ["R3a", "R3b", "R4", "R5a", "R5b"] {
+            for ratio in [40.0, 50.0] {
+                let n = coupons
+                    .iter()
+                    .filter(|j| j["row"] == row && j["target_ratio"] == ratio)
+                    .count();
+                assert!(n >= 2, "{row} R{ratio}: {n} copies");
+            }
+        }
+        // The tallest part is the long hold: 5 mm lift + 5 mm hold + raised features + raft.
+        assert!(a["tallest_part_mm"].as_f64().unwrap() > 10.0);
         let _ = std::fs::remove_dir_all(dir_a);
     }
 
@@ -304,7 +442,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("out")).unwrap();
         let spec = dir.join("spec.json");
-        std::fs::write(&spec, SPEC.replace("\"copies\": 3", "\"copies\": 2")).unwrap();
+        std::fs::write(&spec, SPEC.replace("\"copies\": 1", "\"copies\": 2")).unwrap();
         assert!(assemble(&spec, &dir.join("out")).is_err());
         std::fs::write(&spec, SPEC).unwrap();
         std::fs::write(dir.join("out").join("keep"), b"x").unwrap();

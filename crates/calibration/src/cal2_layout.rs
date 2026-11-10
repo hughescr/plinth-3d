@@ -46,9 +46,12 @@ fn cell(i: &Item) -> (usize, u64, u64) {
     (i.row, i.neck_mm.to_bits(), i.ratio.to_bits())
 }
 
-/// Removal order for a plate that does not fit: lowest-priority row first. Rows 1 to 3
-/// never go below two copies per cell; later rows drop their extra copies, then the rest.
-/// Within a tier the largest footprint goes first.
+/// Rows of this priority and better never go below two copies per cell.
+const PROTECTED: usize = 5;
+
+/// Removal order for a plate that does not fit: lowest-priority row first. Rows of priority
+/// 1 to 5 never go below two copies per cell; later rows drop their extra copies, then the
+/// rest. Within a tier the largest footprint goes first.
 #[must_use]
 pub fn cut_order(items: &[Item], foot: &[Footprint]) -> Vec<usize> {
     let rows = items.iter().map(|i| i.row).max().map_or(0, |r| r + 1);
@@ -59,7 +62,7 @@ pub fn cut_order(items: &[Item], foot: &[Footprint]) -> Vec<usize> {
                 .filter(|&k| {
                     let it = &items[k];
                     it.row == row
-                        && match (row < 3, tier) {
+                        && match (it.priority <= PROTECTED, tier) {
                             (true, 0) => it.copy >= 2,
                             (true, _) => false,
                             (false, 0) => it.copy >= 1,
@@ -254,14 +257,17 @@ pub fn move_to(m: &mut Model, target: [f64; 2], grid: Grid) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cal2_spec::Kind;
+    use crate::cal2_spec::{Kind, Variant};
 
+    /// Test rows are numbered from 0; the row's priority is its number plus one.
     fn item(row: usize, ratio: f64, copy: usize, copies: usize) -> Item {
         Item {
             row,
+            priority: row + 1,
             kind: Kind::Head,
+            variant: Variant::Standard,
             neck_mm: 0.4,
-            grid: 2,
+            heads: 4,
             ratio,
             copy,
             copies,
@@ -327,21 +333,21 @@ mod tests {
             items.push(item(1, 30.0, c, 3));
         }
         for c in 0..2 {
-            items.push(item(2, 30.0, c, 2));
-            items.push(item(3, 30.0, c, 2));
+            items.push(item(5, 30.0, c, 2));
+            items.push(item(6, 30.0, c, 2));
         }
-        items.push(item(5, 6.0, 0, 1));
+        items.push(item(8, 6.0, 0, 1));
         // Three zones with one shelf of three each hold nine of these eleven.
         let foot = vec![fp(50.0, 34.0); items.len()];
         let p = plan(&items, &foot, 5).unwrap();
         assert!(!p.cut.is_empty());
-        // The witness (row 5) goes first, then row 3 before any row 2, 1 or 0 item.
-        assert_eq!(items[p.cut[0]].row, 5);
+        // The witness (row 8) goes first, then row 6 before any row 5, 1 or 0 item.
+        assert_eq!(items[p.cut[0]].row, 8);
         assert_eq!(p.cut.len(), 2);
         let rows: Vec<_> = p.cut.iter().map(|&k| items[k].row).collect();
         assert!(rows.windows(2).all(|w| w[0] >= w[1]), "{rows:?}");
-        // Rows 1 to 3 keep at least two copies of every cell.
-        for row in 0..3 {
+        // Rows of priority 1 and 2 keep at least two copies of every cell.
+        for row in 0..2 {
             for c in 0..2 {
                 let k = items
                     .iter()
