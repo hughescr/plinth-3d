@@ -9,8 +9,10 @@ use super::analyse::{Collected, Extras, GroupLoad, LoadDetail};
 use super::data::{LayerStack, LayoutView, LoadWarning, PartKind, WarningClass};
 use super::needs::check_coverage;
 
-/// Beyond this additive area ratio a section breaks (P4: supports snap near 25).
-pub const BREAKING_RATIO: f64 = 25.0;
+/// Beyond this additive area ratio a component is unprintable as is. It is the owner's limit
+/// (ruling 2026-11-10), not a measured breaking point: supports survived at ratio about 33.5
+/// (ChituBox Better supports on Round 25) and 60.15 (CAL-1 K-60); 40 keeps margin below 60.
+pub const UNPRINTABLE_RATIO: f64 = 40.0;
 /// A layer's centroid farther than this from the spread of the active contacts is outside, mm.
 const OUTSIDE_EPS_MM: f64 = 1e-6;
 /// A rigid-lever residual above this means the layer's load cannot be balanced.
@@ -62,7 +64,7 @@ pub(super) fn all(
     let mut blocked: BTreeSet<(u32, u32)> = BTreeSet::new();
     unsupported(col, stack, &mut out, &mut blocked);
     broken_routes(col, &mut out, &mut blocked);
-    breaking(&detail.groups, &mut out, &mut blocked);
+    beyond_unprintable_ratio(&detail.groups, &mut out, &mut blocked);
     sizing_over(detail, &blocked, &mut out);
     sharing_over(detail, layout, &mut out);
     not_assessed(&detail.groups, &blocked, &mut out);
@@ -176,16 +178,20 @@ fn broken_routes(col: &Collected, out: &mut Vec<LoadWarning>, blocked: &mut BTre
     ));
 }
 
-fn breaking(groups: &[GroupLoad], out: &mut Vec<LoadWarning>, blocked: &mut BTreeSet<(u32, u32)>) {
+fn beyond_unprintable_ratio(
+    groups: &[GroupLoad],
+    out: &mut Vec<LoadWarning>,
+    blocked: &mut BTreeSet<(u32, u32)>,
+) {
     let comps: BTreeSet<u32> = groups
         .iter()
-        .filter(|g| !g.active.is_empty() && g.x_group > BREAKING_RATIO)
+        .filter(|g| !g.active.is_empty() && g.x_group > UNPRINTABLE_RATIO)
         .map(|g| g.component)
         .collect();
     for c in comps {
         let rows: Vec<&GroupLoad> = groups
             .iter()
-            .filter(|g| g.component == c && !g.active.is_empty() && g.x_group > BREAKING_RATIO)
+            .filter(|g| g.component == c && !g.active.is_empty() && g.x_group > UNPRINTABLE_RATIO)
             .collect();
         let Some(worst) = rows.iter().max_by(|a, b| a.x_group.total_cmp(&b.x_group)) else {
             continue;
@@ -196,13 +202,15 @@ fn breaking(groups: &[GroupLoad], out: &mut Vec<LoadWarning>, blocked: &mut BTre
         }
         out.push(warn(
             WarningClass::Unprintable,
-            "additive area ratio beyond breaking",
+            "additive area ratio beyond the unprintable limit",
             layers_of(&layers, worst.layer),
             worst.active.clone(),
             format!(
                 "Component {c}: in layer {} the peel area {:.2} mm² over the additive section \
                  {:.3} mm² is a ratio of {:.1} (utilisation {:.2} of the design ratio), beyond \
-                 the {BREAKING_RATIO} where the supports snapped (P4). {} layers are affected.",
+                 the owner's limit of {UNPRINTABLE_RATIO}. The limit is not a measured breaking \
+                 point: supports survived at ratios of about 33.5 and 60, and {UNPRINTABLE_RATIO} \
+                 keeps margin below 60. {} layers are affected.",
                 worst.layer,
                 worst.area_mm2,
                 worst.section_sum_mm2,
@@ -249,12 +257,12 @@ fn sizing_over(detail: &LoadDetail, blocked: &BTreeSet<(u32, u32)>, out: &mut Ve
 
 fn sharing_over(detail: &LoadDetail, layout: &LayoutView, out: &mut Vec<LoadWarning>) {
     type Pick = fn(&super::analyse::SectionDetail) -> (f64, u32);
-    // The additive result above the breaking ratio is unprintable and reported there.
+    // The additive result above the unprintable ratio is unprintable and reported there.
     let models: [(&str, Pick, f64); 3] = [
         (
             "additive sharing exceeds the design ratio",
             |s| s.additive,
-            BREAKING_RATIO,
+            UNPRINTABLE_RATIO,
         ),
         (
             "equal-share result exceeds the design ratio",

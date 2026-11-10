@@ -169,10 +169,10 @@ fn a_separate_rib_island_cannot_borrow_main_carrier_capacity_before_merger() {
     };
     stack.layers[1].components.push(ComponentSlice {
         component: 1,
-        area: 1.2,
-        sources: vec![src(5., 0., 0.075, 1.2)],
+        area: 1.8,
+        sources: vec![src(5., 0., 0.075, 1.8)],
     });
-    stack.layers[1].model_envelope += 1.2;
+    stack.layers[1].model_envelope += 1.8;
     let v = layout(vec![
         contact(-1., -1., 0., 0, 1.),
         contact(1., -1., 0., 0, 1.),
@@ -187,17 +187,13 @@ fn a_separate_rib_island_cannot_borrow_main_carrier_capacity_before_merger() {
         .unwrap();
     assert_eq!(rib.active, vec![3]);
     assert!(
-        (rib.x_group - 30.).abs() < 1e-9,
+        (rib.x_group - 45.).abs() < 1e-9,
         "main part's ample sections cannot clear the rib's deficit"
     );
-    assert!(
-        d.report
-            .warnings
-            .iter()
-            .any(|w| w.kind == "additive area ratio beyond breaking"
-                && w.class == WarningClass::Unprintable
-                && w.contacts == vec![3])
-    );
+    assert!(d.report.warnings.iter().any(|w| w.kind
+        == "additive area ratio beyond the unprintable limit"
+        && w.class == WarningClass::Unprintable
+        && w.contacts == vec![3]));
     let merged = d.groups.iter().find(|g| g.layer == 2).unwrap();
     assert_eq!(
         merged.active.len(),

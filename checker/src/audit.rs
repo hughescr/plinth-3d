@@ -10,8 +10,8 @@
 //!   tip cone (the written cone's section where the cone leaves the contact ball). A contact
 //!   counts from the layer of a point of its patch.
 //! * **Ratio.** `X(k) = A_k / sum B_i` over the contacts counted at layer `k`, and the
-//!   utilisation `X / 12` (design ratio P5 = 12). `X > 25` (beyond the measured breaking
-//!   ratio) or a positive area over no counted section is the unprintable trigger.
+//!   utilisation `X / 12` (design ratio P5 = 12). `X > 40` (the owner's unprintable limit)
+//!   or a positive area over no counted section is the unprintable trigger.
 //!
 //! What it does not do: it treats the whole model as one load group (the per-component split
 //! needs the model's pieces, which this checker does not label), so it understates the ratio of
@@ -25,8 +25,9 @@ use crate::scene::{LAYER_MM, Scene};
 
 /// The design ratio (PRD P5).
 pub const DESIGN_RATIO: f64 = 12.0;
-/// Beyond this ratio supports snap (PRD P4 measured breaking ratio).
-pub const BREAKING_RATIO: f64 = 25.0;
+/// Beyond this ratio a component is unprintable as is: the owner's limit (ruling 2026-11-10),
+/// not a measured breaking point (PRD P4).
+pub const UNPRINTABLE_RATIO: f64 = 40.0;
 
 /// The ratio of `area` to `section`: `(X, utilisation, unprintable trigger)`.
 #[must_use]
@@ -38,7 +39,7 @@ pub fn ratio(area: f64, section: f64) -> (f64, f64, bool) {
         return (0.0, 0.0, false);
     }
     let x = area / section;
-    (x, x / DESIGN_RATIO, x > BREAKING_RATIO)
+    (x, x / DESIGN_RATIO, x > UNPRINTABLE_RATIO)
 }
 
 /// Area of the model's section at height `z` of every layer, mm2, for layers `0..layers`.
@@ -192,7 +193,7 @@ pub fn run(scene: &Scene, patches: &PatchOut) -> Json {
         ("layers", Json::Uint(layers as u64)),
         ("contacts_counted", Json::Uint(cs.len() as u64)),
         ("design_ratio", Json::Num(DESIGN_RATIO)),
-        ("breaking_ratio", Json::Num(BREAKING_RATIO)),
+        ("unprintable_ratio", Json::Num(UNPRINTABLE_RATIO)),
         ("largest_layer_area_mm2", Json::Num(largest_area.0)),
         (
             "largest_layer_area_layer",
@@ -220,10 +221,14 @@ mod tests {
     use crate::testkit::{self as kit, test_limits};
 
     #[test]
-    fn sixty_square_millimetres_over_two_of_section_is_ratio_30_utilisation_2_5_and_unprintable() {
-        let (x, u, trigger) = ratio(60.0, 2.0);
-        assert!((x - 30.0).abs() < 1e-12 && (u - 2.5).abs() < 1e-12 && trigger);
-        assert!(!ratio(60.0, 6.0).2);
+    fn ninety_square_millimetres_over_two_of_section_is_ratio_45_utilisation_3_75_and_unprintable()
+    {
+        let (x, u, trigger) = ratio(90.0, 2.0);
+        assert!((x - 45.0).abs() < 1e-12 && (u - 3.75).abs() < 1e-12 && trigger);
+        assert!(!ratio(60.0, 2.0).2, "ratio 30 is below the limit of 40");
+        // Either side of the limit: exactly 40 is not beyond it.
+        assert!(!ratio(80.0, 2.0).2);
+        assert!(ratio(82.0, 2.0).2);
         // Positive area over no section is unprintable, never zero.
         let (x, _, trigger) = ratio(1.0, 0.0);
         assert!(x.is_infinite() && trigger);
