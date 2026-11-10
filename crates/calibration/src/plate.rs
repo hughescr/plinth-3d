@@ -166,6 +166,10 @@ pub fn raster_phase_kept(source: &Model, placed: &Model, grid: goo_grid::Grid) -
 }
 /// Conservative bounding-box gaps: never claim a mesh clearance larger than this.
 pub fn validate(models: &[Model]) -> Result<f64> {
+    validate_gap(models, GAP)
+}
+/// [`validate`] with a chosen minimum clearance, mm (CAL-2 may relax the 6 mm).
+pub fn validate_gap(models: &[Model], min_gap: f64) -> Result<f64> {
     let boxes: Vec<_> = models.iter().map(bounds).collect();
     let mut gap = f64::INFINITY;
     for (i, a) in boxes.iter().enumerate() {
@@ -176,8 +180,8 @@ pub fn validate(models: &[Model]) -> Result<f64> {
             gap = gap.min(a.gap(*b));
         }
     }
-    if gap < GAP {
-        return Err(format!("piece clearance {gap} < 6 mm").into());
+    if gap < min_gap {
+        return Err(format!("piece clearance {gap} < {min_gap} mm").into());
     }
     Ok(gap)
 }

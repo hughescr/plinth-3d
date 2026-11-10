@@ -86,7 +86,8 @@ fn edge_margin(models: &[Model]) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
-fn write(path: &Path, models: Vec<Model>) -> Result<Written> {
+/// Write the project and check it from the re-read file against the chosen clearance `gap`.
+fn write(path: &Path, models: Vec<Model>, gap: f64) -> Result<Written> {
     let project = Project {
         preview: Some(crate::blank_preview()),
         models,
@@ -97,7 +98,7 @@ fn write(path: &Path, models: Vec<Model>) -> Result<Written> {
     let read = plinth_chitubox::parse(&std::fs::read(path)?)?;
     // The repo's CAL-1 round trip: the file parses and writes back byte for byte.
     let identical = read.to_bytes()? == bytes;
-    let gap = plate::validate(&read.models)?;
+    let gap = plate::validate_gap(&read.models, gap)?;
     let margin = edge_margin(&read.models);
     if margin < plate::EDGE_MARGIN {
         return Err(format!(
@@ -279,7 +280,7 @@ pub fn assemble(spec_path: &Path, out: &Path) -> Result<()> {
             m
         })
         .collect();
-    let written = write(&out.join(PROJECT), models)?;
+    let written = write(&out.join(PROJECT), models, plan.gap)?;
     if !written.identical {
         return Err("written project does not round-trip byte for byte".into());
     }
@@ -308,24 +309,9 @@ pub fn assemble(spec_path: &Path, out: &Path) -> Result<()> {
         .iter()
         .map(|&k| json!(label(&spec, k, &items[k])))
         .collect();
-    let cut_text = if cut.is_empty() {
-        "Nothing cut: every coupon in the matrix is on the plate.".to_string()
-    } else {
-        let mut ids: Vec<String> = plan
-            .cut
-            .iter()
-            .map(|&k| format!("C{:02} ({})", k + 1, spec.rows[items[k].row].id))
-            .collect();
-        ids.sort();
-        format!(
-            "Cut to fit ({}), lowest-priority rows first: {}. Not on the plate.",
-            cut.len(),
-            ids.join(", ")
-        )
-    };
     std::fs::write(
         out.join("plate-map.svg"),
-        cal2_map::svg(&map, &cut_text, spec.shuffle_seed)?,
+        cal2_map::svg(&map, &cut_text(&spec, &items, &plan.cut), spec.shuffle_seed)?,
     )?;
     // Tallest part, from the written file: top of the highest triangle above the plate.
     let tallest = written
@@ -345,6 +331,9 @@ pub fn assemble(spec_path: &Path, out: &Path) -> Result<()> {
             "shuffle_seed": spec.shuffle_seed,
             "build_area_mm": plate::BUILD,
             "minimum_bbox_gap_mm": written.gap,
+            "bbox_gap_design_mm": spec.gap_mm,
+            "bbox_gap_required_mm": plan.gap,
+            "bbox_gap_note": "design clearance 6 mm; the layout uses less (never under 5 mm) only if that saves a coupon from the cut. bbox_gap_required_mm is the clearance the layout was packed and checked for",
             "edge_margin_required_mm": plate::EDGE_MARGIN,
             "minimum_edge_margin_mm": written.margin,
             "edge_margin_note": "least distance from any part's footprint, raft and supports included, to an edge of the build area, measured on the re-read file",
@@ -363,9 +352,10 @@ pub fn assemble(spec_path: &Path, out: &Path) -> Result<()> {
         }))?,
     )?;
     println!(
-        "CAL-2: {} coupons, {} cut, minimum bounding-box gap {:.3} mm, minimum edge margin {:.3} mm, tallest {:.2} mm ({} layers), sha256 {}",
+        "CAL-2: {} coupons, {} cut, clearance packed for {} mm, minimum bounding-box gap {:.3} mm, minimum edge margin {:.3} mm, tallest {:.2} mm ({} layers), sha256 {}",
         written.project.models.len(),
         plan.cut.len(),
+        plan.gap,
         written.gap,
         written.margin,
         tallest,
@@ -373,6 +363,23 @@ pub fn assemble(spec_path: &Path, out: &Path) -> Result<()> {
         written.hash
     );
     Ok(())
+}
+
+/// The map's note on what was cut to fit.
+fn cut_text(spec: &Cal2Spec, items: &[Item], cut: &[usize]) -> String {
+    if cut.is_empty() {
+        return "Nothing cut: every coupon in the matrix is on the plate.".to_string();
+    }
+    let mut ids: Vec<String> = cut
+        .iter()
+        .map(|&k| format!("C{:02} ({})", k + 1, spec.rows[items[k].row].id))
+        .collect();
+    ids.sort();
+    format!(
+        "Cut to fit ({}), 1.20 mm R70 columns first, then the 4-head controls: {}. Not on the plate. Formation witnesses are never cut.",
+        cut.len(),
+        ids.join(", ")
+    )
 }
 
 /// One line per cell (row, neck, ratio): copies on the plate, both achieved ratios and the
@@ -473,6 +480,37 @@ mod tests {
         let c = cal2_layout::plan(&items, &foot, spec.shuffle_seed + 1).unwrap();
         assert_eq!(a.slots, b.slots);
         assert_ne!(a.slots, c.slots);
+        // Priority: witnesses always placed, R1 to R6 never cut, R7 R40 keeps two copies,
+        // and the clearance is between 5 and 6 mm.
+        assert!((5.0..=plate::GAP).contains(&a.gap), "gap {}", a.gap);
+        for &k in &a.cut {
+            let it = &items[k];
+            assert!(it.kind != Kind::Witness && it.priority > 6, "cut {k}");
+            assert!(it.kind != Kind::Column || it.ratio >= 70.0, "cut {k}");
+        }
+        let placed = |kind: Kind| {
+            a.slots
+                .iter()
+                .filter(|s| items[s.item].kind == kind)
+                .count()
+        };
+        assert_eq!(placed(Kind::Witness), 3);
+        // Controls go only after every R70 column copy: both controls are on the plate
+        // unless both columns are gone.
+        let r70_left = a
+            .slots
+            .iter()
+            .filter(|s| items[s.item].kind == Kind::Column && items[s.item].ratio >= 70.0)
+            .count();
+        let controls = a
+            .slots
+            .iter()
+            .filter(|s| spec.rows[items[s.item].row].id == "R8")
+            .count();
+        assert!(
+            controls == 2 || r70_left == 0,
+            "{controls} controls, {r70_left} R70"
+        );
     }
 
     #[test]
@@ -481,7 +519,9 @@ mod tests {
     fn e2e_cal2_whole_plate_is_complete_in_tolerance_clear_and_round_trips() {
         let (a, dir_a) = run("a", SPEC);
         assert_eq!(a["round_trip_byte_identical"], true);
-        assert!(a["minimum_bbox_gap_mm"].as_f64().unwrap() >= plate::GAP - 1e-9);
+        let required = a["bbox_gap_required_mm"].as_f64().unwrap();
+        assert!((5.0 - 1e-9..=plate::GAP + 1e-9).contains(&required));
+        assert!(a["minimum_bbox_gap_mm"].as_f64().unwrap() >= required - 1e-9);
         // Every footprint, raft included, is 8 mm or more from each plate edge.
         assert!(a["minimum_edge_margin_mm"].as_f64().unwrap() >= 8.0);
         let coupons = a["coupons"].as_array().unwrap();
@@ -550,7 +590,7 @@ mod tests {
                 j["id"]
             );
         }
-        // Rows of priority 1 to 5 keep two copies of every cell, whatever was cut.
+        // Rows R1 to R6 keep two copies of every cell, whatever was cut.
         for row in ["R1", "R2"] {
             for ratio in crate::cal2_spec::RATIOS {
                 let n = coupons
@@ -569,6 +609,24 @@ mod tests {
                 assert!(n >= 2, "{row} R{ratio}: {n} copies");
             }
         }
+        for ratio in [25.0, 35.0, 40.0, 50.0, 70.0] {
+            let n = coupons
+                .iter()
+                .filter(|j| j["row"] == "R6" && j["target_ratio"] == ratio)
+                .count();
+            assert!(n >= 2, "R6 R{ratio}: {n} copies");
+        }
+        // The R7 R40 columns keep two copies; the three witnesses are always on the plate;
+        // the controls are cut only after every R70 column copy.
+        let count = |row: &str, ratio: f64| {
+            coupons
+                .iter()
+                .filter(|j| j["row"] == row && j["target_ratio"] == ratio)
+                .count()
+        };
+        assert_eq!(count("R7", 40.0), 2);
+        assert_eq!(count("R9", 6.0), 3);
+        assert!(count("R8", 40.0) == 2 || count("R7", 70.0) == 0);
         // The tallest part is the long hold: 5 mm lift + 5 mm hold + raised features + raft.
         assert!(a["tallest_part_mm"].as_f64().unwrap() > 10.0);
         let _ = std::fs::remove_dir_all(dir_a);

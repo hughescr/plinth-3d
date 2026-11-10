@@ -78,7 +78,7 @@ impl Variant {
 #[serde(deny_unknown_fields)]
 pub struct Row {
     pub id: String,
-    /// Owner's priority (1 first); rows 1 to 5 never go below two copies.
+    /// Owner's priority (1 first); rows 1 to 6 never go below two copies.
     pub priority: usize,
     pub kind: Kind,
     pub variant: Variant,
@@ -350,11 +350,11 @@ mod tests {
         ] {
             assert_eq!(items.iter().filter(|i| i.row == row).count(), n);
         }
-        // Rows of priority 1 to 5 carry two copies of every cell.
+        // Rows of priority 1 to 6 carry two copies of every cell.
         assert!(
             s.rows
                 .iter()
-                .filter(|r| r.priority <= 5)
+                .filter(|r| r.priority <= 6)
                 .all(|r| r.copies == 2)
         );
     }
