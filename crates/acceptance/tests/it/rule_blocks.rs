@@ -298,6 +298,7 @@ fn broken_a_model_only_run_in_candidate_mode_publishes_nothing() {
         checker: checker_binary(),
         limits: repo_root().join("limits.toml"),
         candidate: true,
+        review: None,
     };
     let run = plinth_cli::run::run(&cfg, plinth_cli::publish::Faults::default(), &mut |_| {})
         .expect("setup is fine");

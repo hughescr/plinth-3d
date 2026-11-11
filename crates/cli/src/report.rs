@@ -81,20 +81,25 @@ fn model_json(candidate: bool, m: &ModelRun) -> Json {
     let is_candidate = status == "published"
         && checked
             .is_some_and(|c| crate::run::candidate_allowed(candidate, c, m.planning_blockers));
-    Json::obj([
-        ("input", path(&m.input)),
-        ("output_name", Json::str(format!("{}.chitubox", m.stem))),
-        ("status", Json::str(status)),
-        ("kind", Json::str(kind_of(candidate, m.supported))),
-        ("print_candidate", Json::Bool(is_candidate)),
-        (
-            "label",
-            Json::str(if m.supported && !is_candidate {
+    let (kind, label) = match &m.review {
+        Some(r) => ("review", crate::run::review_status(r)),
+        None => (
+            kind_of(candidate, m.supported),
+            (if m.supported && !is_candidate {
                 "supported, not a print candidate"
             } else {
                 label_of(is_candidate)
-            }),
+            })
+            .to_owned(),
         ),
+    };
+    let mut json = Json::obj([
+        ("input", path(&m.input)),
+        ("output_name", Json::str(format!("{}.chitubox", m.stem))),
+        ("status", Json::str(status)),
+        ("kind", Json::str(kind)),
+        ("print_candidate", Json::Bool(is_candidate)),
+        ("label", Json::str(label)),
         (
             "candidate_blockers",
             Json::Arr(blockers.iter().map(Json::str).collect()),
@@ -106,7 +111,20 @@ fn model_json(candidate: bool, m: &ModelRun) -> Json {
         ("error", error),
         ("checker", checker_json(checked)),
         ("fr21", m.fr21.clone().unwrap_or(Json::Null)),
-    ])
+    ]);
+    if let (Some(r), Json::Obj(pairs)) = (&m.review, &mut json) {
+        pairs.push((
+            "review".to_owned(),
+            Json::obj([
+                (
+                    "stopped_at_time_budget",
+                    r.stopped_at_budget.map_or(Json::Null, Json::str),
+                ),
+                ("checker_failed", Json::Bool(r.checker_failed)),
+            ]),
+        ));
+    }
+    json
 }
 
 fn peak_json(peak: &Result<Peak, String>) -> Json {
@@ -154,7 +172,8 @@ pub fn to_json(cfg: &Config, run: &Run) -> Json {
     let supported = run.models.iter().any(|m| m.supported);
     let candidate=cfg.candidate && !run.models.is_empty() && run.models.iter().all(|m|matches!(&m.outcome,
         Outcome::Published { checked,.. } if crate::run::candidate_allowed(true,checked,m.planning_blockers)));
-    Json::obj([
+    let review = cfg.review.is_some();
+    let mut doc = Json::obj([
         ("report_version", Json::Uint(REPORT_VERSION)),
         (
             "tool",
@@ -163,11 +182,20 @@ pub fn to_json(cfg: &Config, run: &Run) -> Json {
                 ("version", Json::str(env!("CARGO_PKG_VERSION"))),
             ]),
         ),
-        ("kind", Json::str(kind_of(cfg.candidate, supported))),
+        (
+            "kind",
+            Json::str(if review {
+                "review"
+            } else {
+                kind_of(cfg.candidate, supported)
+            }),
+        ),
         ("print_candidate", Json::Bool(candidate)),
         (
             "label",
-            Json::str(if supported && !candidate {
+            Json::str(if review {
+                crate::run::REVIEW_LABEL
+            } else if supported && !candidate {
                 "supported, not a print candidate"
             } else {
                 label_of(candidate)
@@ -204,7 +232,25 @@ pub fn to_json(cfg: &Config, run: &Run) -> Json {
                 ),
             ]),
         ),
-    ])
+    ]);
+    if let (Some(r), Json::Obj(top)) = (&cfg.review, &mut doc)
+        && let Some((_, Json::Obj(run_pairs))) = top.iter_mut().find(|(k, _)| k == "run")
+    {
+        run_pairs.push((
+            "review".to_owned(),
+            Json::obj([
+                (
+                    "plan_budget_seconds",
+                    Json::Num(r.plan_budget.as_secs_f64()),
+                ),
+                (
+                    "checker_timeout_seconds",
+                    Json::Num(r.checker_timeout.as_secs_f64()),
+                ),
+            ]),
+        ));
+    }
+    doc
 }
 
 /// The section of a neck of the owner's Light tip, mm² (design section 3: neck radius 0.10).
@@ -872,6 +918,15 @@ pub fn scene_from_model(m: &plinth_chitubox::Model) -> plinth_render::Scene {
 #[must_use]
 pub fn progress_line(candidate: bool, m: &ModelRun) -> String {
     let secs: f64 = m.steps.iter().map(|s| s.secs).sum();
+    if let (Some(r), Outcome::Published { path, checked, .. }) = (&m.review, &m.outcome) {
+        return format!(
+            "plinth: {} -> {} ({}; checker: {}) {secs:.2} s",
+            m.input.display(),
+            path.display(),
+            crate::run::review_status(r),
+            checked.verdict.name()
+        );
+    }
     match &m.outcome {
         Outcome::Published { path, checked, .. } => format!(
             "plinth: {} -> {} ({}; checker: {}) {secs:.2} s",
@@ -910,6 +965,7 @@ mod tests {
             checker: PathBuf::from("c"),
             limits: PathBuf::from("l"),
             candidate: false,
+            review: None,
         };
         let m = ModelRun {
             input: PathBuf::from("a.stl"),
@@ -920,6 +976,7 @@ mod tests {
             supported: false,
             planning_blockers: false,
             fr21: None,
+            review: None,
             outcome,
         };
         let run = Run {

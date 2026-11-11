@@ -92,6 +92,15 @@ pub fn records(plan: &SupportPlan) -> Result<Vec<SupportRecord>, Error> {
 /// A diagnostic project from an immutable plan. Geometry acceptance, the load
 /// model and H8 remain independent obligations; this function grants no status.
 pub fn project(plan: &SupportPlan) -> Result<Project, Error> {
+    project_named(plan, DIAGNOSTIC_NAME)
+}
+
+/// The model name of [`project`].
+pub const DIAGNOSTIC_NAME: &str = "fixed-size construction diagnostic, not a print candidate";
+
+/// [`project`] with another embedded model name (review mode labels its files this way).
+/// The name must be under 256 bytes and hold no NUL; the writer refuses it otherwise.
+pub fn project_named(plan: &SupportPlan, name: &str) -> Result<Project, Error> {
     let records = records(plan)?;
     let attrs = plan
         .parts()
@@ -106,7 +115,7 @@ pub fn project(plan: &SupportPlan) -> Result<Project, Error> {
     Ok(Project {
         preview: Some(preview),
         models: vec![Model {
-            name: "fixed-size construction diagnostic, not a print candidate".into(),
+            name: name.into(),
             translate: plan.model().translate(),
             mesh: plan.model_triangles().to_vec(),
             supports: Some(Supports {

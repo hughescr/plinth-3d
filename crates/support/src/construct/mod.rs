@@ -66,7 +66,8 @@ pub use members::{
 };
 pub use native::{NativePart, PartFields, PartKind};
 pub use types::{
-    CappedPatch, KeepUpRecord, Limits, PatchBound, PoseError, PosedModel, ProcessRecord, Section,
+    CappedPatch, KeepUpRecord, Limits, PatchBound, PoseError, PosedModel, ProcessRecord, RestingUp,
+    Section,
 };
 
 use plinth_geom::shapes::Triangle;

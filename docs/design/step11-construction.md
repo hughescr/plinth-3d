@@ -547,6 +547,19 @@ Every number states its unit, what it counts, what it does not, its denominator 
 
 After writing, replay the load model on geometry decoded from the written file (measured sections, actual contact places). Label it "generator load convention applied to the written file", not independent physics. No planned radius or stale load table is a headline number.
 
+### 9.1 Review mode (`--review-construction`)
+
+Review mode builds supports for any already posed STL so the owner can LOOK at them in ChituBox. **It completes no stage and moves no milestone.** Its files are never print candidates, and the checker's verdict on them is not acceptance.
+
+- **Opt-in and exclusive.** The flag is never implied. It is refused together with `--candidate`, as a usage error in the CLI and again as a setup error in `run::run`. Without the flag the default path (transport for every input except the hash-bound Round 25) and the Round 25 path are unchanged and byte-identical.
+- **Pose.** The input is taken as drawn: lowest point on the plate, decorated top toward +Z. Nothing is rotated. The pose is an explicit typed input, `RestingUp::PlusZ`, turned into the planner's keep-up record in exactly one place (`KeepUpRecord::resting_up`). The input's real SHA-256 is recorded as provenance only; approval is still the content hash of Round 25 alone, never a file name.
+- **Same pipeline.** The same slicer, planner, constructor, emitter and independent checker run. Review mode relaxes no limit. Inputs wider than 200 mm after centring are refused at the pose step as in the default path.
+- **Labels.** Output name `<stem>.REVIEW-ONLY-NOT-A-PRINT-CANDIDATE[.stopped-at-time-budget][.checker-failed]`; the embedded model name, the text report, the FR-21 JSON `status` and the run JSON (`kind` "review", `label`, `print_candidate` false) all say "REVIEW ONLY — NOT A PRINT CANDIDATE". The run JSON adds a `review` object per model and the budgets under `run.review`.
+- **Time budget.** `--plan-budget SECS` (default 120) bounds the contact planner by wall clock. The planner checks the deadline between its phases (round start, tip growth, anchoring and coverage, column sizing) and between load-sharing trials, then returns the contacts chosen so far (`Termination::TimeBudget`, `Proposal::stopped_at_budget` names the phase). One probe batch in flight is not interrupted, so a run can overshoot the budget by that batch. If that plan routes, freezes and emits, the file is labelled "stopped at time budget (during PHASE)" and the report carries a located warning that needs may be unresolved. If no contact was chosen yet or the route preview fails, the model is refused at stage `plan` with a message naming the phase. Slicing, construction, checking and writing have no budget of their own. Per-step wall times are in `run.models[].steps` of the run JSON.
+- **Checker.** `--checker-timeout SECS` (default 300) stops a checker that does not finish; that is a refusal at stage `check`. The checker's raw report is kept next to every review file as `<stem>.checker-report.json`.
+- **Checker-failed files.** In review mode only, a file the checker found a rule violated in, with an intact structure, is kept (renamed with `.checker-failed`, the process exit status is 1, the run JSON says `checker_failed` true) because the owner needs to look at it. A file the checker could not read or whose structure is damaged, a replay or certificate failure, an admission failure and a checker answer that does not add up stay refusals. Candidate mode and the default path never keep a failed file.
+- **What it does not say.** A review file may have unresolved needs, loads above the design ratio and checker violations. Read the located warnings and the checker report before drawing any conclusion from the picture.
+
 ---
 
 ## 10. Work split (3 lanes) and merge order

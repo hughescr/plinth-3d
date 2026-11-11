@@ -48,6 +48,18 @@ pub fn config_from(opts: &args::Options, exe: &Path) -> Result<run::Config, Stri
         checker: pick(&opts.checker, 0, "--checker")?,
         limits: pick(&opts.limits, 1, "--limits")?,
         candidate: opts.candidate,
+        review: opts.review.then(|| run::Review {
+            plan_budget: opts
+                .plan_budget
+                .unwrap_or(std::time::Duration::from_secs_f64(
+                    args::DEFAULT_PLAN_BUDGET_SECS,
+                )),
+            checker_timeout: opts
+                .checker_timeout
+                .unwrap_or(std::time::Duration::from_secs_f64(
+                    args::DEFAULT_CHECKER_TIMEOUT_SECS,
+                )),
+        }),
     })
 }
 

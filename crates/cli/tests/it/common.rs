@@ -179,5 +179,6 @@ pub fn config(work: &Path, inputs: Vec<PathBuf>) -> Config {
         checker: fake_checker(work, "unverified", 2, 0),
         limits,
         candidate: false,
+        review: None,
     }
 }

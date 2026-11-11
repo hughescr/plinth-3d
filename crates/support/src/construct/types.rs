@@ -64,6 +64,38 @@ pub struct KeepUpRecord {
     /// Approved input hash, recorded provenance (not recomputed by this constructor).
     pub approved_sha256: String,
 }
+/// Which way an already posed model rests: the typed input of the review path, so callers
+/// never handle the keep-up rotation convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestingUp {
+    /// The model is placed as drawn: the plate is at the lowest point and the decorated
+    /// top faces +Z.
+    PlusZ,
+}
+impl RestingUp {
+    /// THE ONE PLACE the convention is converted. The planner derives the resting-up
+    /// direction as `[0, sin a, -cos a]` from the keep-up angle `a` (the approved
+    /// underside is rotated +Z, so resting up is the opposite way). `a = 180` degrees
+    /// gives `[0, 0, +1]`.
+    #[must_use]
+    pub fn keep_up_rotation_x_deg(self) -> f64 {
+        match self {
+            Self::PlusZ => 180.0,
+        }
+    }
+}
+impl KeepUpRecord {
+    /// The record of a model already posed as drawn (no rotation is applied; the
+    /// constructor never rotates). `sha256` is the input's real hash, recorded as
+    /// provenance; it grants no approval.
+    #[must_use]
+    pub fn resting_up(up: RestingUp, sha256: String) -> Self {
+        Self {
+            rotation_x_deg: up.keep_up_rotation_x_deg(),
+            approved_sha256: sha256,
+        }
+    }
+}
 /// Invalid model or pose metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PoseError {

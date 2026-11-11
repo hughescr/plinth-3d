@@ -38,6 +38,9 @@ impl Search<'_> {
         });
         let mut baseline = None;
         for target in targets {
+            if cache.out_of_time("load sharing") {
+                return false;
+            }
             let group = target.group.expect("sharing exposure");
             if cache.exhausted_targets.contains(&group) {
                 continue;
@@ -97,6 +100,9 @@ impl Search<'_> {
         // called exhaustion. This is a finite batch, not a continuous-site proof.
         let mut tried_here = BTreeSet::new();
         for attempt in 0..3 {
+            if cache.out_of_time("load sharing") {
+                return false;
+            }
             let filtered: Vec<Vec<NeedPoint>> = near
                 .iter()
                 .map(|sites| {

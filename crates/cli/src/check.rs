@@ -318,8 +318,16 @@ pub fn interpret(exit: i32, report: &[u8], written: &[u8]) -> Result<Checked, St
 /// A message when the checker cannot start, is killed, or gives an answer that
 /// [`interpret`] refuses.
 pub fn run(job: &Job) -> Result<Checked, String> {
-    let out = Command::new(job.checker)
-        .arg("check")
+    let out = command(job)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run the checker {}: {e}", job.checker.display()))?;
+    conclude(job, out.status.code(), &out.stderr).map(|(checked, _)| checked)
+}
+
+fn command(job: &Job) -> Command {
+    let mut c = Command::new(job.checker);
+    c.arg("check")
         .arg("--chitubox")
         .arg(job.chitubox)
         .arg("--limits")
@@ -327,23 +335,75 @@ pub fn run(job: &Job) -> Result<Checked, String> {
         .arg("--stl")
         .arg(job.stl)
         .arg("--out")
-        .arg(job.report)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("cannot run the checker {}: {e}", job.checker.display()))?;
+        .arg(job.report);
+    c
+}
+
+/// Read the report the checker left, remove it, and interpret it with the exit code.
+/// Returns the raw report bytes with the answer.
+fn conclude(job: &Job, code: Option<i32>, stderr: &[u8]) -> Result<(Checked, Vec<u8>), String> {
     let report = std::fs::read(job.report);
     let _ = std::fs::remove_file(job.report);
-    let Some(code) = out.status.code() else {
+    let Some(code) = code else {
         return Err("the checker was killed by a signal".into());
     };
     let report = report.map_err(|e| {
-        let said = String::from_utf8_lossy(&out.stderr);
+        let said = String::from_utf8_lossy(stderr);
         format!(
             "checker exit {code} and no report ({e}): {}",
             said.lines().next().unwrap_or("")
         )
     })?;
-    interpret(code, &report, job.written)
+    interpret(code, &report, job.written).map(|checked| (checked, report))
+}
+
+/// [`run`] for review mode: the checker is stopped if it has not finished within `timeout`
+/// (a refusal naming the time, never a pass), and the raw report is returned beside the
+/// answer so a retained file can carry it.
+///
+/// # Errors
+/// As [`run`], and a message when the timeout passes.
+pub fn run_bounded(job: &Job, timeout: std::time::Duration) -> Result<(Checked, Vec<u8>), String> {
+    use std::io::Read as _;
+    let mut child = command(job)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run the checker {}: {e}", job.checker.display()))?;
+    let mut pipe = child.stderr.take();
+    let reader = std::thread::spawn(move || {
+        let mut said = Vec::new();
+        if let Some(p) = pipe.as_mut() {
+            let _ = p.read_to_end(&mut said);
+        }
+        said
+    });
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(job.report);
+                return Err(format!(
+                    "the checker did not finish within {:.1} s and was stopped",
+                    timeout.as_secs_f64()
+                ));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = std::fs::remove_file(job.report);
+                return Err(format!("cannot wait for the checker: {e}"));
+            }
+        }
+    };
+    let said = reader.join().unwrap_or_default();
+    conclude(job, status.code(), &said)
 }
 
 #[cfg(test)]

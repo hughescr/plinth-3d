@@ -82,6 +82,7 @@ fn json_status_uses_the_same_measured_gate_not_publication_alone() {
         checker: "checker".into(),
         limits: "limits".into(),
         candidate: true,
+        review: None,
     };
     for (checked, blocked, expected) in [
         (measured_pass(), false, true),
@@ -106,6 +107,7 @@ fn json_status_uses_the_same_measured_gate_not_publication_alone() {
                 supported: true,
                 planning_blockers: blocked,
                 fr21: None,
+                review: None,
                 outcome: Outcome::Published {
                     path: "out/file.chitubox".into(),
                     bytes: 1,

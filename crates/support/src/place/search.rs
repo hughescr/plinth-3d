@@ -295,8 +295,21 @@ struct Cache {
     site_components: BTreeMap<[u32; 3], u32>,
     mergers: Vec<Option<(u32, u32)>>,
     shift: f64,
+    deadline: Option<std::time::Instant>,
+    stopped: Option<&'static str>,
 }
 impl Cache {
+    /// True once the wall-clock deadline has passed; the first phase to see it is recorded.
+    fn out_of_time(&mut self, phase: &'static str) -> bool {
+        if self.stopped.is_none()
+            && self
+                .deadline
+                .is_some_and(|d| std::time::Instant::now() >= d)
+        {
+            self.stopped = Some(phase);
+        }
+        self.stopped.is_some()
+    }
     fn rollback_trial(
         &mut self,
         chosen: &mut Vec<Chosen>,
@@ -525,6 +538,9 @@ impl Cache {
         let mut sample_loads = Vec::new();
         let mut task_sites = Vec::new();
         for (target, old) in tasks {
+            if self.out_of_time("site search") {
+                break;
+            }
             let near = self.near(*target, *old, sites, shift, chosen);
             task_sites.push(near.iter().take(8).copied().collect::<Vec<_>>());
             let (load, proposed) = seed_load(*target, old.is_some());
@@ -1025,6 +1041,7 @@ pub(super) fn run(
     let mut chosen = Vec::new();
     let mut cache = Cache::default();
     cache.index_components(layers, sites, shift);
+    cache.deadline = settings.deadline;
     let valid = !unavailable(&layers.stack)
         && settings.coverage_reach_mm.is_finite()
         && settings.coverage_reach_mm > 0.;
@@ -1038,11 +1055,19 @@ pub(super) fn run(
         if !valid {
             break;
         }
+        if cache.out_of_time("round start") {
+            termination = Termination::TimeBudget;
+            break;
+        }
         let round_geometry: Vec<_> = chosen.iter().map(|c| c.candidate.id).collect();
         // [O] Load grows tips first. Only a completed, unsuccessful growth search
         // (or a tip already at the search cap) can request load-sharing neighbours.
         let capped = cache.grow_tips(builder, &mut chosen, &detail);
         cache.certify_selected(builder, layers, &mut chosen, shift);
+        if cache.out_of_time("tip growth") {
+            termination = Termination::TimeBudget;
+            break;
+        }
         // Mandatory anchoring/coverage has a separate batch. The old rotation
         // mixed replacements and 16 ring tasks per capped tip into this same
         // 384-alternative budget, starving coverage. Never do that again.
@@ -1057,6 +1082,10 @@ pub(super) fn run(
         let near = cache.measure(builder, &tasks, (sites, shift), &chosen, false);
         cache.select(tasks, near, &mut chosen);
         cache.certify_selected(builder, layers, &mut chosen, shift);
+        if cache.out_of_time("anchoring and coverage") {
+            termination = Termination::TimeBudget;
+            break;
+        }
         // At most one kept sharing batch per round [S], not one attempted
         // exposure: exhausted targets must not starve the other components.
         // Use the new mandatory contacts, not stale pre-coverage assignments.
@@ -1067,6 +1096,10 @@ pub(super) fn run(
         );
         cache.size_columns(builder, &mut chosen, &super::routing_loads(&selected));
         cache.certify_selected(builder, layers, &mut chosen, shift);
+        if cache.out_of_time("column sizing") {
+            termination = Termination::TimeBudget;
+            break;
+        }
         detail = load::analyse_full(
             &layers.stack,
             &view(&chosen, layers, shift),
@@ -1099,6 +1132,10 @@ pub(super) fn run(
             termination = Termination::Satisfied;
             break;
         }
+        if cache.out_of_time("load sharing") {
+            termination = Termination::TimeBudget;
+            break;
+        }
         if !sharing_changed && stable {
             // Each ranked exposure cohort has had up to three distinct private
             // pairs tested, or no pair-compatible site in its filtered batch.
@@ -1125,6 +1162,7 @@ fn finish(
     state: (Cache, Termination),
 ) -> Proposal {
     let (cache, mut termination) = state;
+    let stopped_at_budget = cache.stopped;
     chosen.sort_by_key(|c| c.candidate.id);
     let layout = view(&chosen, layers, shift);
     let detail = load::analyse_full(&layers.stack, &layout, &load::Extras::default());
@@ -1174,5 +1212,6 @@ fn finish(
         layout,
         needs: NeedsMap::default(),
         rejections: cache.rejected.into_iter().collect(),
+        stopped_at_budget,
     }
 }
