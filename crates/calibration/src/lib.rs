@@ -3,6 +3,7 @@
 
 pub mod build;
 pub mod cal2_body;
+pub mod cal2_contact;
 pub mod cal2_head;
 pub mod cal2_layout;
 pub mod cal2_map;

@@ -5,10 +5,11 @@
 //! designed diameter. Only the 1.2 mm section is a plain waisted column. The body is sized
 //! to the capacity plinth's load model takes per contact (the certified patch lower bound or
 //! a smaller section of the path), read from the load view of a trial build of one head.
+use crate::cal2_contact::{Part, parts_touch, touches_body};
 use crate::cal2_measure::HeadLoad;
 use crate::cal2_spec::{Cal2Spec, Item, Kind};
 use crate::{cal2_body, cal2_measure, cal2_shape};
-use plinth_chitubox::{Model, Preset, RecordType, Supports};
+use plinth_chitubox::{Model, Preset, RecordType, SupportRecord, Supports};
 use plinth_emit::shapes::{self, FrustumRole, RAFT_ATTR, Spec};
 use plinth_support::{
     construct::{
@@ -513,25 +514,18 @@ pub fn check_supports_reach_plate(m: &Model) -> Result<usize, String> {
         .map(|v| f64::from(v[2]))
         .fold(f64::INFINITY, f64::min);
     let plate = body_min - f64::from(m.translate[2]);
-    let mut columns: std::collections::BTreeMap<[i64; 2], Vec<(f64, f64)>> = Default::default();
+    let mut by_column: std::collections::BTreeMap<[i64; 2], Vec<&SupportRecord>> =
+        Default::default();
     for r in s
         .records
         .iter()
         .filter(|r| r.record_type != RecordType::RAFT)
     {
-        columns
-            .entry(column_key(r.start))
-            .or_default()
-            .push(z_span(r));
+        by_column.entry(column_key(r.start)).or_default().push(r);
     }
-    let pads: Vec<([i64; 2], (f64, f64))> = s
-        .records
-        .iter()
-        .filter(|r| r.record_type == RecordType::RAFT && column_key(r.start) == column_key(r.end))
-        .map(|r| (column_key(r.start), z_span(r)))
-        .collect();
-    for (key, spans) in &mut columns {
+    for (key, recs) in &by_column {
         let at = format!("support column at {key:?} (1/1000 mm)");
+        let mut spans: Vec<(f64, f64)> = recs.iter().map(|r| z_span(r)).collect();
         spans.sort_by(|a, b| b.1.total_cmp(&a.1));
         if spans[0].1 < body_min - 1e-4 {
             return Err(format!(
@@ -546,19 +540,97 @@ pub fn check_supports_reach_plate(m: &Model) -> Result<usize, String> {
             }
             low = low.min(lo);
         }
-        let Some(&(_, (pad_lo, pad_hi))) = pads.iter().find(|(k, _)| k == key) else {
-            return Err(format!("{at}: no raft pad under it"));
-        };
-        if (pad_lo - plate).abs() > 1e-3 || pad_hi < low - TOUCH {
+    }
+    if by_column.is_empty() {
+        return Err("no support column".into());
+    }
+    check_contacts(m, s, &by_column, plate)?;
+    Ok(by_column.len())
+}
+
+/// The XY-and-Z half of the support-path check, on the stored meshes (see
+/// [`crate::cal2_contact`]): per column, the records form one touching component; its top
+/// record touches or overlaps the body mesh; its lowest record touches a raft part whose
+/// underside is the plate. A column moved sideways (alone or with the whole support set)
+/// off the body or off its pad fails here though its Z intervals and metadata still agree.
+fn check_contacts(
+    m: &Model,
+    s: &Supports,
+    by_column: &std::collections::BTreeMap<[i64; 2], Vec<&SupportRecord>>,
+    plate: f64,
+) -> Result<(), String> {
+    let body = Part::new(&m.mesh)?;
+    let body_bvh = body.bvh()?;
+    let rafts = s
+        .records
+        .iter()
+        .filter(|r| r.record_type == RecordType::RAFT)
+        .map(|r| Ok((Part::new(&r.mesh)?, z_span(r).0)))
+        .collect::<Result<Vec<_>, String>>()?;
+    let raft_bvhs = rafts
+        .iter()
+        .map(|(p, _)| p.bvh())
+        .collect::<Result<Vec<_>, _>>()?;
+    for (key, recs) in by_column {
+        let at = format!("support column at {key:?} (1/1000 mm)");
+        let parts = recs
+            .iter()
+            .map(|r| Part::new(&r.mesh))
+            .collect::<Result<Vec<_>, _>>()?;
+        let bvhs = parts.iter().map(Part::bvh).collect::<Result<Vec<_>, _>>()?;
+        let spans: Vec<(f64, f64)> = recs.iter().map(|r| z_span(r)).collect();
+        let top = (0..parts.len())
+            .max_by(|&a, &b| spans[a].1.total_cmp(&spans[b].1))
+            .unwrap_or(0);
+        // One touching component from the top record: no part floats off sideways.
+        let mut reached = vec![false; parts.len()];
+        reached[top] = true;
+        let mut queue = vec![top];
+        while let Some(i) = queue.pop() {
+            for j in 0..parts.len() {
+                if !reached[j] && parts_touch(&parts[i], &bvhs[i], &parts[j], &bvhs[j])? {
+                    reached[j] = true;
+                    queue.push(j);
+                }
+            }
+        }
+        let cut = reached.iter().filter(|r| !**r).count();
+        if cut > 0 {
             return Err(format!(
-                "{at}: lowest support {low:.3}, pad [{pad_lo:.3}, {pad_hi:.3}], plate {plate:.3}"
+                "{at}: {cut} of {} parts do not touch the path from the top (sideways break)",
+                parts.len()
+            ));
+        }
+        if !touches_body(&parts[top], &body_bvh)? {
+            return Err(format!(
+                "{at}: its top part touches the body mesh nowhere (supports off the body)"
+            ));
+        }
+        let low = spans.iter().map(|s| s.0).fold(f64::INFINITY, f64::min);
+        let mut under = Vec::new();
+        for (i, (part, bvh)) in parts.iter().zip(&bvhs).enumerate() {
+            if spans[i].0 > low + 1e-3 {
+                continue;
+            }
+            for ((raft, raft_lo), raft_bvh) in rafts.iter().zip(&raft_bvhs) {
+                if parts_touch(part, bvh, raft, raft_bvh)? {
+                    under.push(*raft_lo);
+                }
+            }
+        }
+        if under.is_empty() {
+            return Err(format!(
+                "{at}: no raft pad under it: the lowest support {low:.3} touches none"
+            ));
+        }
+        if !under.iter().any(|lo| (lo - plate).abs() <= 1e-3) {
+            return Err(format!(
+                "{at}: lowest support {low:.3}, the raft it touches starts at {:.3}, plate {plate:.3}",
+                under[0]
             ));
         }
     }
-    if columns.is_empty() {
-        return Err("no support column".into());
-    }
-    Ok(columns.len())
+    Ok(())
 }
 
 /// Build one coupon. The name is set here; the placement translation is added later.
@@ -880,5 +952,163 @@ mod tests {
                 .unwrap_err()
                 .contains("no raft pad")
         );
+    }
+
+    /// Move one record by `d`: its mesh always, its start and end as well when `meta`.
+    fn shift(r: &mut SupportRecord, d: [f32; 3], meta: bool) {
+        let add = |v: &mut [f32; 3]| {
+            for (c, dc) in v.iter_mut().zip(d) {
+                *c += dc;
+            }
+        };
+        r.mesh.iter_mut().flatten().for_each(add);
+        if meta {
+            add(&mut r.start);
+            add(&mut r.end);
+        }
+    }
+
+    /// The written model of the first coupon of `kind` with at least `heads` heads.
+    fn coupon(kind: Kind, heads: usize) -> Model {
+        let s = spec();
+        let it = s
+            .items()
+            .into_iter()
+            .find(|i| i.copy == 0 && i.kind == kind && i.heads >= heads)
+            .unwrap();
+        written(&build_for_layout(&s, &it, 3).unwrap().model)
+    }
+
+    /// Every record of the column that holds `records[i]`, and its raft pad record numbers.
+    fn column_of(m: &Model, i: usize) -> (Vec<usize>, Vec<usize>) {
+        let recs = &m.supports.as_ref().unwrap().records;
+        let key = column_key(recs[i].start);
+        let at = |r: &SupportRecord| column_key(r.start) == key;
+        let all = |raft: bool| -> Vec<usize> {
+            (0..recs.len())
+                .filter(|&j| (recs[j].record_type == RecordType::RAFT) == raft && at(&recs[j]))
+                .collect()
+        };
+        (all(false), all(true))
+    }
+
+    /// Defect found by the cross-family review of the first check: it compared Z intervals
+    /// and metadata only. The reviewer's case: every support record (rafts too) moved 10 mm
+    /// in X off a body that is under 1 mm wide, written and parsed, was accepted.
+    #[test]
+    fn the_support_path_check_refuses_a_whole_support_set_moved_sideways_off_the_body() {
+        let m = coupon(Kind::Witness, 1);
+        assert_eq!(check_supports_reach_plate(&m), Ok(1));
+        for meta in [true, false] {
+            let mut bad = m.clone();
+            for r in &mut bad.supports.as_mut().unwrap().records {
+                shift(r, [10.0, 0.0, 0.0], meta);
+            }
+            let e = check_supports_reach_plate(&written(&bad)).unwrap_err();
+            assert!(e.contains("body mesh nowhere"), "meta {meta}: {e}");
+        }
+    }
+
+    /// One column (with its pad, so it is whole in itself) moved sideways off its body,
+    /// leaving the other columns on theirs: for heads and for plain columns, with the
+    /// metadata moved or left behind.
+    #[test]
+    fn the_support_path_check_refuses_one_column_moved_sideways_off_its_body() {
+        for kind in [Kind::Head, Kind::Column] {
+            let m = coupon(kind, 2);
+            let n = check_supports_reach_plate(&m).unwrap();
+            assert!(n >= 2, "{kind:?}");
+            let first = (0..m.supports.as_ref().unwrap().records.len())
+                .find(|&i| m.supports.as_ref().unwrap().records[i].record_type != RecordType::RAFT)
+                .unwrap();
+            let (column, pad) = column_of(&m, first);
+            for meta in [true, false] {
+                let mut bad = m.clone();
+                for &i in column.iter().chain(&pad) {
+                    shift(
+                        &mut bad.supports.as_mut().unwrap().records[i],
+                        [30.0, 0.0, 0.0],
+                        meta,
+                    );
+                }
+                let e = check_supports_reach_plate(&written(&bad)).unwrap_err();
+                assert!(e.contains("body mesh nowhere"), "{kind:?} meta {meta}: {e}");
+            }
+        }
+    }
+
+    /// A column whose pad is somewhere else, and one part of a column off the rest of it.
+    #[test]
+    fn the_support_path_check_refuses_a_column_off_its_raft_pad_and_a_part_off_its_column() {
+        let m = coupon(Kind::Witness, 1);
+        let first = m
+            .supports
+            .as_ref()
+            .unwrap()
+            .records
+            .iter()
+            .position(|r| r.record_type != RecordType::RAFT)
+            .unwrap();
+        let (column, pad) = column_of(&m, first);
+        assert!(!pad.is_empty());
+        // The pad moved clear of the column (10 mm; the pad and flare are 2.2 mm across).
+        for meta in [true, false] {
+            let mut bad = m.clone();
+            for &i in &pad {
+                shift(
+                    &mut bad.supports.as_mut().unwrap().records[i],
+                    [10.0, 0.0, 0.0],
+                    meta,
+                );
+            }
+            let e = check_supports_reach_plate(&written(&bad)).unwrap_err();
+            assert!(e.contains("no raft pad"), "meta {meta}: {e}");
+        }
+        // A pad shifted 0.5 mm still carries the flare: overlap is contact.
+        let mut ok = m.clone();
+        for &i in &pad {
+            shift(
+                &mut ok.supports.as_mut().unwrap().records[i],
+                [0.5, 0.0, 0.0],
+                true,
+            );
+        }
+        assert_eq!(check_supports_reach_plate(&written(&ok)), Ok(1));
+        // The base flare alone moved 3 mm sideways: the path from the head breaks.
+        let flare = *column
+            .iter()
+            .find(|&&i| {
+                m.supports.as_ref().unwrap().records[i].record_type == RecordType::BASE_FLARE
+            })
+            .unwrap();
+        // Mesh only (the record still says it is in the column): the touch test sees it.
+        let mut bad = m.clone();
+        shift(
+            &mut bad.supports.as_mut().unwrap().records[flare],
+            [3.0, 0.0, 0.0],
+            false,
+        );
+        let e = check_supports_reach_plate(&written(&bad)).unwrap_err();
+        assert!(e.contains("sideways break"), "{e}");
+        // With its metadata too the flare is a column of its own, which fails on its top.
+        let mut bad = m.clone();
+        shift(
+            &mut bad.supports.as_mut().unwrap().records[flare],
+            [3.0, 0.0, 0.0],
+            true,
+        );
+        assert!(check_supports_reach_plate(&written(&bad)).is_err());
+    }
+
+    /// Supports and pads together lifted 0.5 mm: they still reach the body and each other,
+    /// but the pad underside is no longer the plate.
+    #[test]
+    fn the_support_path_check_refuses_pads_off_the_plate() {
+        let mut bad = coupon(Kind::Witness, 1);
+        for r in &mut bad.supports.as_mut().unwrap().records {
+            shift(r, [0.0, 0.0, 0.5], true);
+        }
+        let e = check_supports_reach_plate(&written(&bad)).unwrap_err();
+        assert!(e.contains("plate"), "{e}");
     }
 }
