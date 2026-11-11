@@ -361,6 +361,7 @@ name = "plinth-calibration"
 version = "0.0.0"
 dependencies = [
  "plinth-chitubox",
+ "plinth-emit",
  "plinth-geom",
  "plinth-support",
  "serde",

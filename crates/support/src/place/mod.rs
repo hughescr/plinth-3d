@@ -12,6 +12,7 @@ use crate::load::{self, LayerStack, LayoutView, LoadReport, ModelLayers};
 use plinth_geom::Bvh;
 
 pub use layout::{add_members, layout_from_contacts};
+pub use search::head_candidate;
 
 /// Largest modelled load through any fixed section of each chain, across ALL
 /// layers. ContactLoad::load_mm2 is only the load at the worst RATIO (often an

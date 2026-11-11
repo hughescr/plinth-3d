@@ -53,6 +53,21 @@ fn axis(n: V3, degrees: f64) -> [f32; 3] {
     [(a * n[0]) as f32, (a * n[1]) as f32, (a * n[2] - b) as f32]
 }
 fn candidate(id: u32, p: &NeedPoint, neck: f32, fan: f64, load: f64) -> ContactCandidate {
+    head_candidate(id, p.xyz, p.normal, neck, fan, load)
+}
+/// The planner's own head proportions (ball, standoff, cone, joint, length) for a site,
+/// its outward normal, the cone-start radius `neck`, the fan angle from the normal toward
+/// vertical, and the column load. This is what [`candidate`] builds; the calibration
+/// plates call it so their heads are the real heads, not a copy of the formulas.
+#[must_use]
+pub fn head_candidate(
+    id: u32,
+    site: V3,
+    normal: V3,
+    neck: f32,
+    fan: f64,
+    load: f64,
+) -> ContactCandidate {
     let ball_r = 1.06 * neck;
     let standoff = ((f64::from(ball_r).powi(2)
         - 3.0615 * f64::from(neck).powi(2) / std::f64::consts::PI)
@@ -62,10 +77,10 @@ fn candidate(id: u32, p: &NeedPoint, neck: f32, fan: f64, load: f64) -> ContactC
     let joint_r = 1.04 * (1.5 * neck).max(column);
     ContactCandidate {
         id: CandId(id),
-        site: p.xyz.map(|v| v as f32),
+        site: site.map(|v| v as f32),
         ball_r,
         standoff,
-        axis: axis(p.normal, fan),
+        axis: axis(normal, fan),
         neck,
         joint_r,
         head_len: (2.6 - joint_r - standoff).max(1.5),

@@ -7,6 +7,9 @@ use serde::Serialize;
 pub const SEED: u64 = 20261102;
 pub const GAP: f64 = 6.0;
 pub const BUILD: [f64; 2] = [211.68, 118.37];
+/// CAL-2: least distance from any part's footprint (raft included) to each edge of the build
+/// area, mm.
+pub const EDGE_MARGIN: f64 = 8.0;
 pub const IDS: [&str; 8] = ["A0", "A1", "B-100", "S-100", "S-324", "K-15", "K-60", "W"];
 /// Same 100-rung waist in B, S and W; inferred from the owner's measured inflation.
 pub const WAIST_100: f32 = 0.229;
@@ -69,7 +72,7 @@ pub fn bounds(m: &Model) -> Bounds {
     }
     out
 }
-struct Random(u64);
+pub(crate) struct Random(pub(crate) u64);
 impl Random {
     fn next(&mut self) -> u64 {
         // Explicit xorshift64; a version-independent seeded shuffle, not a platform RNG.
@@ -78,7 +81,7 @@ impl Random {
         self.0 ^= self.0 << 17;
         self.0
     }
-    fn below(&mut self, n: usize) -> usize {
+    pub(crate) fn below(&mut self, n: usize) -> usize {
         let n = n as u64;
         let limit = u64::MAX - u64::MAX % n;
         loop {
@@ -163,6 +166,10 @@ pub fn raster_phase_kept(source: &Model, placed: &Model, grid: goo_grid::Grid) -
 }
 /// Conservative bounding-box gaps: never claim a mesh clearance larger than this.
 pub fn validate(models: &[Model]) -> Result<f64> {
+    validate_gap(models, GAP)
+}
+/// [`validate`] with a chosen minimum clearance, mm (CAL-2 may relax the 6 mm).
+pub fn validate_gap(models: &[Model], min_gap: f64) -> Result<f64> {
     let boxes: Vec<_> = models.iter().map(bounds).collect();
     let mut gap = f64::INFINITY;
     for (i, a) in boxes.iter().enumerate() {
@@ -173,8 +180,8 @@ pub fn validate(models: &[Model]) -> Result<f64> {
             gap = gap.min(a.gap(*b));
         }
     }
-    if gap < GAP {
-        return Err(format!("piece clearance {gap} < 6 mm").into());
+    if gap < min_gap {
+        return Err(format!("piece clearance {gap} < {min_gap} mm").into());
     }
     Ok(gap)
 }
