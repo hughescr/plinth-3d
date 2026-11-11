@@ -155,7 +155,7 @@ fn shares_sum_to_the_layer_area_and_layers_are_never_summed() {
     assert!(close(top, 4.0), "{top}");
     assert_eq!(d.report.layers.len(), 3);
     assert!(close(d.report.layers[0].area_mm2, 12.0));
-    assert!(close(d.report.layers[0].capacity_mm2, 12.0 * 3.0));
+    assert!(close(d.report.layers[0].capacity_mm2, DESIGN_RATIO * 3.0));
 }
 
 #[test]
@@ -306,7 +306,7 @@ fn a_centre_off_a_straight_row_is_an_intervention_even_with_low_ratios() {
         .collect();
     let d = analyse_full(&stack, &layout(cs, 10.0, 10.0), &Extras::default());
     let trib = d.sections.iter().map(|s| s.tributary.0).fold(0.0, f64::max);
-    assert!(trib < 12.0, "{trib}");
+    assert!(trib < DESIGN_RATIO, "{trib}");
     let w = kinds(&d.report, WarningClass::Intervention);
     assert!(w.iter().any(|k| k == "load path not assessed"), "{w:?}");
     assert!(d.groups[0].outside_hull_mm > 1.0);
@@ -329,7 +329,7 @@ fn ratio_38_and_42_fall_either_side_of_the_unprintable_limit_of_40() {
 }
 
 #[test]
-fn ninety_mm2_over_two_mm2_of_section_is_ratio_45_utilisation_3_75_and_unprintable() {
+fn ninety_mm2_over_two_mm2_of_section_is_ratio_45_utilisation_2_25_and_unprintable() {
     let stack = body(&[90.0]);
     let d = analyse_full(
         &stack,
@@ -338,7 +338,7 @@ fn ninety_mm2_over_two_mm2_of_section_is_ratio_45_utilisation_3_75_and_unprintab
     );
     let g = &d.groups[0];
     assert!(
-        close(g.x_group, 45.0) && close(g.utilisation, 3.75),
+        close(g.x_group, 45.0) && close(g.utilisation, 2.25),
         "{g:?}"
     );
     let w = d
@@ -495,8 +495,8 @@ fn an_exact_tie_splits_the_element_equally() {
 #[test]
 fn the_patch_counts_only_as_far_as_it_is_printed() {
     // A patch spread over 0.5 mm of height: in the first layer only a sliver is printed, so a
-    // load of 4 mm² against about 0.3 mm² of the 6 mm² patch is above 12.
-    let stack = body(&[4.0, 4.0, 4.0]);
+    // load of 8 mm² against about 0.3 mm² of the 6 mm² patch is above 20.
+    let stack = body(&[8.0, 8.0, 8.0]);
     let mut lay = layout(vec![contact(0.2, 2.0, 0, 6.0, 6.0)], 6.0, 6.0);
     lay.chains[0].parts[0].z_range_mm = [0.0, 0.5];
     let d = analyse_full(&stack, &lay, &Extras::default());
@@ -506,7 +506,7 @@ fn the_patch_counts_only_as_far_as_it_is_printed() {
         .find(|s| s.kind == PartKind::Patch)
         .unwrap();
     assert_eq!(patch.tributary.1, 0, "{patch:?}");
-    assert!(patch.tributary.0 > 12.0, "{patch:?}");
+    assert!(patch.tributary.0 > DESIGN_RATIO, "{patch:?}");
     assert!(
         kinds(&d.report, WarningClass::Intervention)
             .iter()

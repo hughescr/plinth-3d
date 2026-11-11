@@ -125,7 +125,7 @@ pub struct GroupLoad {
     pub section_sum_mm2: f64,
     /// Additive area ratio `A / sum B` (infinite when `sum B` is 0).
     pub x_group: f64,
-    /// Additive design-capacity utilisation `x_group / 12`.
+    /// Additive design-capacity utilisation `x_group / DESIGN_RATIO`.
     pub utilisation: f64,
     /// Area-weighted centre of the layer's peel (x, y), mm.
     pub centroid_xy: [f64; 2],

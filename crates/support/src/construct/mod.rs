@@ -201,7 +201,7 @@ impl Contact {
     /// Desired load-sized radius for private resizing, rounded upward.
     pub fn required_column_radius(&self, load: f64) -> f32 {
         let r = f64::from(self.joint_radius / 1.04)
-            .max((load / 12.0 / 3.0615).sqrt())
+            .max((load / crate::load::DESIGN_RATIO / 3.0615).sqrt())
             .max(0.25);
         let f = r as f32;
         if f64::from(f) < r { f.next_up() } else { f }
@@ -269,7 +269,7 @@ impl Quote {
     }
     /// Certified lower-bound capacity at full patch (not early-layer capacity), mm² of peel.
     pub fn full_capacity(&self) -> f64 {
-        self.contact.patch.0.lo * 12.0
+        self.contact.patch.0.lo * crate::load::DESIGN_RATIO
     }
 }
 /// Uncopyable all-or-nothing contact batch.

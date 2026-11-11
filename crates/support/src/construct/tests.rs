@@ -85,16 +85,16 @@ fn fixed_contact_capacity_is_not_analytic_capacity() {
     let mut out = quotes(&p, &[candidate(0, 0.)]);
     let q = out.remove(0).unwrap();
     let analytic = std::f64::consts::PI * (0.212f64.powi(2) - 0.0772f64.powi(2));
-    assert!(q.full_capacity() < 12.0 * analytic);
+    assert!(q.full_capacity() < crate::load::DESIGN_RATIO * analytic);
     assert_eq!(
-        require_capacity(&q, 12.0 * analytic),
+        require_capacity(&q, crate::load::DESIGN_RATIO * analytic),
         Err(Reject::InsufficientCapacity)
     );
     assert!(require_capacity(&q, q.full_capacity()).is_ok());
     eprintln!(
         "certified full-patch capacity={} mm2 peel; analytic-sized ratio={}",
         q.full_capacity(),
-        12.0 * analytic / (q.full_capacity() / 12.0)
+        crate::load::DESIGN_RATIO * analytic / (q.full_capacity() / crate::load::DESIGN_RATIO)
     );
 }
 #[test]
@@ -220,14 +220,14 @@ fn capped_column_keeps_its_joint_and_exposes_a_capacity_miss() {
         .iter()
         .find(|s| s.kind == crate::load::PartKind::Column)
         .unwrap();
-    assert!(20.0 / column.area_lower_mm2 > 12.0);
+    assert!(20.0 / column.area_lower_mm2 > crate::load::DESIGN_RATIO);
     c.joint_r = 0.9;
     c.head_len = 1.8;
     let large = quotes(&p, &[c]);
     let large = vec![large[0].as_ref().unwrap()];
     let mut checks = p.probe_column_alternatives(&large, &[20.0]);
     let checked = checks.remove(0).unwrap();
-    assert!(checked.radius() >= (20.0_f32 / 12.0 / 3.0615).sqrt());
+    assert!(checked.radius() >= (20.0_f32 / crate::load::DESIGN_RATIO as f32 / 3.0615).sqrt());
 }
 
 #[test]

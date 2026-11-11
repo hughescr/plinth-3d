@@ -14,6 +14,9 @@ use plinth_geom::Bvh;
 pub use layout::{add_members, layout_from_contacts};
 pub use search::head_candidate;
 
+/// The design ratio every sizing and replay decision in this module uses (P5).
+const P5: f64 = load::DESIGN_RATIO;
+
 /// Largest modelled load through any fixed section of each chain, across ALL
 /// layers. ContactLoad::load_mm2 is only the load at the worst RATIO (often an
 /// early partial patch), and must not size columns for the later maximum load.
@@ -103,7 +106,7 @@ pub struct Proposal {
 }
 
 /// Build a classified site pool, seed first-layer islands, cover overhang and reach,
-/// then size and add contacts in private batches. Uses P5 = 12 **[O]**.
+/// then size and add contacts in private batches. Uses P5 = 20 **[O]**.
 #[must_use]
 pub fn plan_contacts(
     builder: &PlanBuilder<Contacts>,

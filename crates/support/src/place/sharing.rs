@@ -123,12 +123,12 @@ fn replay_check(
         if (b.component, b.layer) != (a.component, a.layer)
             || (!b.active.is_empty() && a.active.is_empty())
             || (b.equilibrium_assessed && !a.equilibrium_assessed)
-            || worse(b.x_group, a.x_group, 12.0)
+            || worse(b.x_group, a.x_group, P5)
         {
             return false;
         }
         let targeted = Some((b.component, b.layer)) == target;
-        improvement |= targeted && b.x_group > 12.0 && a.x_group + 1e-6 < b.x_group;
+        improvement |= targeted && b.x_group > P5 && a.x_group + 1e-6 < b.x_group;
         if !b.equilibrium_assessed {
             for (old, new, limit) in [
                 (b.outside_hull_mm, a.outside_hull_mm, 1e-6),
@@ -173,16 +173,16 @@ fn replay_check(
                 ),
                 (old.ratios.equal_share, new.ratios.equal_share, true),
             ] {
-                if comparable && worse(o, n, 12.0) {
+                if comparable && worse(o, n, P5) {
                     return false;
                 }
-                improvement |= targeted && comparable && o > 12.0 && n + 1e-6 < o;
+                improvement |= targeted && comparable && o > P5 && n + 1e-6 < o;
             }
         }
         // New paths cannot introduce a new overload hidden below an old maximum.
         if a.section_states[b.section_states.len()..].iter().any(|s| {
-            s.ratios.equal_share > 12.0 + 1e-7
-                || (a.equilibrium_assessed && s.ratios.rigid_lever > 12.0 + 1e-7)
+            s.ratios.equal_share > P5 + 1e-7
+                || (a.equilibrium_assessed && s.ratios.rigid_lever > P5 + 1e-7)
         }) {
             return false;
         }
@@ -198,7 +198,7 @@ pub(super) fn replay_blocker(before: &load::LoadDetail, after: &load::LoadDetail
             return format!("{where_} equilibrium becomes unresolved");
         }
         for (name, old, new, limit) in [
-            ("additive", b.x_group, a.x_group, 12.0),
+            ("additive", b.x_group, a.x_group, P5),
             (
                 "outside spread mm",
                 b.outside_hull_mm,
@@ -249,7 +249,7 @@ pub(super) fn replay_blocker(before: &load::LoadDetail, after: &load::LoadDetail
                     true,
                 ),
             ] {
-                if valid && worse(o, n, 12.0) {
+                if valid && worse(o, n, P5) {
                     return format!(
                         "{where_} contact {} part {} {name} {o:.6} -> {n:.6}",
                         old.contact, old.part
@@ -258,8 +258,8 @@ pub(super) fn replay_blocker(before: &load::LoadDetail, after: &load::LoadDetail
             }
         }
         for new in a.section_states.iter().skip(b.section_states.len()) {
-            if new.ratios.equal_share > 12.0 + 1e-7
-                || (a.equilibrium_assessed && new.ratios.rigid_lever > 12.0 + 1e-7)
+            if new.ratios.equal_share > P5 + 1e-7
+                || (a.equilibrium_assessed && new.ratios.rigid_lever > P5 + 1e-7)
             {
                 return format!(
                     "{where_} new contact {} part {} overloaded: equal {:.6}, rigid {:.6}",
@@ -291,12 +291,12 @@ pub(super) fn load_targets(
         .groups
         .iter()
         .filter(|g| {
-            g.x_group > 12.0
+            g.x_group > P5
                 || (!g.equilibrium_assessed && !g.active.is_empty())
                 || g.section_states.iter().any(|s| {
-                    s.ratios.equal_share > 12.0
+                    s.ratios.equal_share > P5
                         || (g.equilibrium_assessed
-                            && s.ratios.rigid_lever > 12.0
+                            && s.ratios.rigid_lever > P5
                             && capped.contains(&site_key(chosen[s.contact as usize].site.xyz)))
                 })
         })

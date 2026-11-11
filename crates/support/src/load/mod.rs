@@ -30,7 +30,9 @@ pub use stack::{ModelLayers, StackOptions, build_model_layers};
 pub use structure::{CupInfo, IslandInfo, ReachInfo, Structure};
 
 /// The owner's design ratio (P5): the largest allowed peel area per mm² of section.
-pub const DESIGN_RATIO: f64 = 12.0;
+/// 20 by the owner's ruling of 2026-11-11 after CAL-2 (every coupon at ratio 45 or below
+/// printed); the unprintable limit stays 40.
+pub const DESIGN_RATIO: f64 = 20.0;
 
 /// Run layer-specific rigid-carrier/additive sizing, all four sharing diagnostics,
 /// separate equilibrium and conditioning assessments, and section 4.8 warnings.
