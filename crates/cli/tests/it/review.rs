@@ -20,6 +20,7 @@ fn review_cfg(w: &Path, fake: &Fake, tag: &str, budget: Duration) -> Config {
     cfg.review = Some(Review {
         plan_budget: budget,
         checker_timeout: Duration::from_secs(60),
+        stop_plan_at_phase: None,
     });
     cfg
 }
@@ -93,8 +94,12 @@ fn an_arbitrary_mesh_reaches_the_planner_and_every_label_says_review_only() {
     // File name, embedded model name, text and JSON reports carry the label.
     let file = path.file_name().unwrap().to_string_lossy();
     assert!(file.contains(REVIEW_FILE_TAG), "{file}");
+    // A plan the deadline never touched says nothing of being stopped.
+    assert_eq!(m.review.expect("review record").stopped_at_budget, None);
+    assert!(!file.contains("stopped-at-time-budget"), "{file}");
     let native = plinth_chitubox::parse(&fs::read(path).unwrap()).unwrap();
     assert!(native.models[0].name.contains(REVIEW_LABEL));
+    assert!(!native.models[0].name.contains("stopped at time budget"));
     let stem = file.trim_end_matches(".chitubox");
     let dir = path.parent().unwrap();
     let text = fs::read_to_string(dir.join(format!("{stem}.fr21.txt"))).unwrap();
@@ -157,34 +162,44 @@ fn an_expired_budget_refuses_and_names_the_phase() {
 
 #[test]
 fn a_short_budget_never_yields_an_unlabelled_file() {
-    // Whatever phase the budget lands in, the result is a refusal naming the budget, or a
-    // file that says it was stopped (in its name, its embedded name and its status); a
-    // plan that finished in time says nothing of the kind.
-    let mut stopped_files = 0;
-    for (i, millis) in [1_u64, 20, 40, 80, 160].into_iter().enumerate() {
-        let w = scratch(&format!("review-budget-{i}"));
-        let cfg = review_cfg(&w, &Fake::honest(), "fake", Duration::from_millis(millis));
+    // The planner's deadline is forced at a named phase (a test hook, not the clock, so the
+    // result does not depend on machine speed). Stopped before any contact is chosen, the
+    // result is a refusal naming the budget; stopped with contacts chosen, it is a file
+    // that says it was stopped (in its name, its embedded name and its status); a plan
+    // that finished in time says nothing of the kind.
+    let stop_at = |tag: &str, phase: &'static str| {
+        let w = scratch(&format!("review-budget-{tag}"));
+        let mut cfg = review_cfg(&w, &Fake::honest(), "fake", Duration::from_secs(600));
+        cfg.review.as_mut().unwrap().stop_plan_at_phase = Some(phase);
         let r = go(&cfg);
-        match &r.models[0].outcome {
-            Outcome::Failed { stage, message, .. } => {
-                assert_eq!(*stage, "plan", "{message}");
-                assert!(message.contains("time budget"), "{message}");
-            }
-            Outcome::Published { path, .. } => {
-                let review = r.models[0].review.expect("review record");
-                let stopped = review.stopped_at_budget.is_some();
-                stopped_files += usize::from(stopped);
-                let file = path.file_name().unwrap().to_string_lossy();
-                assert_eq!(file.contains("stopped-at-time-budget"), stopped, "{file}");
-                let native = plinth_chitubox::parse(&fs::read(path).unwrap()).unwrap();
-                let name = &native.models[0].name;
-                assert_eq!(name.contains("stopped at time budget"), stopped, "{name}");
-                assert!(name.contains(REVIEW_LABEL));
-            }
-        }
-    }
-    // The emit-at-budget path itself must have been walked at least once.
-    assert!(stopped_files >= 1, "no budget produced a stopped file");
+        (cfg, r)
+    };
+    // Refuse at budget: nothing chosen yet.
+    let (cfg, r) = stop_at("refuse", "round start");
+    let (stage, message) = failure(&r);
+    assert_eq!(stage, "plan", "{message}");
+    assert!(message.contains("time budget"), "{message}");
+    assert!(message.contains("round start"), "{message}");
+    assert_eq!(names(&cfg.out_dir), Vec::<String>::new(), "nothing is left");
+    // Emit at budget: contacts chosen, the file says so everywhere.
+    let (_cfg, r) = stop_at("emit", "anchoring and coverage");
+    let (path, m) = published(&r);
+    let review = m.review.expect("review record");
+    assert_eq!(review.stopped_at_budget, Some("anchoring and coverage"));
+    let file = path.file_name().unwrap().to_string_lossy();
+    assert!(file.contains("stopped-at-time-budget"), "{file}");
+    assert!(file.contains(REVIEW_FILE_TAG), "{file}");
+    let native = plinth_chitubox::parse(&fs::read(path).unwrap()).unwrap();
+    let name = &native.models[0].name;
+    assert!(name.contains("stopped at time budget"), "{name}");
+    assert!(name.contains(REVIEW_LABEL));
+    assert!(review_status_says_stopped(m));
+}
+
+fn review_status_says_stopped(m: &run::ModelRun) -> bool {
+    m.review
+        .as_ref()
+        .is_some_and(|r| run::review_status(r).contains("stopped at time budget"))
 }
 
 #[test]
@@ -252,6 +267,7 @@ fn a_checker_that_hangs_is_stopped_at_the_timeout() {
     cfg.review = Some(Review {
         plan_budget: Duration::from_secs(60),
         checker_timeout: Duration::from_millis(300),
+        stop_plan_at_phase: None,
     });
     let started = std::time::Instant::now();
     let r = go(&cfg);

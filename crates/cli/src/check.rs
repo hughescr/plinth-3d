@@ -361,23 +361,45 @@ fn conclude(job: &Job, code: Option<i32>, stderr: &[u8]) -> Result<(Checked, Vec
 /// (a refusal naming the time, never a pass), and the raw report is returned beside the
 /// answer so a retained file can carry it.
 ///
+/// The checker runs in its own process group. When it finishes, and when the timeout
+/// passes, the whole group is killed, so a wrapper script cannot leave a worker running
+/// (a worker that outlives its wrapper, or that the wrapper waits for). Reading the
+/// checker's error output is bounded too: it never waits for a worker that still holds the
+/// pipe open. A worker that left the group on purpose (a new session) is out of reach, and
+/// the program still returns on time.
+///
 /// # Errors
 /// As [`run`], and a message when the timeout passes.
 pub fn run_bounded(job: &Job, timeout: std::time::Duration) -> Result<(Checked, Vec<u8>), String> {
     use std::io::Read as _;
+    use std::os::unix::process::CommandExt as _;
+    /// How long to wait for the error output after the group is killed.
+    const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
     let mut child = command(job)
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("cannot run the checker {}: {e}", job.checker.display()))?;
+    let group = i32::try_from(child.id())
+        .ok()
+        .map(nix::unistd::Pid::from_raw);
+    let kill_group = || {
+        if let Some(g) = group {
+            let _ = nix::sys::signal::killpg(g, nix::sys::signal::Signal::SIGKILL);
+        }
+    };
     let mut pipe = child.stderr.take();
-    let reader = std::thread::spawn(move || {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    // Detached on purpose: if the pipe stays open past the grace, the thread is left behind
+    // rather than waited for.
+    std::thread::spawn(move || {
         let mut said = Vec::new();
         if let Some(p) = pipe.as_mut() {
             let _ = p.read_to_end(&mut said);
         }
-        said
+        let _ = sender.send(said);
     });
     let started = std::time::Instant::now();
     let status = loop {
@@ -387,7 +409,7 @@ pub fn run_bounded(job: &Job, timeout: std::time::Duration) -> Result<(Checked, 
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Ok(None) => {
-                let _ = child.kill();
+                kill_group();
                 let _ = child.wait();
                 let _ = std::fs::remove_file(job.report);
                 return Err(format!(
@@ -396,13 +418,18 @@ pub fn run_bounded(job: &Job, timeout: std::time::Duration) -> Result<(Checked, 
                 ));
             }
             Err(e) => {
-                let _ = child.kill();
+                kill_group();
+                let _ = child.wait();
                 let _ = std::fs::remove_file(job.report);
                 return Err(format!("cannot wait for the checker: {e}"));
             }
         }
     };
-    let said = reader.join().unwrap_or_default();
+    // The checker has finished; whatever it left running in its group goes too. (The group
+    // id equals the checker's process id and stays reserved while any member lives, so a
+    // finished and reaped checker with no survivors is a harmless no-such-group answer.)
+    kill_group();
+    let said = receiver.recv_timeout(DRAIN_GRACE).unwrap_or_default();
     conclude(job, status.code(), &said)
 }
 
@@ -673,5 +700,98 @@ mod tests {
             written: b"x",
         };
         assert!(run(&job).unwrap_err().contains("cannot run the checker"));
+    }
+
+    /// A checker wrapper script in its own scratch folder, a job for it, and the file the
+    /// script writes its background worker's process id to (`$0.pid`).
+    struct Wrapper {
+        dir: std::path::PathBuf,
+        script: std::path::PathBuf,
+    }
+
+    impl Wrapper {
+        fn new(tag: &str, body: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+            let dir = std::env::temp_dir().join(format!(
+                "plinth-check-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos())
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let script = dir.join("wrapper");
+            std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            Self { dir, script }
+        }
+
+        fn run(&self, timeout: std::time::Duration) -> (Result<(Checked, Vec<u8>), String>, f64) {
+            let report = self.dir.join("report.json");
+            let job = Job {
+                checker: &self.script,
+                limits: Path::new("l"),
+                chitubox: Path::new("c"),
+                stl: Path::new("s"),
+                report: &report,
+                written: b"x",
+            };
+            let started = std::time::Instant::now();
+            let answer = run_bounded(&job, timeout);
+            (answer, started.elapsed().as_secs_f64())
+        }
+
+        /// The background worker's process id, once it has been written.
+        fn worker(&self) -> i32 {
+            let pid_file = self.dir.join("wrapper.pid");
+            let text = std::fs::read_to_string(pid_file).expect("the wrapper wrote the pid");
+            text.trim().parse().expect("a process id")
+        }
+    }
+
+    impl Drop for Wrapper {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// True once no process has this id (a reparented worker needs a moment to be reaped).
+    fn gone(pid: i32) -> bool {
+        for _ in 0..100 {
+            let alive = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+            if !alive {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn a_checker_that_hangs_is_killed_at_the_timeout() {
+        let w = Wrapper::new("direct", "exec sleep 30");
+        let (answer, seconds) = w.run(std::time::Duration::from_millis(300));
+        assert!(answer.unwrap_err().contains("did not finish"));
+        assert!(seconds < 3.0, "waited {seconds} s for a hung checker");
+    }
+
+    #[test]
+    fn a_worker_left_running_after_the_wrapper_exits_is_not_waited_for_and_is_killed() {
+        // The worker inherits the error pipe and outlives the wrapper.
+        let w = Wrapper::new("orphan", "sleep 30 &\necho $! > \"$0.pid\"\nexit 0");
+        let (answer, seconds) = w.run(std::time::Duration::from_millis(300));
+        // No report was written, so this is a refusal, but one that arrives promptly.
+        assert!(answer.unwrap_err().contains("no report"));
+        assert!(seconds < 3.0, "waited {seconds} s for the worker's pipe");
+        assert!(gone(w.worker()), "the worker survived the checker");
+    }
+
+    #[test]
+    fn a_wrapper_waiting_on_its_worker_is_stopped_with_the_worker() {
+        let w = Wrapper::new("waiting", "sleep 30 &\necho $! > \"$0.pid\"\nwait");
+        let (answer, seconds) = w.run(std::time::Duration::from_millis(500));
+        assert!(answer.unwrap_err().contains("did not finish"));
+        assert!(seconds < 3.0, "waited {seconds} s for a hung wrapper");
+        assert!(gone(w.worker()), "the worker survived the timeout");
     }
 }

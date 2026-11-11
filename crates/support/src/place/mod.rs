@@ -53,6 +53,12 @@ pub struct PlanSettings {
     /// it between phases and between sharing trials, then stops with the contacts chosen so
     /// far ([`Termination::TimeBudget`]); a single probe batch in flight is not interrupted.
     pub deadline: Option<std::time::Instant>,
+    /// Test hook, never set outside tests: the deadline fires exactly at the first check
+    /// made in the phase of this name (`"round start"`, `"tip growth"`,
+    /// `"anchoring and coverage"`, `"column sizing"`, `"load sharing"` or `"site search"`),
+    /// whatever the clock says. It lets a test force the stop-at-budget path at a chosen
+    /// point, independent of machine speed. `None`: no forced stop.
+    pub stop_at_phase: Option<&'static str>,
 }
 impl Default for PlanSettings {
     fn default() -> Self {
@@ -60,6 +66,7 @@ impl Default for PlanSettings {
             max_rounds: 8,
             coverage_reach_mm: 3.0,
             deadline: None,
+            stop_at_phase: None,
         }
     }
 }

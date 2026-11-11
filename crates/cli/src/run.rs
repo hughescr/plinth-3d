@@ -48,6 +48,10 @@ pub struct Review {
     pub plan_budget: Duration,
     /// Wall-clock limit of one checker run.
     pub checker_timeout: Duration,
+    /// Test hook, `None` in every real run (the command line has no flag for it): the
+    /// planner's deadline fires at the first check in the planner phase of this name,
+    /// whatever the clock says. See `PlanSettings::stop_at_phase`.
+    pub stop_plan_at_phase: Option<&'static str>,
 }
 
 /// The label every review file, report and embedded model name carries.
@@ -458,6 +462,7 @@ fn plan_stage(
     let proposal = timed(&mut m.steps, "plan", || {
         let settings = place::PlanSettings {
             deadline: cfg.review.map(|r| Instant::now() + r.plan_budget),
+            stop_at_phase: cfg.review.and_then(|r| r.stop_plan_at_phase),
             ..place::PlanSettings::default()
         };
         place::plan_contacts(&builder, &layers, &settings)

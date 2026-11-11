@@ -59,6 +59,7 @@ pub fn config_from(opts: &args::Options, exe: &Path) -> Result<run::Config, Stri
                 .unwrap_or(std::time::Duration::from_secs_f64(
                     args::DEFAULT_CHECKER_TIMEOUT_SECS,
                 )),
+            stop_plan_at_phase: None,
         }),
     })
 }

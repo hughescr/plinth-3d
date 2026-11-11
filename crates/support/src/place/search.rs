@@ -296,15 +296,19 @@ struct Cache {
     mergers: Vec<Option<(u32, u32)>>,
     shift: f64,
     deadline: Option<std::time::Instant>,
+    stop_at_phase: Option<&'static str>,
     stopped: Option<&'static str>,
 }
 impl Cache {
-    /// True once the wall-clock deadline has passed; the first phase to see it is recorded.
+    /// True once the wall-clock deadline has passed (or the test hook
+    /// [`PlanSettings::stop_at_phase`] names this phase); the first phase to see it is
+    /// recorded.
     fn out_of_time(&mut self, phase: &'static str) -> bool {
         if self.stopped.is_none()
-            && self
+            && (self
                 .deadline
                 .is_some_and(|d| std::time::Instant::now() >= d)
+                || self.stop_at_phase == Some(phase))
         {
             self.stopped = Some(phase);
         }
@@ -1042,6 +1046,7 @@ pub(super) fn run(
     let mut cache = Cache::default();
     cache.index_components(layers, sites, shift);
     cache.deadline = settings.deadline;
+    cache.stop_at_phase = settings.stop_at_phase;
     let valid = !unavailable(&layers.stack)
         && settings.coverage_reach_mm.is_finite()
         && settings.coverage_reach_mm > 0.;
