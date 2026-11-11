@@ -98,7 +98,7 @@ pub fn project(plan: &SupportPlan) -> Result<Project, Error> {
         .iter()
         .map(|part| match part.kind() {
             PartKind::RaftPad | PartKind::RaftBridge => shapes::RAFT_ATTR,
-            _ => 0x0400,
+            _ => shapes::support_attr(),
         })
         .collect();
     let preview = Preview::solid(800, 600, plinth_chitubox::preview::BACKGROUND)
@@ -111,7 +111,7 @@ pub fn project(plan: &SupportPlan) -> Result<Project, Error> {
             mesh: plan.model_triangles().to_vec(),
             supports: Some(Supports {
                 presets: vec![Preset {
-                    id: 0,
+                    id: u64::from(shapes::LIGHT_PRESET_ID),
                     name: "Light".into(),
                 }],
                 attrs,
@@ -185,6 +185,18 @@ mod tests {
         let bytes = expected.to_bytes().unwrap();
         let decoded = plinth_chitubox::parse(&bytes).unwrap();
         assert_eq!(decoded.to_bytes().unwrap(), bytes);
+        // The written preset table and attrs are the form ChituBox draws (preset 0 is not).
+        let written = decoded.models[0].supports.as_ref().unwrap();
+        shapes::check_support_presets(written).unwrap();
+        assert_eq!(written.presets.len(), 1);
+        assert_eq!(written.presets[0].id, 1);
+        assert!(written.attrs.iter().zip(&written.records).all(|(a, r)| {
+            *a == if r.record_type == plinth_chitubox::RecordType::RAFT {
+                shapes::RAFT_ATTR
+            } else {
+                0x0104
+            }
+        }));
         assert_eq!(
             decoded.models[0].translate.map(f32::to_bits),
             [12_f32, -5., 5.].map(f32::to_bits)

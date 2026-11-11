@@ -92,7 +92,7 @@ Counts by version (PRD §8.4): printed 3 / failed 0 (no support failures) / waiv
 ### Prediction check
 
 1. **Untested.** Both plinth copies failed at layer 1 (plate adhesion, waived), so there is no support result to test.
-2. **BROKEN.** Better 65° was predicted most likely to fail or deform, first at the lowest lips. Both copies printed and did not detach from their supports. Its worst additive ratio about 33.5 after the section correction [S], against the breaking warning level of 25 (`BREAKING_RATIO` in `crates/support/src/load/warn.rs`).
+2. **BROKEN.** Better 65° was predicted most likely to fail or deform, first at the lowest lips. Both copies printed and did not detach from their supports. Its worst additive ratio is about 33.5 after the section correction [S], against the breaking warning level of 25 (`BREAKING_RATIO` in `crates/support/src/load/warn.rs`).
 3. **Partly broken.** The printed Better auto copy (one of models 4 and 5) survived and carried the ~124 component [U]. The island at Z 11.40 mm was not inspected, so that part is untested. The failed copy is an adhesion failure, not a support result.
 4. **Consistent.** Both ChituBox versions printed at least one copy, and no ranking was predicted. "Neither beats plinth" is untested, because both plinth copies were waived.
 5. **Untested.** No front or back result (contrast D: cannot tell).
