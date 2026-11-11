@@ -320,6 +320,18 @@ fn checked_decode(
                 .into(),
         ));
     }
+    // ChituBox loads but does not draw supports whose attr names preset 0 or a preset
+    // missing from the table; refuse such a file instead of writing it.
+    for m in &decoded.models {
+        if let Some(s) = &m.supports {
+            plinth_emit::shapes::check_support_presets(s).map_err(|e| {
+                (
+                    "replay",
+                    format!("Decoded supports would not draw in ChituBox: {e}"),
+                )
+            })?;
+        }
+    }
     Ok(decoded)
 }
 

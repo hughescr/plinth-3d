@@ -10,7 +10,9 @@ use crate::cal2_measure::HeadLoad;
 use crate::cal2_spec::{Cal2Spec, Item, Kind};
 use crate::{cal2_body, cal2_measure, cal2_shape};
 use plinth_chitubox::{Model, Preset, RecordType, SupportRecord, Supports};
-use plinth_emit::shapes::{self, FrustumRole, RAFT_ATTR, Spec};
+use plinth_emit::shapes::{
+    self, FrustumRole, LIGHT_PRESET_ID, RAFT_ATTR, Spec, check_support_presets, support_attr,
+};
 use plinth_support::{
     construct::{
         Contact, KeepUpRecord, Limits, MemberProposal, MemberQuoteBatch, PlanBuilder, PosedModel,
@@ -28,35 +30,6 @@ const WAIST_HIGH: f64 = 0.8;
 const TAPER_LOW: f64 = 2.0;
 const COLUMN_RADIUS: f32 = 1.0;
 const LAYER: f64 = 0.05;
-
-/// The id of the one preset table entry ("Light") in every coupon. ChituBox numbers presets
-/// from 1 and an attr names its preset as `id << 2` in its low byte: with id 0 (attr low
-/// byte 0, as `plinth_emit::constructed` writes) ChituBox v1.4.0 loads the records, counts
-/// their volume and draws nothing (found 2026-11-10 by opening variants of the CAL-2 file;
-/// the same records with id 1 draw in full). CAL-1's coupons use id 1.
-pub const LIGHT_PRESET_ID: u8 = 1;
-/// The attr of every non-raft support record (kind 1, preset [`LIGHT_PRESET_ID`]): 0x0104,
-/// as in the CAL-1 coupons ChituBox drew.
-#[must_use]
-pub fn support_attr() -> u64 {
-    shapes::attr(1, LIGHT_PRESET_ID)
-}
-
-/// Make a plinth-emitted model's preset table and attrs the form ChituBox draws: one
-/// "Light" preset with id [`LIGHT_PRESET_ID`], and that preset in every non-raft attr.
-fn chitubox_presets(model: &mut Model) {
-    if let Some(s) = &mut model.supports {
-        s.presets = vec![Preset {
-            id: u64::from(LIGHT_PRESET_ID),
-            name: "Light".into(),
-        }];
-        for (attr, r) in s.attrs.iter_mut().zip(&s.records) {
-            if r.record_type != RecordType::RAFT {
-                *attr = support_attr();
-            }
-        }
-    }
-}
 
 /// Area of a written 16-sided section of circumradius `r`.
 #[must_use]
@@ -345,11 +318,10 @@ fn plinth_heads(
         .map_err(|e| format!("raft: {e:?}"))?;
     let plan = routed.freeze().map_err(|e| format!("freeze: {e:?}"))?;
     let load = with_load.then(|| head_load(&plan)).transpose()?;
-    let mut model = plinth_emit::constructed::project(&plan)
+    let model = plinth_emit::constructed::project(&plan)
         .map_err(|e| format!("emit: {e:?}"))?
         .models
         .remove(0);
-    chitubox_presets(&mut model);
     Ok(HeadsBuilt {
         model,
         sites: sites_f32,
@@ -490,23 +462,7 @@ fn column_key(p: [f32; 3]) -> [i64; 2] {
 pub fn check_supports_reach_plate(m: &Model) -> Result<usize, String> {
     const TOUCH: f64 = 0.01;
     let s = m.supports.as_ref().ok_or("the model has no supports")?;
-    if s.attrs.len() != s.records.len() {
-        return Err("attr array and records differ in length".into());
-    }
-    for (a, r) in s.attrs.iter().zip(&s.records) {
-        if r.record_type == RecordType::RAFT {
-            if *a != RAFT_ATTR {
-                return Err(format!("raft record attr {a:#x}"));
-            }
-        } else {
-            let preset = (a & 0xff) >> 2;
-            if preset == 0 || !s.presets.iter().any(|p| p.id == preset) {
-                return Err(format!(
-                    "attr {a:#x} names preset {preset}, not in the table"
-                ));
-            }
-        }
-    }
+    check_support_presets(s)?;
     let body_min = m
         .mesh
         .iter()
@@ -865,7 +821,7 @@ mod tests {
                 let want = if r.record_type == RecordType::RAFT {
                     RAFT_ATTR
                 } else {
-                    0x0104
+                    support_attr()
                 };
                 assert_eq!(*a, want, "{name}");
             }

@@ -24,7 +24,7 @@ pub use plinth_geom::shapes::{
     PAD_TRIANGLES, SPHERE_RINGS, SPHERE_SIDES, SPHERE_TRIANGLES, V3, mesh_error_ulps, ulp,
 };
 
-use plinth_chitubox::{RecordType, SupportRecord};
+use plinth_chitubox::{RecordType, SupportRecord, Supports};
 use plinth_geom::shapes::{bridge, frustum, pad, sphere};
 
 /// Type-2 tail word 0 in every native record.
@@ -35,6 +35,46 @@ pub const RAFT_TAIL_W1: f32 = 4.0;
 pub const BRIDGE_TAIL_W0: f32 = 1.0;
 /// Attr value of every raft record: kind byte 0x1e, preset byte 0.
 pub const RAFT_ATTR: u64 = 0x1e00;
+/// The id of the one preset table entry ("Light") in every plinth-emitted model. ChituBox
+/// numbers presets from 1 and an attr names its preset as `id << 2` in its low byte: with
+/// id 0 ChituBox v1.4.0 loads the records, counts their volume and draws nothing (format
+/// spec section 8.3; found 2026-11-10 by opening variants of the CAL-2 file).
+pub const LIGHT_PRESET_ID: u8 = 1;
+
+/// The attr of every non-raft support record plinth writes: kind 1, preset
+/// [`LIGHT_PRESET_ID`], 0x0104, as in the CAL-1 coupons ChituBox drew.
+#[must_use]
+pub fn support_attr() -> u64 {
+    attr(1, LIGHT_PRESET_ID)
+}
+
+/// Whether ChituBox will draw a written model's supports, as far as the preset table and
+/// attrs decide it: one attr per record, every raft attr is [`RAFT_ATTR`], and every other
+/// attr names a preset of at least 1 that exists in the preset table. Checked on the written
+/// records, never on a plan.
+///
+/// # Errors
+/// The first attr that fails, as text.
+pub fn check_support_presets(s: &Supports) -> Result<(), String> {
+    if s.attrs.len() != s.records.len() {
+        return Err("attr array and records differ in length".into());
+    }
+    for (a, r) in s.attrs.iter().zip(&s.records) {
+        if r.record_type == RecordType::RAFT {
+            if *a != RAFT_ATTR {
+                return Err(format!("raft record attr {a:#x}"));
+            }
+        } else {
+            let preset = (a & 0xff) >> 2;
+            if preset == 0 || !s.presets.iter().any(|p| p.id == preset) {
+                return Err(format!(
+                    "attr {a:#x} names preset {preset}, not in the table"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Why a shape was not built.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -469,6 +509,60 @@ mod tests {
         .unwrap();
         assert_eq!(bridge.tail_f32(0).to_bits(), BRIDGE_TAIL_W0.to_bits());
         assert_eq!(bridge.tail_f32(1).to_bits(), RAFT_TAIL_W1.to_bits());
+    }
+
+    /// Sabotage: the guard sees each way the first files failed (preset 0, an undefined id).
+    #[test]
+    fn the_preset_guard_refuses_preset_zero_and_an_undefined_id() {
+        use plinth_chitubox::Preset;
+        let rec = |t: RecordType| SupportRecord {
+            record_type: t,
+            start: [0.; 3],
+            end: [0.; 3],
+            r1: 0.,
+            r2: 0.,
+            tail: [0; 6],
+            mesh: Vec::new(),
+        };
+        let good = Supports {
+            presets: vec![Preset {
+                id: 1,
+                name: "Light".into(),
+            }],
+            attrs: vec![support_attr(), RAFT_ATTR],
+            unreferenced_blob: Vec::new(),
+            records: vec![rec(RecordType(2)), rec(RecordType::RAFT)],
+        };
+        assert_eq!(support_attr(), 0x0104);
+        assert_eq!(check_support_presets(&good), Ok(()));
+        // The first emitted files: attr preset byte 0 (0x0400), table id 0.
+        let mut zero = good.clone();
+        zero.attrs[0] = 0x0400;
+        zero.presets[0].id = 0;
+        assert!(
+            check_support_presets(&zero)
+                .unwrap_err()
+                .contains("preset 0")
+        );
+        // Preset 1 in the attr but table id 0 only: the attr names an id the table lacks.
+        let mut table_zero = good.clone();
+        table_zero.presets[0].id = 0;
+        assert!(check_support_presets(&table_zero).is_err());
+        // An id the table does not define.
+        let mut undefined = good.clone();
+        undefined.attrs[0] = attr(1, 2);
+        assert!(
+            check_support_presets(&undefined)
+                .unwrap_err()
+                .contains("preset 2")
+        );
+        // A bad raft attr and a length mismatch.
+        let mut raft = good.clone();
+        raft.attrs[1] = 0x0104;
+        assert!(check_support_presets(&raft).is_err());
+        let mut short = good;
+        short.attrs.pop();
+        assert!(check_support_presets(&short).is_err());
     }
 
     #[test]
