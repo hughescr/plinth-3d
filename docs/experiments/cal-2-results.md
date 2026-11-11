@@ -1,0 +1,214 @@
+# CAL-2 print results
+
+**Status:** Written 2026-11-11 from the owner's observation of the same day: the plate was inspected after the print and before washing. Wash, cure and support-removal results are not in yet (see Pending). Scoring follows the decision reads pre-registered in [`docs/design/calibration-prints.md` §12](../design/calibration-prints.md); no new criterion is added here. The counts below are read from `cal2-report.json` (the coupon list) and the owner's two failures.
+
+## Print record
+
+| Field | Record |
+|---|---|
+| Print | `cal2-plate.goo`, SHA-256 `38a739fc42984b475a2f8a1841702b85949f4d7717e5025c3b495abc4978a48a` (`plinth-review/2026-11-10-cal-2/`) |
+| Project | `CAL2-plate-calibration-not-print-candidate.chitubox`, SHA-256 `7260e91904c8ce59c6b1cf011f523b28f1e2a0901b6e991c670a40a944a09be1`; layout seed `20261110`; 67 coupons, nothing cut for fit |
+| Printer | Saturn 4 Ultra 16K |
+| Resin | [O] ABS-like clear, the same as CAL-1 and Round 25 (owner, 2026-11-11). Lot: not on the labels (unavailable, not pending) |
+| Vat temperature | [O] Held at 30 °C (the owner's standing operating condition; not measured for this print) |
+| Vat film type | Not recorded |
+| Slice settings | [M] Identical to CAL-1 in every setting (`goo-check.md`): 0.05 mm layers, 2.35 s exposure, 3 bottom layers at 20 s, 5 transition layers, lift and retract 0.05 mm. 208 layers; header print time 1694 s (the file's own estimate, not a measured run) |
+| File check before printing | [M] `goo-check.md`: PASS on all 7 checks; 67 of 67 coupons present, 0 islands, 0 supports ending early, last lit layer exact on all 67 |
+| Inspected | 2026-11-11, by the owner, on the plate, before washing |
+| Blinding | Not recorded. The decision reads in §12 were written before the print. |
+
+[O] is an owner observation or statement; [M] is measured from files; [S] is an orchestrator ruling or inference. The plan and the reading rules are in `docs/design/calibration-prints.md` §12.
+
+"Ratio" in this document is the label ratio of §12: plinth's load model, at the peak layer, against the certified patch. The ratio against the written ball's own section is 2.6 to 3.0% lower for plinth's heads, and the ratio against the section where the cone leaves the ball is 8 to 11% lower (both are in `cal2-report.json`). The labels are used throughout, as the limits (20 and 40) are set on the same definition.
+
+## Observation record
+
+[O] 65 of 67 coupons printed. Everything adhered to the plate. Exactly two coupons failed. Both detached from their supports: the support columns stayed on the plate, and the break is at the support-to-body connection. The three formation witnesses (C65, C66, C67) formed on the plate.
+
+"Printed" in this document means: the whole coupon was present on the plate at this inspection, before washing. It does not yet include losses in washing or curing.
+
+| Coupon | Row | Variant | Heads × neck | Target / achieved ratio | Zone | Copy | Outcome |
+|---|---|---|---|---|---|---|---|
+| C57 | R6 | standard | 4 × 0.80 mm | 70 / 69.95 | back | 1 | **Failed: detached at the support-to-body connection** |
+| C58 | R6 | standard | 4 × 0.80 mm | 70 / 69.95 | front | 2 | Printed (twin of C57) |
+| C32 | R3a | short hold | 9 × 0.55 mm | 50 / 49.90 | back | 2 | **Failed: detached at the support-to-body connection** |
+| C31 | R3a | short hold | 9 × 0.55 mm | 50 / 49.90 | middle | 1 | Printed (twin of C32) |
+
+[O] All other coupons, C01 to C31, C33 to C56, C59 to C64 and the witnesses C65 to C67, were present and attached to their supports. No other break site was reported.
+
+[M] C57 sits at the far left (−X) end of the back row (centre x −92.2 mm, y +30.9 mm). C32 sits at x +45.5 mm in the same row. They are not neighbours.
+
+## Tally
+
+### By target ratio
+
+| Target ratio | Coupons | Printed | Failed |
+|---|---|---|---|
+| 6 (witnesses) | 3 | 3 | 0 |
+| 25 | 6 | 6 | 0 |
+| 30 | 4 | 4 | 0 |
+| 35 | 6 | 6 | 0 |
+| 40 | 20 | 20 | 0 |
+| 45 | 4 | 4 | 0 |
+| 50 | 16 | 15 | 1 (C32) |
+| 70 | 8 | 7 | 1 (C57) |
+| **All** | **67** | **65** | **2** |
+
+Seen together: ratio 25 to 45, 40 coupons, 40 printed, 0 failed. Ratio 50 and 70, 24 coupons, 22 printed, 2 failed. Ratio 40 or higher, 48 coupons, 46 printed, 2 failed.
+
+### By row
+
+Printed / failed. Every cell is two copies (the witnesses are one each).
+
+| Row | What it is | Coupons | Printed | Failed |
+|---|---|---|---|---|
+| R1 | 0.40 mm neck, 16 heads, standard | 14 | 14 | 0 |
+| R2 | 0.55 mm neck, 9 heads, standard | 14 | 14 | 0 |
+| R3a | 0.55 mm, 9 heads, short hold | 4 | 3 | 1 (C32) |
+| R3b | 0.55 mm, 9 heads, long hold | 4 | 4 | 0 |
+| R4 | 0.55 mm, 9 heads, late load | 4 | 4 | 0 |
+| R5a | 0.55 mm, 8 heads, strip | 4 | 4 | 0 |
+| R5b | 0.55 mm, 12 heads, ring | 4 | 4 | 0 |
+| R6 | 0.80 mm neck, 4 heads, standard | 10 | 9 | 1 (C57) |
+| R7 | 1.20 mm waisted column, 4 heads | 4 | 4 | 0 |
+| R8 | 0.55 mm, 4 heads, control | 2 | 2 | 0 |
+| R9 | formation witnesses (0.40, 0.55, 0.80 mm) | 3 | 3 formed | 0 |
+
+### By row and ratio
+
+Printed / failed, two copies per cell.
+
+| Row | 25 | 30 | 35 | 40 | 45 | 50 | 70 |
+|---|---|---|---|---|---|---|---|
+| R1 | 2/0 | 2/0 | 2/0 | 2/0 | 2/0 | 2/0 | 2/0 |
+| R2 | 2/0 | 2/0 | 2/0 | 2/0 | 2/0 | 2/0 | 2/0 |
+| R3a | | | | 2/0 | | **1/1** | |
+| R3b | | | | 2/0 | | 2/0 | |
+| R4 | | | | 2/0 | | 2/0 | |
+| R5a | | | | 2/0 | | 2/0 | |
+| R5b | | | | 2/0 | | 2/0 | |
+| R6 | 2/0 | | 2/0 | 2/0 | | 2/0 | **1/1** |
+| R7 | | | | 2/0 | | | 2/0 |
+| R8 | | | | 2/0 | | | |
+
+No cell lost both copies.
+
+### By plate zone
+
+Excluding the three witnesses (64 coupons). Each cell has copies in different zones, so a zone is not tied to a row.
+
+| Zone | Coupons | Printed | Failed |
+|---|---|---|---|
+| Front | 20 | 20 | 0 |
+| Middle | 20 | 20 | 0 |
+| Back | 24 | 22 | 2 (C57, C32) |
+
+The coupons at ratio 50 or higher, by zone:
+
+| Zone | Coupons at ratio ≥ 50 | Printed | Failed |
+|---|---|---|---|
+| Front | 9 | 9 | 0 |
+| Middle | 7 | 7 | 0 |
+| Back | 8 | 6 | 2 |
+
+The eight back-zone coupons at ratio 50 or higher:
+
+| Coupon | Row | Ratio | Outcome |
+|---|---|---|---|
+| C57 | R6 | 70 | Failed |
+| C13 | R1 | 70 | Printed |
+| C28 | R2 | 70 | Printed |
+| C32 | R3a | 50 | Failed |
+| C26 | R2 | 50 | Printed |
+| C55 | R6 | 50 | Printed |
+| C36 | R3b | 50 | Printed |
+| C44 | R5a | 50 | Printed |
+
+So 6 of the 8 back-zone coupons at 50 or higher survived, including a 0.40 mm and a 0.55 mm coupon at 70. See "What this sample can and cannot show" for how far to read this.
+
+## Decision reads (§12)
+
+Each item gives the registered read, what the plate shows, and the score. "Survives" means the whole coupon is intact, as in CAL-1 §7.4. All outcomes are pre-wash.
+
+### Limits read: where do head breaks start (R1, R2, R3 to R8)
+
+- Registered: any head break at ratio 40 or lower means lower the unprintable limit (40). All copies intact at 50 and none failing at 40 means 50 is a candidate for the limit, pending a second plate. Between those, the break ratio is the first rung that fails in both copies.
+- Observed: at ratio 40 or lower, 0 failures (39 coupons including the witnesses; 36 without them). At 50, 15 of 16 survived; the one failure is C32 (R3a, short hold). No cell lost both copies at any rung up to 70.
+- Score: **No break at or below 40, so the limit is not lowered. "All copies intact at 50" is not met (15 of 16), so 50 does not become a candidate on this plate. No rung failed in both copies, so no break ratio is located. For R1, R2 and R7, no rung failed in both copies through 70 (2 of 2 survived at 70); this is not a proven boundary. For R6, 1 of 2 survived at 70.** In the standard rows alone (R1, R2, R6) all six coupons at 50 survived, but the registered read is on all copies at 50, and that is not met.
+
+### Fatigue (R3b long hold against R2 standard and R3a short hold)
+
+- Registered: the long hold (R3b) fails where the standard (R2) and short hold (R3a) survive at the same ratio, 40 or 50, means the limit depends on how many layers sit near the peak load. All three alike means no fatigue effect at these layer counts.
+- Observed: R3b (100 layers at full area) survived 4 of 4: 2 of 2 at 40, 2 of 2 at 50. R2 survived 4 of 4 at 40 and 50. R3a (5 layers at full area) survived 3 of 4: 2 of 2 at 40, 1 of 2 at 50 (C32 failed, C31 survived).
+- Score: **At ratio 40 the three variants are alike (2 of 2 each), so the registered "no fatigue effect" read holds at 40. At ratio 50 R2 and R3b are 2 of 2 and R3a is 1 of 2, so the three are not alike: neither registered condition is met at 50. The directional fatigue trigger (R3b fails where R2 and R3a survive) did not fire, because R3b survived both copies. The no-effect condition (all three alike) is also not met, because R3a lost C32.** Two copies per cell cannot assign a cause to C32 (see the next section).
+
+### Cure age (R4 late load against R2 standard)
+
+- Registered: the late-load coupon (R4) survives where the standard (R2) fails at the same ratio means a neck loaded right after it forms is weaker. Both alike means no cure-age effect at 2 mm of age. A late-load survival is stronger evidence than a late-load failure, because the late-load pads are separate until the slab.
+- Observed: R4 survived 4 of 4 (2 of 2 at 40, 2 of 2 at 50). R2 survived 4 of 4 at 40 and 50.
+- Score: **Both alike. No cure-age effect seen at 2 mm of age.** R2 never failed at 40 or 50, so this plate could not show a benefit from ramping the load. It can only show that the late-load design did no harm.
+
+### Shape (R5a strip and R5b ring against R2 square)
+
+- Registered: the strip or the ring differs from the square at the same ratio (40 or 50) means shape matters beyond area and section.
+- Observed: R5a (strip, 8 heads) survived 4 of 4. R5b (ring, 12 heads) survived 4 of 4. R2 (square, 9 heads) survived 4 of 4 at the same ratios.
+- Score: **No difference. No shape effect seen.** The strip and the ring have 8 and 12 heads, the square has 9; the registered read does not separate that from shape.
+
+### Large sections (R6 0.80 mm and R7 1.20 mm against R1 and R2)
+
+- Registered: the neck sizes (0.40, 0.55, 0.80, 1.20 mm) break at different ratios means the ratio-only model does not scale with section size.
+- Observed: R1 (0.40 mm) 14 of 14 and R2 (0.55 mm) 14 of 14, both including 2 of 2 at 70. R7 (1.20 mm waisted column) 4 of 4, including 2 of 2 at 70. R6 (0.80 mm) 9 of 10: 8 of 8 at 25, 35, 40 and 50, and 1 of 2 at 70 (C57 failed, C58 survived).
+- Score: **No neck size has a rung that failed in both copies, so a different break ratio for different sizes is not shown.** The one large-section failure is R6 at 70, in one copy of two; the other three sizes survived 6 of 6 at 70. That is a difference in outcome at 70 between R6 and the rest; one coupon of two cannot show it is real. The large-section coupons at 40 and below (R6: 6 of 6; R7: 2 of 2) all survived, so the plate gives no sign that thick sections carry load worse than the rule says at those ratios.
+
+### Controls (R8 four-head 0.55 mm against R2 nine-head 0.55 mm at 40)
+
+- Registered: R8 differs from R2 at ratio 40 means load is not shared evenly across heads, so the additive rule over-counts the heads.
+- Observed: R8 survived 2 of 2. R2 at 40 survived 2 of 2.
+- Score: **Alike. No sign that the additive rule mis-counts heads at ratio 40.** Nothing at 40 failed, so there was nothing to differ from.
+
+### Other registered reads
+
+- **Rectangles at 0.40 mm, R35 and R40 (C05, C06, C07, C08) against their square neighbours at R30 and R45.** Registered: a difference from the neighbours' trend means suspect body shape or head pitch. The contrast cannot be performed exactly as written. The R45 bodies (C09, C10) are rectangles too (about 7.40 × 10.91 mm), not squares, so R35, R40 and R45 are all rectangles (the plate design's own description of the R1 bodies, `calibration-prints.md` lines 454 to 456). Only R30 (and R25, R50, R70) are squares. Observed: all eight R1 coupons at 30 to 45 survived. That observation stands, but there is no failure anywhere in the rectangle rungs to differ from the squares, so **no difference seen; the registered square-neighbour contrast is not available as written.**
+- **Formation witnesses (R9, ratio about 6, read on the plate before washing).** Registered: a witness that does not form means that head size cannot be made, and the other cells of that size are untested. Observed [O]: C65 (0.40 mm), C66 (0.55 mm) and C67 (0.80 mm) all formed. **All three head sizes can be made, so the R1, R2 and R6 cells are valid tests and none is marked untested.** (R7 is a plain column and has no witness.)
+
+## What this sample can and cannot show
+
+- **Two copies per cell.** One copy lost out of a pair is not a rate. C32 and C57 each have a surviving twin (C31, C58) made the same way. With one failure and one survivor in the pair, the plate cannot say whether the true failure chance of that cell is high, low or zero. Both copies must fail before §12 places a break rung (the "first rung that fails in both copies"). That rule defines the break rung only. The first registered read still says any head break at ratio 40 or lower lowers the unprintable limit; none happened.
+- **C32 has no assigned cause.** R3a (5 layers at full area) has the least time at full load of the three 0.55 mm 9-head variants at ratio 50, and the long hold (R3b, 100 layers) survived both copies. That does not meet the fatigue trigger, and it does not rule fatigue out. R3a and R3b are both loaded right after the heads form, so cure age is not the difference between them; the cure-age contrast is R4 against R2, and both survived. Two copies cannot assign a cause to C32: it may be a real weakness of that cell, chance, or something about its place on the plate. This plate cannot tell these apart with one failure.
+- **Both failures are in the back zone; do not over-read it.** Of the 24 coupons at ratio 50 or higher, 8 are in the back zone and 6 of those 8 survived (see the table above). The front and middle zones had 16 such coupons and 0 failures. If two failures fell at random among those 24 coupons, both would land in the back zone about 1 time in 10 (28 of 276 pairs). That is a look at one grouping chosen after the fact (zone), with 24 coupons; copy number, row, and position along X gave no pattern at all (copy 1 and copy 2; R6 and R3a; x −92 mm and +45 mm). Back-zone coupons at 70 include two survivors (a 0.40 mm and a 0.55 mm coupon). The back zone may be harsher at high ratio; this plate does not show it. A later plate with more copies in the back zone would.
+- **Failures are only at ratio 50 and 70.** Neither failure is below the unprintable limit. A single break at 50 or 70 does not by itself define a break ratio.
+- **This is the state before washing.** "Printed" means on the plate at inspection. Washing and curing may remove more coupons, and scarring and removal ease are not known yet. The counts may change.
+- **The three zones do not isolate position.** Each cell has its copies in different zones, so zone is not tied to a cell, but zone, copy and position along X were not designed to be tested separately.
+- **Label ratio only.** The labels are against the certified patch. Against the section where the cone leaves the ball, every ratio is 8 to 11% lower for plinth's heads, so an "R70" coupon is about R62 to R64 on that definition. This does not change the reads above.
+- **One plate, one run.** The resin (ABS-like clear) and the vat temperature (30 °C) are the owner's standing conditions, and the vat film type is not recorded. One run does not separate resin, vat film, or temperature from the support design. This plate is not a print candidate for any model and is not a global rule.
+
+## Bearing on the limits
+
+This plate does not change the limits by itself. The unprintable limit stays at 40 (owner ruling, 2026-11-10). The plate's evidence (all loaded coupons at ratio 25 to 45 printed, 40 of 40) informed the owner's ruling of 2026-11-11 that raises the design limit from 12 to 20 (see "Owner rulings"). The design limit of 20 sits below every ratio tested. This is what the evidence says.
+
+- **Unprintable limit, 40.** At ratio 40 exactly: 20 printed, 0 failed, across ten cells, with every variant and every neck size from 0.40 to 1.20 mm. At ratio 25 to 45: 40 printed, 0 failed. Above 40 (45, 50, 70): 28 coupons, 26 printed, 2 failed, and both failures are at 50 or higher. So no coupon failed at or below the limit, and nothing here pulls the limit lower. The rule in §12 for moving the limit up (every copy at 50 intact) is not met, so nothing here supports raising it either. Ratio 70 saw 7 of 8 survive, so 40 leaves margin below where this plate found any break, and the plate does not locate a break ratio.
+- **Design limit, 20 (was 12).** The plate does not test 12 or 20. The lowest ratio carrying supported peel load on this plate is 25 (6 of 6 printed). The witnesses at ratio about 6 formed, but they show only that the head forms, not how it carries load. Everything at 25 and above survived except the two coupons at 50 and 70. The design limit of 20 therefore sits below every ratio tested, and the plate cannot say how much margin 20 gives.
+- **Resin.** PRD P4 notes that older losses at lower ratios (plate 6 on black resin; H2, resin not recorded) conflict with newer survivals on ABS-like clear, and that CAL-2 was meant to help settle it. This print used ABS-like clear, the same as CAL-1 and Round 25, so these survivors add to the newer clear-resin evidence. The plate does not test black resin, so it does not show whether resin was the cause of the older losses.
+
+## Pending
+
+Not in yet. Fill these in when the owner reports; do not change anything above except the "Printed" counts if washing or curing removes coupons.
+
+- Wash and cure: coupons lost or damaged in washing or curing (which numbers), and the witnesses' fate after removal. A witness lost after it was read on the plate counts as nothing (§12).
+- Scarring on the body faces where supports were removed, by coupon, for the necks (0.40, 0.55, 0.80, 1.20 mm) and the ratios.
+- Support removal ease by zone and neck size (easy, normal, hard), as in PRD §6.4.
+- The break site on C57 and C32, close up: whether it is at the cone tip, the ball, or the body face. The owner's report is "at the support-to-body connection".
+
+## Photos
+
+Copies are in `plate-photos/cal-2/`.
+
+- Plate from above, after printing and before washing: `plate-photos/cal-2/plate-above-after-print.jpg` (2400 × 1391 px). Two positions in this photo show faint support columns with no body on them; the owner's report names C57 and C32 as the two detached coupons. The photo is not yet matched to the plate map (`plate-map.png` in `plinth-review/2026-11-10-cal-2/`), so these positions are not tied to coupon numbers here.
+- Not yet taken: close-up of the C57 and C32 support columns, and the twins C58 and C31 for comparison.
+
+## Owner rulings
+
+2026-11-11:
+
+- **Design limit raised from 12 to 20; the unprintable limit stays at 40.** Owner: "I think we probably can raise the target from 12 given these data; perhaps we should target 20, and limit at 40". These limits are established on ABS-like clear resin only. Older black-resin plates lost heads as low as ratio 9.
+- **Keep this plate as the resin check.** Owner: "Let's keep this plate design around; if/when I next fill the vat with black resin we can use this to calibrate whether that resin works as well." To repeat it: regenerate with `cal2-plate fixtures/calibration/cal2.json <out>` (byte-identical project, SHA-256 `7260e91904c8ce59c6b1cf011f523b28f1e2a0901b6e991c670a40a944a09be1`), reslice with the new resin's exposure, check the file with `cal2-goo`, and score the result against this document.

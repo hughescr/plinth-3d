@@ -405,7 +405,7 @@ fn load_ratios_are_met_or_located(doc: &Json) -> bool {
                 Some(Json::Uint(r)) => *r as f64,
                 _ => return false,
             };
-            if ratio <= 12.0 {
+            if ratio <= plinth_support::load::DESIGN_RATIO {
                 return true;
             }
             let layer = r.get("worst_layer").and_then(Json::as_u64);
@@ -437,15 +437,15 @@ fn load_ratios_are_met_or_located(doc: &Json) -> bool {
 fn named_load_blocker_test_rejects_prose_and_wrong_locations() {
     let parse = |s: &str| jsonin::parse(s.as_bytes()).unwrap();
     let mut doc = parse(
-        r#"{"fr21":{"load":{"largest_ratios":[{"tributary_ratio":13.0,"worst_layer":42,"contact":3}],"sharing_models":"load intervention unprintable"},"warnings":[]}}"#,
+        r#"{"fr21":{"load":{"largest_ratios":[{"tributary_ratio":21.0,"worst_layer":42,"contact":3}],"sharing_models":"load intervention unprintable"},"warnings":[]}}"#,
     );
     assert!(!load_ratios_are_met_or_located(&doc));
     doc = parse(
-        r#"{"fr21":{"load":{"largest_ratios":[{"tributary_ratio":13.0,"worst_layer":42,"contact":3}]},"warnings":[{"class":"intervention","kind":"load ratio","layers":[41],"contacts":[2],"message":"add a support"}]}}"#,
+        r#"{"fr21":{"load":{"largest_ratios":[{"tributary_ratio":21.0,"worst_layer":42,"contact":3}]},"warnings":[{"class":"intervention","kind":"load ratio","layers":[41],"contacts":[2],"message":"add a support"}]}}"#,
     );
     assert!(!load_ratios_are_met_or_located(&doc));
     doc = parse(
-        r#"{"fr21":{"load":{"largest_ratios":[{"tributary_ratio":13.0,"worst_layer":42,"contact":3}]},"warnings":[{"class":"intervention","kind":"load ratio","layers":[42],"contacts":[],"message":"add a support"}]}}"#,
+        r#"{"fr21":{"load":{"largest_ratios":[{"tributary_ratio":21.0,"worst_layer":42,"contact":3}]},"warnings":[{"class":"intervention","kind":"load ratio","layers":[42],"contacts":[],"message":"add a support"}]}}"#,
     );
     assert!(load_ratios_are_met_or_located(&doc));
 }

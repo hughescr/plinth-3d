@@ -416,7 +416,7 @@ The answers of 2026-11-01/02 are recorded in §6.5 and §7.3. The last two were 
 
 Status: generated 2026-11-10 (second matrix, after the owner and orchestrator rulings of the same day) and not yet printed. Command: `cal2-plate fixtures/calibration/cal2.json <empty-directory>` (crate `plinth-calibration`; spec and rules in `cal2_spec.rs`, shapes in `cal2_shape.rs`, separate from the CAL-1 spec, which is unchanged). Output: one `.chitubox`, `cal2-report.json`, `plate-map.svg` (the review folder also holds it as `plate-map.png`).
 
-**Question.** The additive ratio is R = mm² of model area that peels in one layer ÷ mm² of total limiting section. Where do real coupons break between R 25 and R 70, and does the answer depend on body size, body shape, how many layers sit near the peak load, or how old a neck is when it is first loaded? The design limit is 12 and the unprintable limit is 40 (`limits.toml`, `warn.rs`).
+**Question.** The additive ratio is R = mm² of model area that peels in one layer ÷ mm² of total limiting section. Where do real coupons break between R 25 and R 70, and does the answer depend on body size, body shape, how many layers sit near the peak load, or how old a neck is when it is first loaded? The design ratio is 20 (P5, owner ruling 2026-11-11 after CAL-2) and the unprintable limit is 40 (`warn.rs`; `limits.toml` holds neither).
 
 **Ratio definition: plinth's load model, exactly.**
 

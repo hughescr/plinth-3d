@@ -10,7 +10,7 @@
 //!   tip cone (the written cone's section where the cone leaves the contact ball). A contact
 //!   counts from the layer of a point of its patch.
 //! * **Ratio.** `X(k) = A_k / sum B_i` over the contacts counted at layer `k`, and the
-//!   utilisation `X / 12` (design ratio P5 = 12). `X > 40` (the owner's unprintable limit)
+//!   utilisation `X / 20` (design ratio P5 = 20). `X > 40` (the owner's unprintable limit)
 //!   or a positive area over no counted section is the unprintable trigger.
 //!
 //! What it does not do: it treats the whole model as one load group (the per-component split
@@ -24,7 +24,7 @@ use crate::patch::PatchOut;
 use crate::scene::{LAYER_MM, Scene};
 
 /// The design ratio (PRD P5).
-pub const DESIGN_RATIO: f64 = 12.0;
+pub const DESIGN_RATIO: f64 = 20.0;
 /// Beyond this ratio a component is unprintable as is: the owner's limit (ruling 2026-11-10),
 /// not a measured breaking point (PRD P4).
 pub const UNPRINTABLE_RATIO: f64 = 40.0;
@@ -221,10 +221,10 @@ mod tests {
     use crate::testkit::{self as kit, test_limits};
 
     #[test]
-    fn ninety_square_millimetres_over_two_of_section_is_ratio_45_utilisation_3_75_and_unprintable()
+    fn ninety_square_millimetres_over_two_of_section_is_ratio_45_utilisation_2_25_and_unprintable()
     {
         let (x, u, trigger) = ratio(90.0, 2.0);
-        assert!((x - 45.0).abs() < 1e-12 && (u - 3.75).abs() < 1e-12 && trigger);
+        assert!((x - 45.0).abs() < 1e-12 && (u - 2.25).abs() < 1e-12 && trigger);
         assert!(!ratio(60.0, 2.0).2, "ratio 30 is below the limit of 40");
         // Either side of the limit: exactly 40 is not beyond it.
         assert!(!ratio(80.0, 2.0).2);

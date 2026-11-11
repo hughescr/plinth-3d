@@ -9,7 +9,7 @@ mod spread_search;
 mod tests;
 use sharing::{load_targets, replay_improves};
 
-use super::{PlanSettings, Proposal, Termination, layout_from_contacts, unavailable};
+use super::{P5, PlanSettings, Proposal, Termination, layout_from_contacts, unavailable};
 use crate::construct::{CandId, ColumnCheck, ContactCandidate, Contacts, PlanBuilder, Quote};
 use crate::load::needs::{NeedPoint, NeedsMap, SiteTag};
 use crate::load::{self, LayoutView, ModelLayers, SiteClass};
@@ -73,7 +73,7 @@ pub fn head_candidate(
         - 3.0615 * f64::from(neck).powi(2) / std::f64::consts::PI)
         .max(0.))
     .sqrt() as f32;
-    let column = ((load / 12.0 / 3.0615).sqrt() as f32).next_up().max(0.25);
+    let column = ((load / P5 / 3.0615).sqrt() as f32).next_up().max(0.25);
     let joint_r = 1.04 * (1.5 * neck).max(column);
     ContactCandidate {
         id: CandId(id),
@@ -140,7 +140,7 @@ fn seed_load(target: Target, replacing: bool) -> (f64, f32) {
     } else {
         target.load.max(3.0)
     };
-    let neck = (((load / 12. / 2.85).sqrt() * 1000.0).ceil() / 1000.0)
+    let neck = (((load / P5 / 2.85).sqrt() * 1000.0).ceil() / 1000.0)
         .clamp(0.053, f64::from(MAX_NECK)) as f32;
     (load, neck)
 }
@@ -669,9 +669,7 @@ impl Cache {
             // sizing certificate shrink. A failed resize keeps the contact and
             // its load target, rather than banning a perfectly usable site.
             let estimate = *envelope * 1.1 + 1.0;
-            let radius = ((estimate / 12.0 / 3.0615).sqrt() as f32)
-                .next_up()
-                .max(0.25);
+            let radius = ((estimate / P5 / 3.0615).sqrt() as f32).next_up().max(0.25);
             for fan in FANS {
                 for reach in REACHES {
                     let mut cand = c.candidate;
@@ -764,7 +762,7 @@ impl Cache {
         let mut tasks = Vec::new();
         let mut before = Vec::new();
         for ((x, c), load) in chosen.iter().zip(&detail.contacts).zip(loads) {
-            if c.ratio <= 12.0 {
+            if c.ratio <= P5 {
                 continue;
             }
             let key = site_key(x.site.xyz);
@@ -776,8 +774,8 @@ impl Cache {
             *envelope = envelope.max(load);
             // Include the layer-specific shortfall, not only the full-patch load.
             let load = (*envelope)
-                .max(x.quote.full_capacity() * c.ratio / 12.0)
-                .max(12.0 * 2.85 * f64::from(x.candidate.neck + 0.001).powi(2));
+                .max(x.quote.full_capacity() * c.ratio / P5)
+                .max(P5 * 2.85 * f64::from(x.candidate.neck + 0.001).powi(2));
             tasks.push((
                 Target {
                     xyz: x.site.xyz,
@@ -1013,7 +1011,7 @@ fn island_capacity_improves(
             new = new.max(a.x_group);
         }
     }
-    old > 12.0 && new + 1e-6 < old
+    old > P5 && new + 1e-6 < old
 }
 
 pub(super) fn run(
@@ -1091,7 +1089,7 @@ pub(super) fn run(
         // at the end, not eight times with transient tributary assignments.
         if needs_targets(layers, sites, &chosen, settings, shift).is_empty()
             && !chosen.is_empty()
-            && detail.contacts.iter().all(|c| c.ratio <= 12.0)
+            && detail.contacts.iter().all(|c| c.ratio <= P5)
             && detail
                 .report
                 .warnings
@@ -1152,7 +1150,7 @@ fn finish(
     if routing.is_err() {
         termination = Termination::RouteFailed;
     } else if termination == Termination::Satisfied
-        && (detail.contacts.iter().any(|c| c.ratio > 12.0)
+        && (detail.contacts.iter().any(|c| c.ratio > P5)
             || !layers.structure.needs_anchor().into_iter().all(|island| {
                 chosen.iter().any(|c| {
                     let z = c.site.xyz[2] + shift;

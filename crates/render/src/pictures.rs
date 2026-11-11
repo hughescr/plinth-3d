@@ -3,7 +3,7 @@
 //! a legend and a caption on the image, so it explains itself.
 
 use plinth_support::load::needs::SiteTag;
-use plinth_support::load::{LoadWarning, SiteClass, WarningClass};
+use plinth_support::load::{DESIGN_RATIO, LoadWarning, SiteClass, WarningClass};
 use plinth_support::report_data::{LoadData, ReportData};
 
 use crate::canvas::{BACKGROUND, Image, Rect, Rgb, TEXT, View};
@@ -722,9 +722,9 @@ fn palette(i: u32) -> Rgb {
 }
 
 fn ratio_colour(r: f64) -> Rgb {
-    if r > 12.0 {
+    if r > DESIGN_RATIO {
         PATCH
-    } else if r >= 8.0 {
+    } else if r >= DESIGN_RATIO * 2.0 / 3.0 {
         [235, 205, 60]
     } else {
         GREEN
@@ -737,7 +737,7 @@ fn p07_worst_load(c: &Ctx<'_>) -> Picture {
     };
     let peak = ld.detail.peak;
     let cap = format!(
-        "(a) Layer peel and 12 x active sections; capacity alone does not prove equilibrium. (b) Layer {}: source colours are nearest-3D TRIBUTARY DIAGNOSTIC ONLY. Labels show spring reaction / available section (provisional when unresolved), NOT the coloured source assignment. (c) Rigid-carrier/additive sizing ratios; colour never clears unresolved equilibrium or local transfer. See FR-21 contact numbers in picture 02 (all contacts), picture 04 (rib close-up), and activation histories.",
+        "(a) Layer peel and {DESIGN_RATIO} x active sections; capacity alone does not prove equilibrium. (b) Layer {}: source colours are nearest-3D TRIBUTARY DIAGNOSTIC ONLY. Labels show spring reaction / available section (provisional when unresolved), NOT the coloured source assignment. (c) Rigid-carrier/additive sizing ratios; colour never clears unresolved equilibrium or local transfer. See FR-21 contact numbers in picture 02 (all contacts), picture 04 (rib close-up), and activation histories.",
         peak.map_or_else(
             || "(none)".to_owned(),
             |p| format!(
@@ -748,13 +748,19 @@ fn p07_worst_load(c: &Ctx<'_>) -> Picture {
             )
         )
     );
+    let mid = DESIGN_RATIO * 2.0 / 3.0;
+    let (low, mid_band, high) = (
+        format!("ratio < {mid:.1}"),
+        format!("{mid:.1} to {DESIGN_RATIO}"),
+        format!("over {DESIGN_RATIO}"),
+    );
     let (mut img, r) = page(
         "7  Worst load",
         &cap,
         &[
-            (GREEN, "ratio < 8"),
-            ([235, 205, 60], "8 to 12"),
-            (PATCH, "over 12"),
+            (GREEN, low.as_str()),
+            ([235, 205, 60], mid_band.as_str()),
+            (PATCH, high.as_str()),
         ],
     );
     let a = Rect {
@@ -872,7 +878,7 @@ fn chart(img: &mut Image, r: Rect, c: &Ctx<'_>, ld: &LoadData) {
     img.label(
         x1 - 330,
         y1 + 4,
-        "red: peel area   green: 12 x active capacity",
+        &format!("red: peel area   green: {DESIGN_RATIO} x active capacity"),
         1,
         TEXT,
     );

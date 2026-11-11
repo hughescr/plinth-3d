@@ -89,15 +89,15 @@ fn tilted_growing_strip_new_contact_is_not_sized_by_nearest_3d_tributary() {
     assert!(g.equilibrium_assessed, "{g:?}");
     let s = g.states.iter().find(|s| s.contact == 3).unwrap();
     assert!(
-        s.ratios.tributary > 12.,
+        s.ratios.tributary > DESIGN_RATIO,
         "nearest-3D really overloads the new patch: {s:?}"
     );
     assert!(
-        s.ratios.rigid_lever < 12. && s.ratios.additive < 12.,
+        s.ratios.rigid_lever < DESIGN_RATIO && s.ratios.additive < DESIGN_RATIO,
         "{s:?}"
     );
     assert!(
-        d.contacts.iter().all(|c| c.ratio < 12.),
+        d.contacts.iter().all(|c| c.ratio < DESIGN_RATIO),
         "tributary must never size a contact"
     );
     assert!(
@@ -130,7 +130,7 @@ fn a_near_collinear_contact_row_is_unresolved_even_with_low_ratios_and_balanced_
     ]);
     let d = analyse_full(&stack, &v, &Extras::default());
     let g = &d.groups[0];
-    assert!(g.x_group < 12. && g.force_residual < 1e-6);
+    assert!(g.x_group < DESIGN_RATIO && g.force_residual < 1e-6);
     assert!(
         g.condition < lever::CONDITION_LIMIT
             && g.position_sensitivity > lever::SENSITIVITY_LIMIT
@@ -200,7 +200,7 @@ fn a_separate_rib_island_cannot_borrow_main_carrier_capacity_before_merger() {
         4,
         "pooling becomes legal only at the merger layer"
     );
-    assert!(merged.x_group < 12.);
+    assert!(merged.x_group < DESIGN_RATIO);
     let join = d
         .report
         .warnings

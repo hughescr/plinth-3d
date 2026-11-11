@@ -16,13 +16,13 @@ fn search_settings_pin_owner_process_and_starting_values() {
     let s = PlanSettings::default();
     assert_eq!(s.max_rounds, 8);
     assert!((s.coverage_reach_mm - 3.).abs() < 1e-12);
-    assert!((load::DESIGN_RATIO - 12.).abs() < 1e-12);
+    assert!((load::DESIGN_RATIO - 20.).abs() < 1e-12);
 }
 
 #[test]
 fn column_sizing_uses_the_later_maximum_not_the_early_worst_ratio() {
     let detail = load::LoadDetail {
-        report: load::LoadReport::unverified(12.0, "controlled sizing fixture"),
+        report: load::LoadReport::unverified(load::DESIGN_RATIO, "controlled sizing fixture"),
         contacts: vec![load::ContactLoad {
             contact: 0,
             component: Some(0),
@@ -208,7 +208,7 @@ fn e2e_rounds_round25_private_planner_reports_exhaustion_honestly() {
         .fold(0.0, f64::max);
     assert!(
         p.load.sections.iter().all(|s| {
-            s.ratios.rigid_lever.max(s.ratios.additive) <= 12.0
+            s.ratios.rigid_lever.max(s.ratios.additive) <= load::DESIGN_RATIO
                 || p.load.warnings.iter().any(|w| {
                     w.class != load::WarningClass::Information
                         && (w.kind.contains("load") || w.kind.contains("ratio"))

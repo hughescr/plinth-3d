@@ -109,10 +109,10 @@ fn successful_private_column_resize_rechecks_before_replacement() {
         next_id: 1,
         ..Cache::default()
     };
-    cache.size_columns(&builder, &mut chosen, &[4.]);
+    cache.size_columns(&builder, &mut chosen, &[7.]);
     assert_eq!(chosen.len(), 1);
     assert!(chosen[0].candidate.joint_r > old);
-    assert!(chosen[0].column.radius() >= chosen[0].quote.contact().column_radius(4.));
+    assert!(chosen[0].column.radius() >= chosen[0].quote.contact().column_radius(7.));
     assert!(cache.blocked.is_empty());
 }
 
@@ -151,7 +151,7 @@ fn overloaded_seed_grows_before_any_sharing_neighbour_despite_capped_column_enve
     let (builder, mut chosen) = fixture();
     let old_radius = chosen[0].candidate.ball_r;
     let before = seed_load(&chosen);
-    assert!(before.contacts[0].ratio > 12.0);
+    assert!(before.contacts[0].ratio > P5);
     let mut cache = Cache {
         next_id: 1,
         ..Cache::default()
@@ -184,7 +184,7 @@ fn overloaded_seed_grows_before_any_sharing_neighbour_despite_capped_column_enve
     );
     assert!(after.contacts[0].ratio < before.contacts[0].ratio);
     assert!(
-        after.contacts[0].ratio > 12.0,
+        after.contacts[0].ratio > P5,
         "remaining overload stays visible"
     );
     assert!(chosen[0].quote.contact().patch().upper() <= 0.48);
@@ -209,7 +209,7 @@ fn private_column_resize_retains_the_original_for_atomic_trial_rollback() {
         next_id: 1,
         ..Cache::default()
     };
-    cache.size_columns(&builder, &mut chosen, &[5.0]);
+    cache.size_columns(&builder, &mut chosen, &[9.0]);
     assert_ne!(
         chosen[0].candidate.id, original,
         "the witness must resize a column"
@@ -281,9 +281,9 @@ fn load_only_keep_rule_requires_improvement_and_refuses_a_worse_violation_elsewh
         "genuine additive improvement is measured"
     );
     before.groups[0].x_group = 29.24;
-    after.groups[0].x_group = 11.75;
-    before.groups[1].x_group = 18.66;
-    after.groups[1].x_group = 20.14;
+    after.groups[0].x_group = 19.5;
+    before.groups[1].x_group = 22.0;
+    after.groups[1].x_group = 24.0;
     assert!(
         !replay_improves(&before, &after, (0, 0)),
         "load-only additions cannot worsen an existing intervention numerically"
@@ -293,8 +293,8 @@ fn load_only_keep_rule_requires_improvement_and_refuses_a_worse_violation_elsewh
         !replay_improves(&before, &after, (0, 0)),
         "no new unprintable exposure"
     );
-    before.groups[1].x_group = 11.88;
-    after.groups[1].x_group = 12.10;
+    before.groups[1].x_group = 19.8;
+    after.groups[1].x_group = 20.2;
     assert!(
         !replay_improves(&before, &after, (0, 0)),
         "no new intervention exposure"
@@ -314,12 +314,12 @@ fn mandatory_island_capacity_is_not_an_optional_parent_sharing_refinement() {
     before.groups[0].x_group = 29.24;
     let mut parent = before.groups[0].clone();
     parent.component = 1;
-    parent.x_group = 11.88;
+    parent.x_group = 19.8;
     parent.equilibrium_assessed = true;
     before.groups.push(parent);
     let mut after = before.clone();
-    after.groups[0].x_group = 11.75;
-    after.groups[1].x_group = 12.10;
+    after.groups[0].x_group = 19.5;
+    after.groups[1].x_group = 20.2;
     after.groups[1].equilibrium_assessed = false;
     assert!(
         !replay_improves(&before, &after, (0, 0)),
@@ -339,7 +339,7 @@ fn mandatory_island_capacity_is_not_an_optional_parent_sharing_refinement() {
         !island_capacity_improves(&before, &after, 0),
         "never create another unprintable deficit"
     );
-    after.groups[1].x_group = 12.10;
+    after.groups[1].x_group = 20.2;
     after.groups[0].x_group = 29.24;
     assert!(
         !island_capacity_improves(&before, &after, 0),
@@ -454,15 +454,15 @@ fn load_only_replay_checks_each_old_section_and_the_requested_exposure() {
         "an unrelated improvement cannot retain this target"
     );
     after.groups[0].x_group *= 0.8;
-    before.groups[1].section_states[0].ratios.rigid_lever = 13.0;
-    after.groups[1].section_states[0].ratios.rigid_lever = 24.0;
+    before.groups[1].section_states[0].ratios.rigid_lever = 21.0;
+    after.groups[1].section_states[0].ratios.rigid_lever = 28.0;
     assert!(
         !replay_improves(&before, &after, (0, 0)),
         "an existing overload cannot rise within the same class"
     );
-    after.groups[1].section_states[0].ratios.rigid_lever = 13.0;
-    before.groups[1].section_states[0].ratios.equal_share = 14.0;
-    after.groups[1].section_states[0].ratios.equal_share = 15.0;
+    after.groups[1].section_states[0].ratios.rigid_lever = 21.0;
+    before.groups[1].section_states[0].ratios.equal_share = 22.0;
+    after.groups[1].section_states[0].ratios.equal_share = 23.0;
     assert!(
         !replay_improves(&before, &after, (0, 0)),
         "equal-share violations are numerical too"
@@ -667,7 +667,7 @@ fn early_rejection_uses_only_new_fixed_patch_equal_share() {
         .iter_mut()
         .find(|s| s.part == patch)
         .unwrap();
-    s.ratios.equal_share = 13.0;
+    s.ratios.equal_share = 21.0;
     assert!(spread_search::new_patch_equal_overload(&detail, &layout, 0));
     assert!(
         !spread_search::new_patch_equal_overload(&detail, &layout, 1),

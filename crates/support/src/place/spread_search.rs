@@ -33,7 +33,7 @@ impl Search<'_> {
                     && detail
                         .groups
                         .iter()
-                        .any(|g| g.component == c && g.layer == k && g.x_group > 12.0)
+                        .any(|g| g.component == c && g.layer == k && g.x_group > P5)
             })
         });
         let mut baseline = None;
@@ -47,7 +47,7 @@ impl Search<'_> {
                     && detail
                         .groups
                         .iter()
-                        .any(|g| g.component == c && g.x_group > 12.0)
+                        .any(|g| g.component == c && g.x_group > P5)
             });
             // Do not replay doomed optional trials on a transient carrier that
             // mandatory placement or tip growth will change again next round.
@@ -323,10 +323,10 @@ fn exclude_own_overloads(
         for s in &g.section_states {
             if s.contact as usize >= count
                 && (!early_reject || is_patch(layout, s))
-                && (s.ratios.equal_share > 12.0 + 1e-7
+                && (s.ratios.equal_share > P5 + 1e-7
                     || (!early_reject
                         && g.equilibrium_assessed
-                        && s.ratios.rigid_lever > 12.0 + 1e-7))
+                        && s.ratios.rigid_lever > P5 + 1e-7))
             {
                 let c = &chosen[s.contact as usize];
                 if cache.sharing_tried.insert(site_key(c.site.xyz)) {
@@ -376,7 +376,7 @@ fn first_new_patch_overload<'a>(
             .find(|s| {
                 s.contact as usize >= first_new
                     && is_patch(layout, s)
-                    && s.ratios.equal_share > 12.0 + 1e-7
+                    && s.ratios.equal_share > P5 + 1e-7
             })
             .map(|s| (g, s))
     })

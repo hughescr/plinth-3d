@@ -130,7 +130,7 @@ pub fn collect_report_data(
         process: rd::ProcessValues {
             layer_height_mm: 0.05,
             layer_height_source: "owner profile [O]".into(),
-            design_ratio: 12.,
+            design_ratio: load::DESIGN_RATIO,
             h1_admission_mm2: 0.48,
             coverage_reach_mm: 3.,
             overhang_deg: 45.,

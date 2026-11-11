@@ -226,7 +226,7 @@ pub enum LoadStatus {
 pub struct LoadReport {
     /// Whether the numbers below are results.
     pub status: LoadStatus,
-    /// The design ratio the sections were judged against (P5: 12).
+    /// The design ratio the sections were judged against (P5: 20).
     pub design_ratio: f64,
     /// One entry per layer.
     pub layers: Vec<LayerLoad>,

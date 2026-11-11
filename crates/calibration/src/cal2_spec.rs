@@ -9,7 +9,7 @@ pub const LAYER: f64 = 0.05;
 pub const RATIOS: [f64; 7] = [25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 70.0];
 /// Fatigue and cure-age rows run at these two ratios.
 pub const PAIR: [f64; 2] = [40.0, 50.0];
-/// Body ratio of a formation witness: half the design limit of 12.
+/// Body ratio of a formation witness: 6, fixed by the CAL-2 plate design, well below the design ratio.
 pub const WITNESS_RATIO: f64 = 6.0;
 /// Layers a short hold keeps at full area before the body steps in to its stem.
 pub const SHORT_FULL_LAYERS: usize = 5;

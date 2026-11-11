@@ -222,8 +222,10 @@ pub const UNCERTAINTY: [&str; 4] = [
      ratio of about 25 was read by eye on flat horizontal caps 2 to 12.5 mm across with \
      vertical arms 4 to 6 mm long and one resin, and fails at the narrowest section above \
      the contact. The cap tests did not cover angled, bent or merged members, or off-axis loads.",
-    "The design ratio of 12 is the owner's starting policy (P5), not a claim that 12 is safe or \
-     needed. Heads were lost at 9 on one plate; another way of measuring gives 11 to 14.",
+    "The design ratio of 20 is the owner's policy (P5, ruling 2026-11-11 after CAL-2), not a \
+     claim that 20 is safe or needed. On ABS-like clear resin at 30 °C every CAL-2 coupon at \
+     ratio 45 or below printed (40 of 40); failures came only at 50 and 70. Heads were lost at \
+     9 on one older plate with another resin; another way of measuring gives 11 to 14.",
     "Load sharing among up to 6 arms within about 14 mm under a stiff part was measured (P6). \
      More arms, wider spans and off-centre loads were not.",
     "The load is taken as proportional to the full cured layer area, carried over from caps to \
