@@ -55,6 +55,12 @@ fn main() -> ExitCode {
         Err(e) => return usage(&e),
     };
     let wrote = emit_report(opts.report.as_deref(), &report::to_json(&cfg, &finished));
-    let all_published = finished.published() == finished.models.len();
+    // A review file kept although the checker found a rule violated still counts as a
+    // failure for the exit status: the file exists to be looked at, nothing more.
+    let all_published = finished.published() == finished.models.len()
+        && !finished
+            .models
+            .iter()
+            .any(|m| m.review.is_some_and(|r| r.checker_failed));
     ExitCode::from(u8::from(!(all_published && wrote)))
 }

@@ -20,7 +20,7 @@ plinth-emit.workspace = true
 plinth-chitubox.workspace = true
 plinth-render.workspace = true
 lexopt.workspace = true
-nix = { workspace = true, features = ["fs"] }
+nix = { workspace = true, features = ["fs", "signal"] }
 
 [lints]
 workspace = true

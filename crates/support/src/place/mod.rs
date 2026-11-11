@@ -49,12 +49,24 @@ pub struct PlanSettings {
     pub max_rounds: u32,
     /// Maximum distance to an earlier contact, mm.
     pub coverage_reach_mm: f64,
+    /// Wall-clock deadline of the search (review mode). `None`: no bound. The search checks
+    /// it between phases and between sharing trials, then stops with the contacts chosen so
+    /// far ([`Termination::TimeBudget`]); a single probe batch in flight is not interrupted.
+    pub deadline: Option<std::time::Instant>,
+    /// Test hook, never set outside tests: the deadline fires exactly at the first check
+    /// made in the phase of this name (`"round start"`, `"tip growth"`,
+    /// `"anchoring and coverage"`, `"column sizing"`, `"load sharing"` or `"site search"`),
+    /// whatever the clock says. It lets a test force the stop-at-budget path at a chosen
+    /// point, independent of machine speed. `None`: no forced stop.
+    pub stop_at_phase: Option<&'static str>,
 }
 impl Default for PlanSettings {
     fn default() -> Self {
         Self {
             max_rounds: 8,
             coverage_reach_mm: 3.0,
+            deadline: None,
+            stop_at_phase: None,
         }
     }
 }
@@ -83,6 +95,9 @@ pub enum Termination {
     ProvedNoLegalAnchor,
     /// Invalid or unavailable inputs prevented planning.
     NotBuilt,
+    /// The wall-clock deadline of [`PlanSettings::deadline`] passed; the contacts chosen so
+    /// far are returned and may leave needs unresolved.
+    TimeBudget,
 }
 /// Private proposal. The caller must probe and atomically commit it before routing.
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +118,9 @@ pub struct Proposal {
     pub needs: NeedsMap,
     /// Admission rejections counted by reason.
     pub rejections: Vec<(String, u64)>,
+    /// The search phase that was running when the deadline passed (`None`: it did not).
+    /// Set even when the final route replay then failed and `termination` says so.
+    pub stopped_at_budget: Option<&'static str>,
 }
 
 /// Build a classified site pool, seed first-layer islands, cover overhang and reach,

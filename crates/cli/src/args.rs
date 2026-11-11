@@ -3,7 +3,12 @@
 //! ```text
 //! plinth [--max-threads N] --out-dir DIR [--report FILE] [--checker FILE] [--limits FILE]
 //!        [--candidate] <input.stl>...
+//! plinth ... --review-construction [--plan-budget SECS] [--checker-timeout SECS] <input.stl>...
 //! ```
+//!
+//! `--review-construction` builds supports for any already posed STL (resting up +Z) to LOOK
+//! at; the output is never a print candidate and the flag cannot be combined with
+//! `--candidate`.
 //!
 //! There is no flag that replaces an existing output file (PRD FR-37).
 
@@ -17,7 +22,14 @@ pub const DEFAULT_MAX_THREADS: usize = 8;
 pub const MAX_THREADS_LIMIT: usize = 256;
 
 /// The usage line.
-pub const USAGE: &str = "usage: plinth [--max-threads N] --out-dir DIR [--report FILE] [--checker FILE] [--limits FILE] [--candidate] <input.stl>...";
+pub const USAGE: &str = "usage: plinth [--max-threads N] --out-dir DIR [--report FILE] [--checker FILE] [--limits FILE] [--candidate | --review-construction [--plan-budget SECS] [--checker-timeout SECS]] <input.stl>...";
+
+/// Default wall-clock budget of review-mode planning, seconds.
+pub const DEFAULT_PLAN_BUDGET_SECS: f64 = 120.0;
+/// Default checker timeout in review mode, seconds.
+pub const DEFAULT_CHECKER_TIMEOUT_SECS: f64 = 300.0;
+/// Largest accepted budget or timeout, seconds.
+const MAX_SECS: f64 = 86_400.0;
 
 /// What the command line asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +49,12 @@ pub struct Options {
     /// Offer print candidates only: publish a file only when the checker passed it with no
     /// applicable rule unverified or violated.
     pub candidate: bool,
+    /// Review mode: supports for any posed STL, to look at, never a print candidate.
+    pub review: bool,
+    /// `--plan-budget`, when given (review mode only).
+    pub plan_budget: Option<std::time::Duration>,
+    /// `--checker-timeout`, when given (review mode only).
+    pub checker_timeout: Option<std::time::Duration>,
 }
 
 /// Where the checker program and `limits.toml` are, from the path of the running `plinth`
@@ -64,6 +82,17 @@ fn threads(text: &str) -> Result<usize, String> {
     }
 }
 
+fn seconds(flag: &str, text: &str) -> Result<std::time::Duration, String> {
+    match text.parse::<f64>() {
+        Ok(s) if s.is_finite() && s > 0.0 && s <= MAX_SECS => {
+            Ok(std::time::Duration::from_secs_f64(s))
+        }
+        _ => Err(format!(
+            "{flag} must be a number of seconds above 0 and at most {MAX_SECS}, got '{text}'"
+        )),
+    }
+}
+
 fn value(p: &mut lexopt::Parser) -> Result<OsString, String> {
     p.value().map_err(|e| e.to_string())
 }
@@ -83,6 +112,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
         checker: None,
         limits: None,
         candidate: false,
+        review: false,
+        plan_budget: None,
+        checker_timeout: None,
     };
     let mut have_out = false;
     while let Some(arg) = p.next().map_err(|e| e.to_string())? {
@@ -99,6 +131,15 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
             Long("checker") => o.checker = Some(value(&mut p)?.into()),
             Long("limits") => o.limits = Some(value(&mut p)?.into()),
             Long("candidate") => o.candidate = true,
+            Long("review-construction") => o.review = true,
+            Long("plan-budget") => {
+                let text = value(&mut p)?.string().map_err(|e| e.to_string())?;
+                o.plan_budget = Some(seconds("--plan-budget", &text)?);
+            }
+            Long("checker-timeout") => {
+                let text = value(&mut p)?.string().map_err(|e| e.to_string())?;
+                o.checker_timeout = Some(seconds("--checker-timeout", &text)?);
+            }
             Value(v) => o.inputs.push(v.into()),
             other => return Err(other.unexpected().to_string()),
         }
@@ -108,6 +149,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
     }
     if o.inputs.is_empty() {
         return Err("no input files".into());
+    }
+    if o.review && o.candidate {
+        return Err(
+            "--review-construction cannot be combined with --candidate: review files are never print candidates".into(),
+        );
+    }
+    if !o.review && (o.plan_budget.is_some() || o.checker_timeout.is_some()) {
+        return Err("--plan-budget and --checker-timeout need --review-construction".into());
     }
     Ok(o)
 }
@@ -140,6 +189,52 @@ mod tests {
                 .unwrap()
                 .candidate
         );
+    }
+
+    #[test]
+    fn review_mode_never_combines_with_candidate_and_owns_its_budgets() {
+        let o = parse(a(&["--review-construction", "--out-dir=o", "x"])).unwrap();
+        assert!(o.review && !o.candidate && o.plan_budget.is_none());
+        let o = parse(a(&[
+            "--review-construction",
+            "--plan-budget",
+            "0.5",
+            "--checker-timeout=9",
+            "--out-dir=o",
+            "x",
+        ]))
+        .unwrap();
+        assert_eq!(o.plan_budget, Some(std::time::Duration::from_millis(500)));
+        assert_eq!(o.checker_timeout, Some(std::time::Duration::from_secs(9)));
+        for bad in [
+            &["--review-construction", "--candidate", "--out-dir=o", "x"][..],
+            &["--candidate", "--review-construction", "--out-dir=o", "x"],
+            &["--plan-budget", "5", "--out-dir=o", "x"],
+            &["--checker-timeout", "5", "--out-dir=o", "x"],
+            &[
+                "--review-construction",
+                "--plan-budget",
+                "0",
+                "--out-dir=o",
+                "x",
+            ],
+            &[
+                "--review-construction",
+                "--plan-budget",
+                "nan",
+                "--out-dir=o",
+                "x",
+            ],
+            &[
+                "--review-construction",
+                "--plan-budget",
+                "-1",
+                "--out-dir=o",
+                "x",
+            ],
+        ] {
+            assert!(parse(a(bad)).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

@@ -17,7 +17,7 @@ use plinth_geom::{Mesh, measure::Measure, slice::LayerGrid};
 use plinth_support::{construct as c, load, place, report_data as rd};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Everything a run needs, with every default already resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +36,72 @@ pub struct Config {
     /// no applicable rule unverified or violated. Otherwise (transport mode) a file the
     /// checker could read is published labelled "not a print candidate".
     pub candidate: bool,
+    /// Review mode: supports for any posed STL (resting up +Z), to look at. Never a print
+    /// candidate; refused together with `candidate`.
+    pub review: Option<Review>,
+}
+
+/// The bounds of review mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Review {
+    /// Wall-clock budget of the contact planner.
+    pub plan_budget: Duration,
+    /// Wall-clock limit of one checker run.
+    pub checker_timeout: Duration,
+    /// Test hook, `None` in every real run (the command line has no flag for it): the
+    /// planner's deadline fires at the first check in the planner phase of this name,
+    /// whatever the clock says. See `PlanSettings::stop_at_phase`.
+    pub stop_plan_at_phase: Option<&'static str>,
+}
+
+/// The label every review file, report and embedded model name carries.
+pub const REVIEW_LABEL: &str = "REVIEW ONLY — NOT A PRINT CANDIDATE";
+/// [`REVIEW_LABEL`] as it appears in file names.
+pub const REVIEW_FILE_TAG: &str = "REVIEW-ONLY-NOT-A-PRINT-CANDIDATE";
+
+/// What review mode did to one model, beyond the shared record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReviewRun {
+    /// The planner phase running when the planning budget passed.
+    pub stopped_at_budget: Option<&'static str>,
+    /// The checker found a rule violated in a well-formed file; the file was kept anyway.
+    pub checker_failed: bool,
+}
+
+/// The status line of a review model: the label plus what stopped it short.
+#[must_use]
+pub fn review_status(r: &ReviewRun) -> String {
+    let mut s = REVIEW_LABEL.to_owned();
+    if let Some(phase) = r.stopped_at_budget {
+        s.push_str(&format!(" — stopped at time budget (during {phase})"));
+    }
+    if r.checker_failed {
+        s.push_str(" — checker-failed");
+    }
+    s
+}
+
+/// The model name embedded in a review file: the input's stem (cut to fit the 256-byte
+/// name field) and the review status. "checker-failed" is not known until after the file
+/// is written, so it appears in the file name and reports only.
+#[must_use]
+pub fn review_model_name(input: &Path, r: &ReviewRun) -> String {
+    let stem = input
+        .file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().replace('\0', "_"));
+    let mut end = stem.len().min(80);
+    while !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+    let only_known_before_writing = ReviewRun {
+        checker_failed: false,
+        ..*r
+    };
+    format!(
+        "{} {}",
+        &stem[..end],
+        review_status(&only_known_before_writing)
+    )
 }
 
 /// Wall time of one step of one model.
@@ -89,6 +155,8 @@ pub struct ModelRun {
     pub planning_blockers: bool,
     /// FR-21 emitted-file evidence also embedded in run.json.
     pub fr21: Option<crate::json::Json>,
+    /// Review-mode facts (`None` outside review mode).
+    pub review: Option<ReviewRun>,
     /// The result.
     pub outcome: Outcome,
 }
@@ -154,7 +222,12 @@ pub fn collect_report_data(
             message: format!("Column at contact {contact} has no admitted 45-degree X-pair to a carrier 4–15 mm away. Add bracing at this picture marker; stability is unassessed."),
         });
     }
-    if proposal.termination != place::Termination::Satisfied {
+    if proposal.termination == place::Termination::TimeBudget {
+        let phase = proposal.stopped_at_budget.unwrap_or("planning");
+        data.warnings.push(load::LoadWarning { class:load::WarningClass::Intervention,
+            kind:"construction plan stopped at time budget".into(), layers:vec![], contacts:vec![], location_mm:None,
+            message:format!("The search was stopped at its time budget during {phase}; the contacts chosen so far are kept and needs may remain unresolved. This is not a proof that no legal site exists.") });
+    } else if proposal.termination != place::Termination::Satisfied {
         data.warnings.push(load::LoadWarning { class:load::WarningClass::Intervention,
             kind:"construction plan unresolved".into(), layers:vec![], contacts:vec![], location_mm:None,
             message:format!("Search ended {:?}; unresolved needs remain. This is not a proof that no legal site exists.",proposal.termination) });
@@ -335,25 +408,48 @@ fn checked_decode(
     Ok(decoded)
 }
 
-fn supported(cfg: &Config, mesh: &Mesh, m: &mut ModelRun) -> Result<Built, Failure> {
-    let fail = |e: c::Reject| {
-        (
-            "construct",
-            format!("{e:?}; no partially admitted file was emitted"),
-        )
-    };
+fn fail(e: c::Reject) -> Failure {
+    (
+        "construct",
+        format!("{e:?}; no partially admitted file was emitted"),
+    )
+}
+
+/// Everything the planning stage hands to construction.
+struct Planned {
+    layers: load::ModelLayers,
+    builder: c::PlanBuilder<c::Contacts>,
+    proposal: place::Proposal,
+    answers: Vec<Result<c::Quote, c::Reject>>,
+    diagnostic: String,
+}
+
+/// Pose, slice and plan. Round 25 runs with the owner's recorded +115 degree keep-up and
+/// no time bound. Review mode treats the input as already posed, resting up +Z (typed, see
+/// `RestingUp`), records the input's real hash as provenance only, and bounds the planner
+/// by its wall-clock budget.
+fn plan_stage(
+    cfg: &Config,
+    mesh: &Mesh,
+    sha256: &str,
+    m: &mut ModelRun,
+) -> Result<Planned, Failure> {
     let limits_text =
         std::fs::read_to_string(&cfg.limits).map_err(|e| ("construct", e.to_string()))?;
     let limits = c::Limits::parse(&limits_text).map_err(fail)?;
-    let keep = c::KeepUpRecord {
-        rotation_x_deg: 115.,
-        approved_sha256: APPROVED_ROUND25.into(),
+    let keep = if cfg.review.is_some() {
+        c::KeepUpRecord::resting_up(c::RestingUp::PlusZ, sha256.into())
+    } else {
+        c::KeepUpRecord {
+            rotation_x_deg: 115.,
+            approved_sha256: APPROVED_ROUND25.into(),
+        }
     };
     let model = c::PosedModel::new(mesh, &keep, &limits).map_err(|e| ("pose", format!("{e:?}")))?;
     let layers = timed(&mut m.steps, "slice", || {
         model_layers(&model, cfg.max_threads)
     })?;
-    let mut builder = c::PlanBuilder::new(
+    let builder = c::PlanBuilder::new(
         model,
         limits,
         c::ProcessRecord {
@@ -364,20 +460,65 @@ fn supported(cfg: &Config, mesh: &Mesh, m: &mut ModelRun) -> Result<Built, Failu
     .with_workers(cfg.max_threads)
     .map_err(fail)?;
     let proposal = timed(&mut m.steps, "plan", || {
-        place::plan_contacts(&builder, &layers, &place::PlanSettings::default())
+        let settings = place::PlanSettings {
+            deadline: cfg.review.map(|r| Instant::now() + r.plan_budget),
+            stop_at_phase: cfg.review.and_then(|r| r.stop_plan_at_phase),
+            ..place::PlanSettings::default()
+        };
+        place::plan_contacts(&builder, &layers, &settings)
     });
     let mut answers = Vec::new();
     builder.probe(&proposal.candidates, &mut answers);
     let diagnostic = proposal_diagnostic(&proposal, &answers);
+    if let Some(r) = m.review.as_mut() {
+        r.stopped_at_budget = proposal
+            .stopped_at_budget
+            .filter(|_| proposal.termination == place::Termination::TimeBudget);
+    }
+    let stopped = proposal
+        .stopped_at_budget
+        .map_or_else(String::new, |phase| {
+            format!("planning stopped at its time budget during {phase}; ")
+        });
+    if proposal.stopped_at_budget.is_some() && proposal.candidates.is_empty() {
+        return Err((
+            "plan",
+            format!(
+                "{stopped}no contact had been chosen yet, so there is no best-so-far plan to emit; {diagnostic}"
+            ),
+        ));
+    }
     if !proposal.routed {
         return Err((
             "plan",
             format!(
-                "route preview rejected before contact commit: {:?}; {diagnostic}",
+                "{stopped}route preview rejected before contact commit: {:?}; {diagnostic}",
                 proposal.routing_blocker
             ),
         ));
     }
+    Ok(Planned {
+        layers,
+        builder,
+        proposal,
+        answers,
+        diagnostic,
+    })
+}
+
+fn supported(
+    cfg: &Config,
+    named: &Named,
+    (mesh, sha256): (&Mesh, &str),
+    m: &mut ModelRun,
+) -> Result<Built, Failure> {
+    let Planned {
+        layers,
+        mut builder,
+        proposal,
+        answers,
+        diagnostic,
+    } = plan_stage(cfg, mesh, sha256, m)?;
     let contact_loads = place::routing_loads(&load::analyse_full(
         &layers.stack,
         &proposal.layout,
@@ -418,8 +559,11 @@ fn supported(cfg: &Config, mesh: &Mesh, m: &mut ModelRun) -> Result<Built, Failu
             format!("{e:?}; {diagnostic}; no geometry was relaxed to force an output"),
         )
     })?;
-    let project = timed(&mut m.steps, "emit", || {
-        plinth_emit::constructed::project(&plan)
+    let project = timed(&mut m.steps, "emit", || match m.review {
+        Some(r) => {
+            plinth_emit::constructed::project_named(&plan, &review_model_name(&named.input, &r))
+        }
+        None => plinth_emit::constructed::project(&plan),
     })
     .map_err(|e| ("emit", format!("{e:?}")))?;
     let bytes = timed(&mut m.steps, "serialize", || project.to_bytes())
@@ -432,6 +576,11 @@ fn supported(cfg: &Config, mesh: &Mesh, m: &mut ModelRun) -> Result<Built, Failu
     let mut data = timed(&mut m.steps, "load-replay", || {
         collect_report_data(&plan, layers, proposal)
     });
+    if cfg.review.is_some() {
+        data.identity.original_sha256 = sha256.into();
+        data.identity.approved_sha256 = "none: review mode records no approval".into();
+        data.identity.pose = "Review mode: pose as drawn in the input STL, resting up +Z; no rotation applied; centred in f32; lift 5 mm [O].".into();
+    }
     data.written_metrics = decoded
         .models
         .first()
@@ -456,18 +605,20 @@ fn supported(cfg: &Config, mesh: &Mesh, m: &mut ModelRun) -> Result<Built, Failu
 fn build_bytes(cfg: &Config, named: &Named, m: &mut ModelRun) -> Result<Built, Failure> {
     // Parse and hash the same read. Re-reading for provenance could bind a
     // replaced input's hash to geometry from the preceding read.
-    let (mesh, approved) = timed(&mut m.steps, "read", || {
+    let (mesh, sha256) = timed(&mut m.steps, "read", || {
         let bytes = std::fs::read(&named.input).map_err(|e| ("read", e.to_string()))?;
         let mesh = plinth_geom::parse_stl(&bytes).map_err(|e| ("read", e.to_string()))?;
-        Ok::<_, Failure>((mesh, crate::sha256::hex(&bytes) == APPROVED_ROUND25))
+        Ok::<_, Failure>((mesh, crate::sha256::hex(&bytes)))
     })?;
     m.triangles = mesh.triangle_count();
-    if approved {
+    // Approval is the content hash alone, never a file name. Review mode builds supports
+    // for every readable input and approves none.
+    if cfg.review.is_some() || sha256 == APPROVED_ROUND25 {
         m.supported = true;
         // A failed search is a planning blocker too, even before ReportData exists.
         // Successful construction replaces this provisional blocker from its data.
         m.planning_blockers = true;
-        return supported(cfg, &mesh, m);
+        return supported(cfg, named, (&mesh, &sha256), m);
     }
     let (project, parallel) = timed(&mut m.steps, "convert", || {
         transport_project(&named.stem, &mesh, cfg.max_threads)
@@ -492,6 +643,29 @@ fn io_message(what: &str, path: &Path, e: &std::io::Error) -> String {
         )
     } else {
         format!("{what} {}: {e}", path.display())
+    }
+}
+
+fn checker_refusal(named: &Named, checked: Checked) -> Outcome {
+    let violated = checked.ids_with("violation");
+    let message = format!(
+        "{}: the checker rejected the file (violated rules: {}; structure: {}); nothing was published",
+        named.input.display(),
+        if violated.is_empty() {
+            "none".to_owned()
+        } else {
+            violated.join(", ")
+        },
+        if checked.structure_notes.is_empty() {
+            "no notes".to_owned()
+        } else {
+            checked.structure_notes.join("; ")
+        }
+    );
+    Outcome::Failed {
+        stage: "check",
+        message,
+        checked: Some(checked),
     }
 }
 
@@ -522,33 +696,38 @@ fn write_check_publish(
         report: &report,
         written: bytes,
     };
-    let checked = timed(&mut m.steps, "check", || check::run(&job)).map_err(|e| {
+    let (checked, raw) = timed(&mut m.steps, "check", || match cfg.review {
+        Some(r) => check::run_bounded(&job, r.checker_timeout).map(|(c, raw)| (c, Some(raw))),
+        None => check::run(&job).map(|c| (c, None)),
+    })
+    .map_err(|e| {
         let _ = std::fs::remove_file(&temp);
         ("check", e)
     })?;
-    if !checked.verdict.publishable() {
+    // Review mode keeps a file the checker found a rule violated in, because the owner
+    // wants to look at it. A file the checker could not read or whose structure is damaged
+    // is malformed and stays a refusal.
+    let retained = cfg.review.is_some()
+        && !checked.verdict.publishable()
+        && checked.structure_notes.is_empty();
+    if !checked.verdict.publishable() && !retained {
         let _ = std::fs::remove_file(&temp);
-        let violated = checked.ids_with("violation");
-        let message = format!(
-            "{}: the checker rejected the file (violated rules: {}; structure: {}); nothing was published",
-            named.input.display(),
-            if violated.is_empty() {
-                "none".to_owned()
-            } else {
-                violated.join(", ")
-            },
-            if checked.structure_notes.is_empty() {
-                "no notes".to_owned()
-            } else {
-                checked.structure_notes.join("; ")
-            }
-        );
-        return Ok(Outcome::Failed {
-            stage: "check",
-            message,
-            checked: Some(checked),
-        });
+        return Ok(checker_refusal(named, checked));
     }
+    let marked;
+    let named = if retained {
+        if let Some(r) = m.review.as_mut() {
+            r.checker_failed = true;
+        }
+        marked = Named {
+            input: named.input.clone(),
+            stem: format!("{}.checker-failed", named.stem),
+        };
+        m.stem.clone_from(&marked.stem);
+        &marked
+    } else {
+        named
+    };
     let mut blockers = checked.candidate_blockers();
     if planning_blockers {
         blockers.push("placement, load path or early-patch capacity remains unresolved".into());
@@ -579,7 +758,7 @@ fn write_check_publish(
         ));
     }
     if let Some((data, upper)) = review {
-        publish_supported(cfg, named, bytes, &temp, (data, upper, checked), m)
+        publish_supported(cfg, named, bytes, &temp, (data, upper, checked, raw), m)
     } else {
         timed(&mut m.steps, "publish", || publish::publish(&temp, &dest))
             .map_err(|e| ("publish", io_message("cannot publish", &dest, &e)))?;
@@ -596,10 +775,10 @@ fn publish_supported(
     named: &Named,
     bytes: &[u8],
     temp: &Path,
-    review: (&mut rd::ReportData, Option<f64>, Checked),
+    review: (&mut rd::ReportData, Option<f64>, Checked, Option<Vec<u8>>),
     m: &mut ModelRun,
 ) -> Result<Outcome, Failure> {
-    let (data, upper, checked) = review;
+    let (data, upper, checked, raw_checker_report) = review;
     let staging = publish::temp_path(&cfg.out_dir, "bundle");
     let bundle = cfg.out_dir.join(format!("{}.supported", named.stem));
     let final_name = format!("{}.chitubox", named.stem);
@@ -626,8 +805,21 @@ fn publish_supported(
     data.run.peak_memory_bytes = mem::peak().map_or(0, mem::Peak::job);
     let result = (|| {
         std::fs::rename(temp, staging.join(&final_name)).map_err(|e| ("write", e.to_string()))?;
+        let status = m.review.as_ref().map(review_status);
         timed(&mut m.steps, "report", || {
-            write_review(&staged_cfg, named, bytes, data, upper, &outcome)
+            write_review(
+                &staged_cfg,
+                named,
+                bytes,
+                (data, upper),
+                (&outcome, status.as_deref()),
+            )?;
+            // Review mode keeps the checker's own report beside the file, whatever it said.
+            raw_checker_report.as_ref().map_or(Ok(()), |raw| {
+                let path = staging.join(format!("{}.checker-report.json", named.stem));
+                std::fs::write(&path, raw)
+                    .map_err(|e| ("report", io_message("cannot write", &path, &e)))
+            })
         })?;
         timed(&mut m.steps, "publish", || {
             publish::publish_bundle(&staging, &bundle)
@@ -670,9 +862,8 @@ fn write_review(
     cfg: &Config,
     named: &Named,
     bytes: &[u8],
-    data: &rd::ReportData,
-    upper: Option<f64>,
-    outcome: &Outcome,
+    (data, upper): (&rd::ReportData, Option<f64>),
+    (outcome, review_status): (&Outcome, Option<&str>),
 ) -> Result<(), Failure> {
     use crate::json::Json;
     let project = plinth_chitubox::parse(bytes).map_err(|e| ("report", e.to_string()))?;
@@ -715,14 +906,17 @@ fn write_review(
         .map(|r| Json::Num(f64::from(r.r1)))
         .collect();
     let candidate = checked.is_some_and(|c| candidate_allowed(cfg.candidate, c, false));
-    let status = if candidate {
+    let status = review_status.unwrap_or(if candidate {
         "print candidate"
     } else {
         "not a print candidate"
-    };
+    });
     let mut text = format!(
         "Supported output: {status}. Modelled loads are not independent checker acceptance.\n"
     );
+    if review_status.is_some() {
+        text.push_str("Review mode: supports built to look at in ChituBox, for a pose given as drawn. Nothing here says this file can be printed.\n");
+    }
     if let Some(c) = checked {
         for r in &c.rules {
             text.push_str(&format!("{}: {} — {}\n", r.id, r.status, r.reason));
@@ -770,6 +964,17 @@ fn write_review(
 }
 
 fn run_model(cfg: &Config, named: &Named, fault: Fault) -> ModelRun {
+    // Review files carry the label in their names, so none can be mistaken for a candidate.
+    let labelled;
+    let named = if cfg.review.is_some() {
+        labelled = Named {
+            input: named.input.clone(),
+            stem: format!("{}.{REVIEW_FILE_TAG}", named.stem),
+        };
+        &labelled
+    } else {
+        named
+    };
     let mut m = ModelRun {
         input: named.input.clone(),
         stem: named.stem.clone(),
@@ -779,6 +984,7 @@ fn run_model(cfg: &Config, named: &Named, fault: Fault) -> ModelRun {
         supported: false,
         planning_blockers: false,
         fr21: None,
+        review: cfg.review.map(|_| ReviewRun::default()),
         outcome: Outcome::Failed {
             stage: "read",
             message: String::new(),
@@ -786,6 +992,17 @@ fn run_model(cfg: &Config, named: &Named, fault: Fault) -> ModelRun {
         },
     };
     let result = build_bytes(cfg, named, &mut m).and_then(|mut built| {
+        let stopped;
+        let named = if m.review.is_some_and(|r| r.stopped_at_budget.is_some()) {
+            stopped = Named {
+                input: named.input.clone(),
+                stem: format!("{}.stopped-at-time-budget", named.stem),
+            };
+            m.stem.clone_from(&stopped.stem);
+            &stopped
+        } else {
+            named
+        };
         let blocked = built.report.as_ref().is_some_and(|d| {
             d.warnings
                 .iter()
@@ -810,6 +1027,11 @@ fn run_model(cfg: &Config, named: &Named, fault: Fault) -> ModelRun {
 
 /// Check what a run needs before touching any input.
 fn preflight(cfg: &Config) -> Result<(), String> {
+    if cfg.review.is_some() && cfg.candidate {
+        return Err(
+            "review mode cannot be combined with candidate mode: review files are never print candidates".into(),
+        );
+    }
     for (what, path) in [
         ("the checker", &cfg.checker),
         ("the limits file", &cfg.limits),
