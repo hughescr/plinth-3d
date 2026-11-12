@@ -1,0 +1,23 @@
+Pinned upstream C++ sources vendored for the offline build of manifold-csg-sys.
+A build never clones or downloads anything; it uses only these directories.
+
+manifold-src/  (Apache-2.0, see manifold-src/LICENSE)
+  url: https://github.com/elalish/manifold
+  commit: 0edd9d54876f3135e431575214dd6d8a72866fee   (upstream v3.5.3)
+  kept: CMakeLists.txt, LICENSE, AUTHORS, cmake/, include/, src/,
+        bindings/CMakeLists.txt, bindings/c/
+  dropped: tests, samples, extras, docs, python/wasm bindings, CI files
+
+clipper2-src/  (Boost Software License 1.0, see clipper2-src/LICENSE)
+  url: https://github.com/AngusJohnson/Clipper2
+  commit: 46f639177fe418f9689e8ddb74f08a870c71f5b4
+  kept: LICENSE, CPP/CMakeLists.txt, CPP/Clipper2Lib/, CPP/*.in, CPP/*.cmakein
+  dropped: tests, examples, utils, benchmarks, C#/Delphi/DLL ports
+  note: files are unmodified upstream. Manifold's own carry-patch
+        (cmake/patches/0001-clipper2-no-iostream.patch) only adds the
+        CLIPPER2_NO_IOSTREAM option, off in this build, so it is not applied.
+
+To bump a pin: download the new commit's tarball from the URL above, replace the
+directory contents (same kept/dropped lists), update this file and
+MANIFOLD_VERSION in manifold-csg-sys/build.rs together. Manifold's
+cmake/manifoldDeps.cmake names the Clipper2 commit it expects.

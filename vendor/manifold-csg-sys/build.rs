@@ -2,8 +2,6 @@
 mod build;
 #[path = "build/fetch.rs"]
 mod fetch;
-#[path = "build/patch.rs"]
-mod patch;
 #[path = "build/wasm.rs"]
 mod wasm;
 
@@ -13,10 +11,12 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 /// Plinth source pin: upstream Manifold v3.5.3, immutable commit rather than a
-/// movable release tag. The registry shim is otherwise unchanged. Its upstream
-/// CMake dependency file also pins Clipper2 by commit SHA.
+/// movable release tag. The C++ sources are vendored in `vendor/manifold-src`
+/// and `vendor/clipper2-src` (pins recorded in `vendor/PIN`); the host build
+/// never downloads anything. Its upstream CMake dependency file pins Clipper2
+/// by commit SHA.
 ///
-/// Used by both the host build (which clones this directly) and the
+/// The host build checks `vendor/PIN` against this value. The
 /// wasm-uu build (which passes it through to the shim's
 /// `wasm_cxx_shim_add_manifold()` helper as `MANIFOLD_GIT_TAG`, so both
 /// paths build against the same C API surface).
@@ -320,7 +320,6 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build");
     println!("cargo:rerun-if-changed=src/lib.rs");
-    println!("cargo:rerun-if-changed=patches");
 
     // Offline / bring-your-own build override (host only). Lets consumers
     // who can't run the build-script's `git clone` (sandboxed builders like
@@ -348,13 +347,14 @@ fn main() {
     }
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let patches_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("patches");
-    let manifold_src = out_dir.join("manifold-src");
-    let build_dir = out_dir.join("build");
-    fetch::fetch(&out_dir, &manifold_src, &build_dir, &patches_dir);
+    // Not `build`: older target dirs hold a cmake cache configured from a
+    // cloned source tree, which cmake refuses to reuse.
+    let build_dir = out_dir.join("cmake-build");
+    let sources = fetch::locate(Path::new(env!("CARGO_MANIFEST_DIR")), &out_dir);
+    fetch::reset_stale_build_dir(&out_dir, &build_dir, &sources);
     build::build(
         is_emscripten,
-        &manifold_src,
+        &sources,
         &build_dir,
         &target,
         &target_env,

@@ -1,5 +1,7 @@
-//! cmake-configure and build the (already-cloned, already-patched)
-//! manifold source tree, for host and emscripten targets.
+//! cmake-configure and build the vendored manifold source tree (with the
+//! vendored Clipper2 supplied through `FETCHCONTENT_SOURCE_DIR_CLIPPER2` and
+//! `FETCHCONTENT_FULLY_DISCONNECTED=ON`, so cmake cannot touch the network),
+//! for host and emscripten targets.
 //!
 //! Picks up `parallel` (TBB), `MANIFOLD_CROSS_SECTION`, and standard
 //! manifold options. On emscripten, swaps the cmake driver to
@@ -15,11 +17,12 @@
 
 use std::{env, path::Path, process::Command};
 
+use super::fetch::VendoredSources;
 use super::{cmake_launcher_args, find_lib_recursive, is_apple};
 
 pub fn build(
     is_emscripten: bool,
-    manifold_src: &Path,
+    sources: &VendoredSources,
     build_dir: &Path,
     target: &str,
     target_env: &str,
@@ -43,9 +46,24 @@ pub fn build(
 
     let mut cmake_args = vec![
         "-S".to_string(),
-        manifold_src.to_str().unwrap().to_string(),
+        sources.manifold.to_str().unwrap().to_string(),
         "-B".to_string(),
         build_dir.to_str().unwrap().to_string(),
+        // FetchContent reads the upper-case name; manifold's `logmissingdep`
+        // checks the exact-case name. Set both.
+        format!(
+            "-DFETCHCONTENT_SOURCE_DIR_CLIPPER2={}",
+            sources.clipper2.to_str().unwrap()
+        ),
+        format!(
+            "-DFETCHCONTENT_SOURCE_DIR_Clipper2={}",
+            sources.clipper2.to_str().unwrap()
+        ),
+        "-DFETCHCONTENT_FULLY_DISCONNECTED=ON".to_string(),
+        "-DMANIFOLD_DOWNLOADS=OFF".to_string(),
+        "-DCLIPPER2_UTILS=OFF".to_string(),
+        "-DCLIPPER2_EXAMPLES=OFF".to_string(),
+        "-DCLIPPER2_TESTS=OFF".to_string(),
         "-DCMAKE_BUILD_TYPE=Release".to_string(),
         "-DMANIFOLD_TEST=OFF".to_string(),
         "-DMANIFOLD_PYBIND=OFF".to_string(),
