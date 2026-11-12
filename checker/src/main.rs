@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! plinth-check dump <file.chitubox | file.stl>
-//! plinth-check check --chitubox <file> --limits <limits.toml> [--stl <file>] [--out <report.json>] [--threads <n>] [--pose-rotate-x-deg <deg>] [--stl-sha256 <hex>]
+//! plinth-check check --chitubox <file> --limits <limits.toml> [--stl <file>] [--out <report.json>] [--threads <n>] [--pose-rotate-x-deg <deg>] [--stl-sha256 <hex>] [--declared-hollow]
 //! ```
 //!
 //! `dump` prints the file's structure. `check` writes the JSON report (to stdout, or to `--out`).
@@ -17,7 +17,7 @@ use plinth_check::h7::Pose;
 use plinth_check::{dump, limits, loop_canary, report};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage:\n  plinth-check dump <file.chitubox | file.stl>\n  plinth-check check --chitubox <file> --limits <limits.toml> [--stl <file>] [--out <report.json>] [--threads <n>] [--pose-rotate-x-deg <deg>] [--stl-sha256 <hex>]";
+const USAGE: &str = "usage:\n  plinth-check dump <file.chitubox | file.stl>\n  plinth-check check --chitubox <file> --limits <limits.toml> [--stl <file>] [--out <report.json>] [--threads <n>] [--pose-rotate-x-deg <deg>] [--stl-sha256 <hex>] [--declared-hollow]";
 
 fn usage_error(msg: &str) -> ExitCode {
     eprintln!("plinth-check: {msg}\n{USAGE}");
@@ -57,6 +57,10 @@ fn flags(args: &[String]) -> Result<Vec<(&str, &str)>, String> {
     let mut out = Vec::new();
     let mut it = args.iter();
     while let Some(flag) = it.next() {
+        if flag == "--declared-hollow" {
+            out.push((flag.as_str(), "true"));
+            continue;
+        }
         if ![
             "--chitubox",
             "--limits",
@@ -110,7 +114,14 @@ fn run_check(args: &[String]) -> ExitCode {
         expected_sha256: get("--stl-sha256").map(str::to_owned),
         actual_sha256: None,
     };
-    let rep = report::build_posed(&limits, &read_input(chitubox), stl.as_ref(), threads, &pose);
+    let rep = report::build_posed_declared(
+        &limits,
+        &read_input(chitubox),
+        stl.as_ref(),
+        threads,
+        &pose,
+        get("--declared-hollow").is_some(),
+    );
     let text = rep.json.render();
     match get("--out") {
         Some(out) => {

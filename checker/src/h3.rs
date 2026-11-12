@@ -48,8 +48,8 @@
 //! not one closed, outward-wound mesh gives no island list, and then H3 is unverified. A
 //! birth that is large enough to be certainly over the small-island size and has no support
 //! under it is a violation; a small one, whose growth and joining are not measured (P18), is
-//! unverified. A support that stands on the model (a foot) relies on model material and is
-//! unverified, not a violation.
+//! unverified. With model-standing feet, the model is sliced into material tiles (holes stay
+//! empty) in the same print-order walk. Only already rooted material can root a foot.
 
 use crate::islands::{self, Birth};
 use crate::json::Json;
@@ -447,7 +447,10 @@ fn root_plane(
     let mut uf: Vec<usize> = (0..n).collect();
     for (i, (_, s)) in secs.iter().enumerate() {
         for j in neighbours(grid, &s.bb).into_iter().filter(|&j| j > i) {
-            if overlap_by(s, &secs[j].1, roots.reading.depth) {
+            let both_model = secs[i].0 >= roots.infos.len() && secs[j].0 >= roots.infos.len();
+            if overlap_by(s, &secs[j].1, roots.reading.depth)
+                || (both_model && model::joined(s, &secs[j].1))
+            {
                 let (a, b) = (find(&mut uf, i), find(&mut uf, j));
                 uf[a] = b;
             }
@@ -456,7 +459,7 @@ fn root_plane(
     let (mut root_comp, mut rely_comp) = (vec![false; n], vec![false; n]);
     for (i, (part, s)) in secs.iter().enumerate() {
         let (rooted, covered) = match prev {
-            None => (roots.infos[*part].on_plate, false),
+            None => (roots.infos.get(*part).is_some_and(|i| i.on_plate), false),
             Some(planes) => below(s, planes, roots.reading.depth),
         };
         let r = find(&mut uf, i);
@@ -515,7 +518,12 @@ impl Walk<'_> {
         let (scene, z0) = (self.scene, self.z0);
         self.pieces += pl.secs.len();
         self.planes_total += 1;
-        for (i, (part, s)) in pl.secs.iter().enumerate().filter(|(i, _)| !pl.rooted[*i]) {
+        for (i, (part, s)) in pl
+            .secs
+            .iter()
+            .enumerate()
+            .filter(|(i, (part, _))| *part < scene.parts.len() && !pl.rooted[*i])
+        {
             self.unrooted_pieces += 1;
             if !self.reported.insert(*part) {
                 continue;
@@ -523,7 +531,7 @@ impl Walk<'_> {
             let p = &scene.parts[*part];
             if pl.reliant[i] {
                 self.relies_on_model.push(format!(
-                    "record {} ({}) hangs from a foot that stands on the model (first seen in layer {k}); the model is not sliced to root it",
+                    "record {} ({}) relies on model material whose print-order rooting could not be established (first seen in layer {k})",
                     p.rec,
                     p.role.name()
                 ));
@@ -586,102 +594,20 @@ fn walk_refusal(scene: &Scene) -> Option<String> {
     crate::h4::plate_disagreement(scene)
 }
 
-fn walk(scene: &Scene, patches: &PatchOut, reading: Reading) -> Result<Walked, String> {
-    if let Some(why) = walk_refusal(scene) {
-        return Err(why);
-    }
-    let z0 = scene.plate_z();
-    let infos: Vec<PartInfo> = scene.parts.iter().map(|p| part_info(p, z0)).collect();
-    if let Some((i, _)) = infos.iter().enumerate().find(|(_, i)| i.zmin < z0 - 1e-4) {
-        return Err(format!(
-            "record {} lies below the plate level",
-            scene.parts[i].rec
-        ));
-    }
-    let layers = infos.iter().map(|i| i.k_hi + 1).max().unwrap_or(0);
-    if layers > MAX_LAYERS {
-        return Err(format!(
-            "the supports are {layers} layers tall, more than the {MAX_LAYERS} layers (1 m) the checker slices"
-        ));
-    }
-    // A foot is a part whose written mesh touches the model.
-    let feet = feet_of(scene, patches);
-    let roots = Roots {
-        infos: &infos,
-        feet: &feet,
-        reading,
-    };
-    let mut state = Walk {
-        scene,
-        z0,
-        reported: BTreeSet::new(),
-        located: Vec::new(),
-        relies_on_model: Vec::new(),
-        pieces: 0,
-        unrooted_pieces: 0,
-        planes_total: 0,
-    };
-    let mut all: Vec<Vec<Plane>> = Vec::with_capacity(layers);
-    for k in 0..layers {
-        let mut planes: Vec<Plane> = Vec::new();
-        for z in layer_planes(&infos, k, z0) {
-            let secs: Vec<(usize, Sec)> = scene
-                .parts
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| {
-                    (infos[*i].k_lo..=infos[*i].k_hi).contains(&k)
-                        && z >= infos[*i].zmin - 1e-9
-                        && z <= infos[*i].zmax + 1e-9
-                })
-                .filter_map(|(i, p)| {
-                    // A plane a hair beyond an end face (within the rounding allowed above)
-                    // slices the part a hair inside that face.
-                    let inner = EDGE_FACE_MM.min(0.5 * (infos[i].zmax - infos[i].zmin));
-                    let zc = if z < infos[i].zmin {
-                        infos[i].zmin + inner
-                    } else if z > infos[i].zmax {
-                        infos[i].zmax - inner
-                    } else {
-                        z
-                    };
-                    section(&p.tris, zc, reading.sliver).map(|s| (i, s))
-                })
-                .collect();
-            let grid = grid_of(&secs);
-            let (rooted, reliant) = root_plane(&secs, &grid, all.last().map(Vec::as_slice), &roots);
-            let pl = Plane {
-                z,
-                secs,
-                rooted,
-                reliant,
-                grid,
-            };
-            state.plane(&pl, k);
-            planes.push(pl);
-        }
-        all.push(planes);
-    }
-    Ok(Walked {
-        layers: all,
-        z0,
-        located: state.located,
-        relies_on_model: state.relies_on_model,
-        pieces: state.pieces,
-        unrooted_pieces: state.unrooted_pieces,
-        planes: state.planes_total,
-    })
-}
+mod walk;
+use walk::run as walk;
 
 /// Is the birth held: in every plane of its first layer at or above its height, or in every
 /// plane of the layer below, a rooted support section overlaps its footprint?
-fn anchored(w: &Walked, b: &Birth, depth: f64) -> bool {
+fn anchored(w: &Walked, b: &Birth, depth: f64, support_count: usize) -> bool {
     let held = |planes: &[Plane], from: f64| {
         let mut any = false;
         for pl in planes.iter().filter(|p| p.z >= from) {
             any = true;
-            let hit = pl.secs.iter().enumerate().any(|(i, (_, s))| {
-                pl.rooted[i] && b.footprint.iter().any(|f| overlap_by(s, f, depth))
+            let hit = pl.secs.iter().enumerate().any(|(i, (part, s))| {
+                *part < support_count
+                    && pl.rooted[i]
+                    && b.footprint.iter().any(|f| overlap_by(s, f, depth))
             });
             if !hit {
                 return false;
@@ -721,7 +647,7 @@ fn assess(
         Err(why) => unverified.push(format!("model islands not listed: {why}")),
         Ok(births) => {
             for b in births {
-                let held = anchored(walked, b, depth);
+                let held = anchored(walked, b, depth, scene.parts.len());
                 listed.push(Json::obj([
                     ("layer", Json::Uint(b.layer as u64)),
                     ("height_above_plate_mm", Json::Num(b.z - walked.z0)),
@@ -823,6 +749,7 @@ fn feet_of(scene: &Scene, patches: &PatchOut) -> BTreeSet<usize> {
         .collect()
 }
 
+pub(crate) mod model;
 mod seat;
 use seat::seat_findings;
 
@@ -883,6 +810,10 @@ pub fn measure(scene: &Scene, patches: &PatchOut) -> Outcome {
                 ),
             ]),
         ),
+        (
+            "model_standing_feet_checked",
+            Json::Uint(feet_of(scene, patches).len() as u64),
+        ),
         ("layer_height_mm", Json::Num(LAYER_MM)),
         ("layers", Json::Uint(walked.layers.len() as u64)),
         ("sample_planes", Json::Uint(walked.planes as u64)),
@@ -894,10 +825,11 @@ pub fn measure(scene: &Scene, patches: &PatchOut) -> Outcome {
         ("verdict_scope", Json::str(VERDICT_SCOPE)),
         ("analytic_information", analytic_information(scene)),
         ("model_islands", Json::Arr(listed)),
+        ("unverified_items", Json::strings(&unverified)),
         (
             "model_rooting",
             Json::str(
-                "model islands are the lowest points of the closed model; a support standing on model material is unverified",
+                "model-standing feet are rooted only through material sections reached from earlier rooted sections or independently rooted support in the same layer; future model material is not seeded",
             ),
         ),
     ]);
@@ -1301,6 +1233,104 @@ mod tests {
             o.located.iter().any(|l| l.location.record == Some(2)),
             "{o:?}"
         );
+    }
+
+    #[test]
+    fn model_standing_foot_uses_earlier_sliced_material_not_its_future_attachment() {
+        let check = |bottom: f32| {
+            let mut parts = vec![
+                kit::raft_pad(0, [0.0, 0.0], -4.8),
+                kit::part(1, 3, [0.0, 0.0, -4.85], [0.0, 0.0, 0.1], 0.4, 0.4),
+            ];
+            parts.push(kit::part(
+                2,
+                8,
+                [1.0, 0.0, bottom],
+                [1.0, 0.0, bottom + 0.6],
+                0.3,
+                0.3,
+            ));
+            parts.push(kit::part(
+                3,
+                3,
+                [1.0, 0.0, bottom + 0.2],
+                [1.0, 0.0, 4.0],
+                0.2,
+                0.2,
+            ));
+            let s = Scene::from_parts(
+                &test_limits(),
+                kit::closed_box([-2.0, -2.0, 0.0], [2.0, 2.0, 2.0]),
+                [0.0, 0.0, 5.0],
+                parts,
+            );
+            let p = patch::measure(&s);
+            let w = walk(&s, &p, Reading::strict()).expect("material can be sliced");
+            (
+                w.located.iter().any(|l| l.location.record == Some(2)),
+                measure(&s, &p),
+            )
+        };
+        let (floats, good) = check(1.7);
+        assert!(!floats, "{good:?}");
+        assert_eq!(good.status, Status::Pass, "{good:?}");
+        let (floats, bad) = check(-0.3);
+        assert!(floats, "{bad:?}");
+        assert_eq!(bad.status, Status::Violation, "{bad:?}");
+    }
+
+    #[test]
+    fn a_separate_root_cannot_hide_a_future_model_attachment_on_a_foot() {
+        let s = Scene::from_parts(
+            &test_limits(),
+            kit::closed_box([-2.0, -2.0, 0.0], [2.0, 2.0, 2.0]),
+            [0.0, 0.0, 5.0],
+            vec![
+                kit::raft_pad(0, [0.0, 0.0], -4.8),
+                kit::part(1, 3, [0.0, 0.0, -4.85], [0.0, 0.0, 0.1], 0.4, 0.4),
+                // The foot is carried by this plate-rooted rod, but touches the model only later.
+                kit::part(2, 8, [0.0, 0.0, -0.3], [0.0, 0.0, 0.3], 0.3, 0.3),
+            ],
+        );
+        let out = measure(&s, &patch::measure(&s));
+        assert_eq!(out.status, Status::Violation, "{out:?}");
+        assert!(
+            out.located
+                .iter()
+                .any(|l| l.location.record == Some(2)
+                    && l.reason.contains("first printable section")),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn an_inner_wall_printed_before_the_foot_can_root_it() {
+        let mut model = kit::closed_box([-3.0, -3.0, 0.0], [3.0, 3.0, 6.0]);
+        model.extend(
+            kit::closed_box([-2.0, -2.0, 1.0], [2.0, 2.0, 5.0])
+                .into_iter()
+                .map(|[a, b, c]| [a, c, b]),
+        );
+        let s = Scene::from_parts(
+            &test_limits(),
+            model,
+            [0.0, 0.0, 5.0],
+            vec![
+                kit::raft_pad(0, [0.0, 0.0], -4.8),
+                kit::part(1, 3, [0.0, 0.0, -4.85], [0.0, 0.0, 0.1], 0.4, 0.4),
+                kit::part(2, 8, [1.0, 0.0, 0.7], [1.0, 0.0, 1.3], 0.3, 0.3),
+                kit::part(3, 3, [1.0, 0.0, 0.9], [1.0, 0.0, 3.0], 0.2, 0.2),
+            ],
+        );
+        let p = patch::measure(&s);
+        let out = measure(&s, &p);
+        assert_eq!(out.status, Status::Pass, "{out:?}");
+        assert_eq!(
+            out.detail.get("model_standing_feet_checked"),
+            Some(&Json::Uint(1))
+        );
+        // H3 proves order, not drainage: this deliberately sealed control still fails H5.
+        assert_eq!(crate::h5::measure(&s).status, Status::Violation);
     }
 
     #[test]

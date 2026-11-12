@@ -20,6 +20,7 @@ pub mod h5;
 pub mod h6;
 pub mod h7;
 pub mod h9;
+pub mod hollow;
 pub mod islands;
 pub mod json;
 pub mod layout;

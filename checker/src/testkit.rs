@@ -19,6 +19,9 @@ pub fn test_limits() -> Limits {
         h6_gap_mm: 0.3,
         h9_thickness_mm: 0.1,
         region_length_mm: 3.0,
+        drain_min_mm: 3.0,
+        mouth_clearance_mm: 5.0,
+        hollow_defaults_used: false,
     }
 }
 

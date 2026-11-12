@@ -1,5 +1,6 @@
-//! H5 "not applicable" proof (design 7.4). A cavity needs a drain and a vent only if the model
-//! has one. The checker proves a model has none from the mesh topology alone:
+//! H5 topology prerequisites and opt-in fixed-resolution hollow search. Undeclared scenes
+//! retain the old topology-only exemption below (a known blind spot). Declared scenes never
+//! receive that exemption: even an exactly convex body contradicts a hollow declaration.
 //!
 //! * vertices are welded only where they are equal in f32; every edge is used twice, once in
 //!   each direction (a closed, consistently oriented surface);
@@ -7,7 +8,7 @@
 //! * exactly one shell, enclosing a positive volume, with Euler characteristic 2, which means
 //!   no inner shell (no enclosed void) and no through-hole (so no drain bore can exist).
 //!
-//! Then H5 is "not applicable". Anything the checker cannot establish is "unverified", never
+//! For undeclared scenes only, H5 is then "not applicable". Anything uncertain is "unverified", never
 //! "not applicable". An inner shell facing inwards inside the outer one is a sealed cavity
 //! with no opening in the surface: that is a violation (it can drain nowhere).
 //!
@@ -286,6 +287,18 @@ pub fn measure(scene: &Scene) -> Outcome {
         .with_detail(d);
     }
     if t.intersections > 0 || t.ambiguous > 0 {
+        // Topology ambiguity must not hide a witnessed intrusion on a declared hollow.
+        let combined = if scene.declared_hollow {
+            let hollow = scene.hollow();
+            if t.intersections == 0 && !hollow.intrusion.is_empty() {
+                return hollow
+                    .outcome()
+                    .with_detail(Json::obj([("topology", d), ("hollow", hollow.detail())]));
+            }
+            Json::obj([("topology", d), ("hollow", hollow.detail())])
+        } else {
+            d
+        };
         let first = t
             .first_problem
             .and_then(|i| scene.model.get(i))
@@ -295,9 +308,9 @@ pub fn measure(scene: &Scene) -> Outcome {
             t.intersections, t.ambiguous
         ))
         .with_located(vec![at(None, first, None, "first suspect triangle")])
-        .with_detail(d);
+        .with_detail(combined);
     }
-    if t.shells == 1 && t.volumes[0] > 0.0 && t.euler[0] == 2 {
+    if !scene.declared_hollow && t.shells == 1 && t.volumes[0] > 0.0 && t.euler[0] == 2 {
         return Outcome::not_applicable(
             "H5: not applicable — emitted model has 0 enclosed cavities and 0 drain bores; topology verified.",
         )
@@ -316,11 +329,15 @@ pub fn measure(scene: &Scene) -> Outcome {
         )])
         .with_detail(d);
     }
-    Outcome::unverified(format!(
-        "the model has {} shell(s) and Euler characteristics {:?}: not the single simple shell the proof needs, and no drain or vent measurement is built",
-        t.shells, t.euler
-    ))
-    .with_detail(d)
+    if !scene.declared_hollow {
+        return Outcome::unverified(format!(
+            "the model has {} shell(s) and Euler characteristics {:?}: not the single simple shell the proof needs, and no drain or vent measurement is built",
+            t.shells, t.euler
+        )).with_detail(d);
+    }
+    let mut out = scene.hollow().outcome();
+    out.detail = Json::obj([("topology", d), ("hollow", out.detail)]);
+    out
 }
 
 #[cfg(test)]
@@ -439,7 +456,12 @@ mod tests {
                 }
             }
         }
-        let o = run(m);
+        let o = measure(&Scene::from_parts(
+            &test_limits(),
+            m,
+            [0.0, 0.0, 5.0],
+            Vec::new(),
+        ));
         assert_eq!(o.status, Status::Unverified, "{o:?}");
         assert!(o.reason.contains("Euler"), "{}", o.reason);
     }

@@ -1,0 +1,16 @@
+# Independent checker's bounded hollow search. These are geometric values, not wet-resin
+# effective diameters. The main workspace does not parse this file.
+[limits]
+h1_patch_area_mm2 = 0.50
+h4_lift_mm = 5.0
+h6_gap_mm = 0.3
+h9_thickness_mm = 0.1
+region_length_mm = 3.0
+
+[hollow]
+drain_min_mm = 3.0
+# Owner, 2026-11-11: "supports kept about 0.5–1 cm clear of every hole
+# (no strip to the plate)". Use the smaller ruled distance as a local radius around
+# each measured mouth, NOT a projection to the plate. Override in a supplied limits.toml
+# [hollow] section when checking another owner-approved clearance.
+mouth_clearance_mm = 5.0

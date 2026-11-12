@@ -78,7 +78,7 @@ fn width_at(p: &Part, z: f64) -> f64 {
 /// such height is found by locating the widest section and bisecting below it. A part that is
 /// never `need` wide is held to 0.9 of its widest section instead; `None` only when it has no
 /// section at all.
-fn first_thick(p: &Part, need: f64) -> Option<f64> {
+pub(super) fn first_thick(p: &Part, need: f64) -> Option<f64> {
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
     for v in p.tris.iter().flatten() {
         lo = lo.min(v[2]);
@@ -517,15 +517,16 @@ pub(super) fn seat_findings(
         )]
         let layer = h.and_then(|h| u32::try_from(((h - z0) / LAYER_MM).max(0.0) as usize).ok());
         let height = h.map_or_else(|| "?".to_owned(), |h| format!("{:.5}", h - z0));
-        // A part beside a foot may stand on material the checker does not slice (the model):
-        // the walk treats such a chain as reliant on the model, and so is this.
+        // The layer walk now slices and roots the model. This independent continuous
+        // start-span proof still has only convex support carriers: a non-convex material
+        // carrier beside a foot must not be refuted merely because it is absent here.
         let beside_foot = feet.iter().any(|&f| {
             let (a, b) = (scene.parts[f].bbox, p.bbox);
             f != i && (0..3).all(|k| a.lo[k] <= b.hi[k] + 1e-3 && b.lo[k] <= a.hi[k] + 1e-3)
         });
         if beside_foot {
             out.unverified.push(format!(
-                "record {} ({}) starts {height} mm above the plate beside a foot that stands on the model: what carries it is the model, which is not sliced to root it",
+                "record {} ({}) starts {height} mm above the plate beside a model-standing foot: model print-order slices were checked, but continuous support of this thin first stretch by non-convex material is not proved",
                 p.rec,
                 p.role.name()
             ));

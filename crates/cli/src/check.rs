@@ -191,6 +191,8 @@ pub struct Job<'a> {
     pub report: &'a Path,
     /// The bytes that were written: the checker's answer must be about exactly these.
     pub written: &'a [u8],
+    /// True exactly when this run hollowed the model; geometry is checked independently.
+    pub declared_hollow: bool,
 }
 
 fn rule_of(j: &Json) -> Option<Rule> {
@@ -336,6 +338,9 @@ fn command(job: &Job) -> Command {
         .arg(job.stl)
         .arg("--out")
         .arg(job.report);
+    if job.declared_hollow {
+        c.arg("--declared-hollow");
+    }
     c
 }
 
@@ -698,7 +703,18 @@ mod tests {
             stl: Path::new("s"),
             report: Path::new("/nonexistent/r.json"),
             written: b"x",
+            declared_hollow: false,
         };
+        assert!(!command(&job).get_args().any(|a| a == "--declared-hollow"));
+        let hollow = Job {
+            declared_hollow: true,
+            ..job
+        };
+        assert!(
+            command(&hollow)
+                .get_args()
+                .any(|a| a == "--declared-hollow")
+        );
         assert!(run(&job).unwrap_err().contains("cannot run the checker"));
     }
 
@@ -735,6 +751,7 @@ mod tests {
                 stl: Path::new("s"),
                 report: &report,
                 written: b"x",
+                declared_hollow: false,
             };
             let started = std::time::Instant::now();
             let answer = run_bounded(&job, timeout);
