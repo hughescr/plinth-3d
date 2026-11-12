@@ -32,6 +32,15 @@ const PROTECTED: [&str; 2] = ["test-data/", "reference/"];
 /// The one file that may read the process environment.
 const ENV_MODULE: &str = "crates/cli/src/args.rs";
 
+/// Top-level folder of upstream third-party code, kept as published. Its files are exempt from
+/// the house style and structure rules (the line cap and the lint-allow ban) and from nothing
+/// else: the safety and integrity rules apply to them too.
+const VENDOR_DIR: &str = "vendor/";
+
+fn is_vendored(path: &str) -> bool {
+    path.starts_with(VENDOR_DIR)
+}
+
 fn is_rust(path: &str) -> bool {
     path.ends_with(".rs")
 }
@@ -54,7 +63,10 @@ pub fn line_rule(path: &str, line: &str, window: &[&str]) -> Option<&'static str
     if line.contains(&pat(&["#[", "ignore"])) {
         return Some("an ignored test (no hidden skips)");
     }
-    if line.contains(&pat(&["too_many", "_arguments"])) && line.contains("allow(") {
+    if !is_vendored(path)
+        && line.contains(&pat(&["too_many", "_arguments"]))
+        && line.contains("allow(")
+    {
         return Some("an allow for too many arguments (split the function)");
     }
     let guarded = path.starts_with("crates/") || path.starts_with("checker/");
@@ -155,10 +167,10 @@ fn hunk_start(header: &str) -> usize {
         .unwrap_or(1)
 }
 
-/// A `.rs` file over the line cap.
+/// A `.rs` file over the line cap. Vendored sources are exempt (see `VENDOR_DIR`).
 #[must_use]
 pub fn too_long(path: &str, lines: usize) -> Option<Finding> {
-    (is_rust(path) && lines > MAX_RS_LINES).then(|| Finding {
+    (is_rust(path) && !is_vendored(path) && lines > MAX_RS_LINES).then(|| Finding {
         file: path.to_owned(),
         line: 0,
         rule: "a Rust file over 1,500 lines (split it)",
@@ -307,6 +319,26 @@ mod tests {
         assert!(too_long("a.rs", MAX_RS_LINES).is_none());
         assert!(too_long("a.rs", MAX_RS_LINES + 1).is_some());
         assert!(too_long("a.md", 99_999).is_none());
+    }
+
+    #[test]
+    fn vendored_sources_skip_the_style_rules_and_keep_the_safety_rules() {
+        // A 1,501-line file passes under the top-level vendor/ folder and fails everywhere else.
+        let long = "fn f() {}\n".repeat(MAX_RS_LINES + 1);
+        let lines = long.lines().count();
+        let vendored = "vendor/manifold-csg-sys/src/lib.rs";
+        assert!(too_long(vendored, lines).is_none());
+        assert!(too_long("crates/geom/src/lib.rs", lines).is_some());
+        assert!(too_long("crates/geom/vendor/lib.rs", lines).is_some());
+        assert!(too_long("vendored/lib.rs", lines).is_some());
+        // The lint-allow ban is a style rule, so vendored code may carry the allow.
+        let allow = pat(&["#[allow(clippy::too_many", "_arguments)]"]);
+        assert!(scan_text(vendored, &allow).is_empty());
+        assert_eq!(scan_text("crates/geom/src/a.rs", &allow).len(), 1);
+        // The unfinished-code and ignored-test rules are not style rules and still apply.
+        let todo = pat(&["    todo", "!();"]);
+        assert_eq!(scan_text(vendored, &todo).len(), 1);
+        assert_eq!(scan_text(vendored, &ignore_line()).len(), 1);
     }
 
     #[test]

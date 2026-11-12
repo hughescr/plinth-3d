@@ -111,6 +111,7 @@ fn model_json(candidate: bool, m: &ModelRun) -> Json {
         ("error", error),
         ("checker", checker_json(checked)),
         ("fr21", m.fr21.clone().unwrap_or(Json::Null)),
+        ("hollow", m.hollow.clone().unwrap_or(Json::Null)),
     ]);
     if let (Some(r), Json::Obj(pairs)) = (&m.review, &mut json) {
         pairs.push((
@@ -976,6 +977,7 @@ mod tests {
             supported: false,
             planning_blockers: false,
             fr21: None,
+            hollow: None,
             review: None,
             outcome,
         };

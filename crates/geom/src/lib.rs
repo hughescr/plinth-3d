@@ -18,6 +18,7 @@ pub mod bvh;
 pub mod clearance;
 pub mod counters;
 pub mod error;
+pub mod hollow;
 pub mod label;
 pub mod loop_canary;
 pub mod measure;
