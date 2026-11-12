@@ -358,6 +358,54 @@ pub fn slice_layers(mesh: &Mesh, grid: &LayerGrid) -> Measure<Vec<LayerSlab>> {
     slice_layers_par(mesh, grid, 1)
 }
 
+/// Diagnostic batch of explicit slab endpoints, sorted by both bottom and top.
+/// Uses the production material-envelope kernel and builds triangle bands once.
+/// Bounded to 1024 slabs so phase diagnostics cannot create an unbounded work list.
+pub(crate) fn slice_slabs_at(mesh: &Mesh, bounds: &[[f64; 2]]) -> Measure<Vec<LayerSlab>> {
+    if bounds.len() > 1024
+        || bounds
+            .iter()
+            .any(|z| !z[0].is_finite() || !z[1].is_finite() || z[0] >= z[1])
+        || bounds
+            .windows(2)
+            .any(|w| w[0][0] > w[1][0] || w[0][1] > w[1][1])
+    {
+        return Measure::Unverified("invalid or over-budget irregular slab batch");
+    }
+    counters::record(Op::SliceLayers, bounds.len());
+    let mut active = vec![Vec::new(); bounds.len()];
+    for t in 0..mesh.triangle_count() {
+        let triangle = mesh.triangle_corners(t);
+        let lo = triangle.iter().map(|v| v[2]).fold(f64::INFINITY, f64::min);
+        let hi = triangle
+            .iter()
+            .map(|v| v[2])
+            .fold(f64::NEG_INFINITY, f64::max);
+        let first = bounds.partition_point(|z| z[1] < lo);
+        let last = bounds.partition_point(|z| z[0] <= hi);
+        for band in &mut active[first..last] {
+            band.push(t as u32);
+        }
+    }
+    let mut env = Vec::new();
+    let mut mid = Vec::new();
+    Measure::Known(
+        bounds
+            .iter()
+            .zip(active)
+            .enumerate()
+            .map(|(k, (&[bottom, top], tris))| {
+                layer_segments(mesh, &tris, bottom, top, &mut env, &mut mid);
+                LayerSlab {
+                    layer: k as u32,
+                    envelope: rings_of(&env),
+                    midplane: rings_of(&mid),
+                }
+            })
+            .collect(),
+    )
+}
+
 /// Like [`slice_layers`] on up to `threads` threads, in contiguous layer ranges. The result
 /// is identical for every `threads`. The calling thread is one of the workers; counted once,
 /// on the calling thread, with one item per layer. The tasks made and the distinct threads

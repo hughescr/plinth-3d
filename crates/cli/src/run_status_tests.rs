@@ -107,6 +107,7 @@ fn json_status_uses_the_same_measured_gate_not_publication_alone() {
                 supported: true,
                 planning_blockers: blocked,
                 fr21: None,
+                hollow: None,
                 review: None,
                 outcome: Outcome::Published {
                     path: "out/file.chitubox".into(),

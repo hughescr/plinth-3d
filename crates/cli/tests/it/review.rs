@@ -21,6 +21,7 @@ fn review_cfg(w: &Path, fake: &Fake, tag: &str, budget: Duration) -> Config {
         plan_budget: budget,
         checker_timeout: Duration::from_secs(60),
         stop_plan_at_phase: None,
+        hollow_fixture: false,
     });
     cfg
 }
@@ -76,6 +77,22 @@ fn review_mode_and_candidate_mode_never_combine() {
         .expect("start plinth");
     assert_eq!(out.status.code(), Some(4));
     assert!(!w.join("bin-out").exists());
+}
+
+#[test]
+fn hollow_refusal_happens_before_planning_and_publication() {
+    let w = scratch("review-hollow-refuse");
+    let mut cfg = review_cfg(&w, &Fake::honest(), "fake", Duration::from_secs(60));
+    cfg.review.as_mut().unwrap().hollow_fixture = true;
+    // A 3 mm box cannot contain the required 2.501 mm inward offset.
+    let r = go(&cfg);
+    let (stage, message) = failure(&r);
+    assert_eq!(stage, "hollow", "{message}");
+    assert!(message.contains("offset"), "{message}");
+    assert_eq!(planner_hits(&r), 0);
+    assert!(r.models[0].steps.iter().any(|s| s.name == "hollow"));
+    assert!(!r.models[0].steps.iter().any(|s| s.name == "check"));
+    assert_eq!(names(&cfg.out_dir), Vec::<String>::new());
 }
 
 #[test]
@@ -268,6 +285,7 @@ fn a_checker_that_hangs_is_stopped_at_the_timeout() {
         plan_budget: Duration::from_secs(60),
         checker_timeout: Duration::from_millis(300),
         stop_plan_at_phase: None,
+        hollow_fixture: false,
     });
     let started = std::time::Instant::now();
     let r = go(&cfg);

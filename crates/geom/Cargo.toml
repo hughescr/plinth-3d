@@ -9,6 +9,10 @@ publish.workspace = true
 [lib]
 doctest = false
 
+[dependencies]
+# Maintained safe bindings to upstream Manifold; f64 Booleans, no global worker pool.
+manifold-csg = { version = "0.4.1", default-features = false }
+
 [dev-dependencies]
 proptest = { workspace = true }
 

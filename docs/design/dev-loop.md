@@ -602,7 +602,7 @@ H8 is a record that ChituBox v1.4.0 opened, showed and sliced the **exact file**
 - **pre-commit** (≤ 5 s; fails loudly):
   - `cargo fmt --all --check` in both workspaces (M18: 0.6 s);
   - `scripts/check-independence`;
-  - a grep of the staged diff for: `#[ignore]`; `env::var` outside the CLI; `allow(clippy::too_many_arguments)`; `todo!()` or `unimplemented!()` outside tests; any `.rs` file over 1,500 lines; any change under `test-data/` or `reference/` (read-only evidence).
+  - a grep of the staged diff for: `#[ignore]`; `env::var` outside the CLI; `allow(clippy::too_many_arguments)` outside `vendor/`; `todo!()` or `unimplemented!()` outside tests; any `.rs` file over 1,500 lines outside `vendor/` (the upstream third-party code kept as published, exempt from the style and structure rules only); any change under `test-data/` or `reference/` (read-only evidence).
 - **pre-push:** passes only if `target/gate-log.tsv` has a passing gate row for the exact tree being pushed (`git rev-parse HEAD^{tree}`, clean tree). Otherwise it runs `scripts/gate`. A stale pass does not count. It also checks signatures (below).
 
 **`scripts/gate`** (≤ 180 s, background protocol), run by the orchestrator before every merge, for both workspaces:

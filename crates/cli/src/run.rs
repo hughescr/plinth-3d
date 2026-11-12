@@ -52,6 +52,8 @@ pub struct Review {
     /// planner's deadline fires at the first check in the planner phase of this name,
     /// whatever the clock says. See `PlanSettings::stop_at_phase`.
     pub stop_plan_at_phase: Option<&'static str>,
+    /// Hollow and drill an eligible convex mesh before the unchanged support pipeline.
+    pub hollow_fixture: bool,
 }
 
 /// The label every review file, report and embedded model name carries.
@@ -155,6 +157,8 @@ pub struct ModelRun {
     pub planning_blockers: bool,
     /// FR-21 emitted-file evidence also embedded in run.json.
     pub fr21: Option<crate::json::Json>,
+    /// Convex hollow measurements on the decoded model (review mode only).
+    pub hollow: Option<crate::json::Json>,
     /// Review-mode facts (`None` outside review mode).
     pub review: Option<ReviewRun>,
     /// The result.
@@ -618,6 +622,20 @@ fn build_bytes(cfg: &Config, named: &Named, m: &mut ModelRun) -> Result<Built, F
         // A failed search is a planning blocker too, even before ReportData exists.
         // Successful construction replaces this provisional blocker from its data.
         m.planning_blockers = true;
+        if cfg.review.is_some_and(|r| r.hollow_fixture) {
+            let hollowed = timed(&mut m.steps, "hollow", || {
+                plinth_geom::hollow::hollow(&mesh)
+            })
+            .map_err(|e| ("hollow", e))?;
+            let built = supported(cfg, named, (&hollowed.mesh, &sha256), m)?;
+            m.hollow = Some(
+                timed(&mut m.steps, "hollow-measure-written", || {
+                    crate::hollow::written(&mesh, &hollowed, &built.bytes)
+                })
+                .map_err(|e| ("hollow-measure-written", e))?,
+            );
+            return Ok(built);
+        }
         return supported(cfg, named, (&mesh, &sha256), m);
     }
     let (project, parallel) = timed(&mut m.steps, "convert", || {
@@ -984,6 +1002,7 @@ fn run_model(cfg: &Config, named: &Named, fault: Fault) -> ModelRun {
         supported: false,
         planning_blockers: false,
         fr21: None,
+        hollow: None,
         review: cfg.review.map(|_| ReviewRun::default()),
         outcome: Outcome::Failed {
             stage: "read",

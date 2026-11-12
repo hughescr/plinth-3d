@@ -22,7 +22,7 @@ pub const DEFAULT_MAX_THREADS: usize = 8;
 pub const MAX_THREADS_LIMIT: usize = 256;
 
 /// The usage line.
-pub const USAGE: &str = "usage: plinth [--max-threads N] --out-dir DIR [--report FILE] [--checker FILE] [--limits FILE] [--candidate | --review-construction [--plan-budget SECS] [--checker-timeout SECS]] <input.stl>...";
+pub const USAGE: &str = "usage: plinth [--max-threads N] --out-dir DIR [--report FILE] [--checker FILE] [--limits FILE] [--candidate | --review-construction [--hollow-fixture] [--plan-budget SECS] [--checker-timeout SECS]] <input.stl>...";
 
 /// Default wall-clock budget of review-mode planning, seconds.
 pub const DEFAULT_PLAN_BUDGET_SECS: f64 = 120.0;
@@ -51,6 +51,8 @@ pub struct Options {
     pub candidate: bool,
     /// Review mode: supports for any posed STL, to look at, never a print candidate.
     pub review: bool,
+    /// Review-only convex hollowing with two axial 3 mm openings.
+    pub hollow_fixture: bool,
     /// `--plan-budget`, when given (review mode only).
     pub plan_budget: Option<std::time::Duration>,
     /// `--checker-timeout`, when given (review mode only).
@@ -113,6 +115,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
         limits: None,
         candidate: false,
         review: false,
+        hollow_fixture: false,
         plan_budget: None,
         checker_timeout: None,
     };
@@ -132,6 +135,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
             Long("limits") => o.limits = Some(value(&mut p)?.into()),
             Long("candidate") => o.candidate = true,
             Long("review-construction") => o.review = true,
+            Long("hollow-fixture") => o.hollow_fixture = true,
             Long("plan-budget") => {
                 let text = value(&mut p)?.string().map_err(|e| e.to_string())?;
                 o.plan_budget = Some(seconds("--plan-budget", &text)?);
@@ -149,6 +153,11 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
     }
     if o.inputs.is_empty() {
         return Err("no input files".into());
+    }
+    if o.hollow_fixture && (!o.review || o.candidate) {
+        return Err(
+            "--hollow-fixture requires --review-construction and refuses --candidate".into(),
+        );
     }
     if o.review && o.candidate {
         return Err(
@@ -189,6 +198,31 @@ mod tests {
                 .unwrap()
                 .candidate
         );
+    }
+
+    #[test]
+    fn hollowing_is_explicitly_review_only() {
+        let good = [
+            "--hollow-fixture",
+            "--review-construction",
+            "--out-dir=o",
+            "x",
+        ];
+        assert!(parse(a(&good)).unwrap().hollow_fixture);
+        for bad in [
+            &good[..1],
+            &["--hollow-fixture", "--out-dir=o", "x"],
+            &["--hollow-fixture", "--candidate", "--out-dir=o", "x"],
+            &[
+                "--hollow-fixture",
+                "--review-construction",
+                "--candidate",
+                "--out-dir=o",
+                "x",
+            ],
+        ] {
+            assert!(parse(a(bad)).is_err());
+        }
     }
 
     #[test]

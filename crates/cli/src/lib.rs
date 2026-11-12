@@ -7,6 +7,7 @@
 
 pub mod args;
 pub mod check;
+mod hollow;
 pub mod json;
 pub mod jsonin;
 mod load_report;
@@ -60,6 +61,7 @@ pub fn config_from(opts: &args::Options, exe: &Path) -> Result<run::Config, Stri
                     args::DEFAULT_CHECKER_TIMEOUT_SECS,
                 )),
             stop_plan_at_phase: None,
+            hollow_fixture: opts.hollow_fixture,
         }),
     })
 }
