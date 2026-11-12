@@ -388,6 +388,8 @@ fn find(u: &mut [usize], mut x: usize) -> usize {
 #[derive(Debug)]
 struct Plane {
     z: f64,
+    /// Original support sample, not an extra local material event.
+    support_sample: bool,
     /// (part index, section)
     secs: Vec<(usize, Sec)>,
     /// Connected to the plate through support printed in this layer or below.
@@ -460,7 +462,12 @@ fn root_plane(
     for (i, (part, s)) in secs.iter().enumerate() {
         let (rooted, covered) = match prev {
             None => (roots.infos.get(*part).is_some_and(|i| i.on_plate), false),
-            Some(planes) => below(s, planes, roots.reading.depth),
+            Some(planes) => below(
+                s,
+                planes,
+                roots.reading.depth,
+                *part >= roots.infos.len() || roots.feet.contains(part),
+            ),
         };
         let r = find(&mut uf, i);
         root_comp[r] |= rooted;
@@ -475,9 +482,9 @@ fn root_plane(
 
 /// Is `s` rooted by the layer below (for every plane of it some rooted section overlaps `s`),
 /// and is it at least covered (rooted or reliant sections overlap it in every plane)?
-fn below(s: &Sec, planes: &[Plane], depth: f64) -> (bool, bool) {
+fn below(s: &Sec, planes: &[Plane], depth: f64, full_batch: bool) -> (bool, bool) {
     let (mut all_rooted, mut all_covered) = (true, true);
-    for pl in planes {
+    for pl in planes.iter().filter(|p| full_batch || p.support_sample) {
         let (mut any_rooted, mut any_covered) = (false, false);
         for j in neighbours(&pl.grid, &s.bb) {
             // A rooted overlap settles both answers for this plane (rooted implies covered).
@@ -514,9 +521,27 @@ struct Walk<'a> {
 }
 
 impl Walk<'_> {
-    fn plane(&mut self, pl: &Plane, k: usize) {
+    fn plane(&mut self, pl: &Plane, k: usize, check_contacts: bool) -> (usize, usize) {
         let (scene, z0) = (self.scene, self.z0);
-        self.pieces += pl.secs.len();
+        let candidates: Vec<_> = pl
+            .secs
+            .iter()
+            .enumerate()
+            .filter(|(i, (part, _))| {
+                check_contacts
+                    && *part < scene.parts.len()
+                    && !pl.rooted[*i]
+                    && !pl.reliant[*i]
+                    && !self.reported.contains(part)
+            })
+            .map(|(_, (part, sec))| (*part, sec))
+            .collect();
+        let (possible, batches, tiles) = model::possible_carriers(scene, pl.z, &candidates);
+        self.pieces += pl
+            .secs
+            .iter()
+            .filter(|(part, _)| *part < scene.parts.len())
+            .count();
         self.planes_total += 1;
         for (i, (part, s)) in pl
             .secs
@@ -537,6 +562,13 @@ impl Walk<'_> {
                 ));
                 continue;
             }
+            if let Some(evidence) = possible.get(part) {
+                self.relies_on_model.push(format!(
+                    "record {} ({}) {evidence} in layer {k}; its connection through that material to the plate is not proved",
+                    p.rec, p.role.name()
+                ));
+                continue;
+            }
             let n = s.poly.len() as f64;
             let c = s
                 .poly
@@ -554,6 +586,7 @@ impl Walk<'_> {
                 ),
             ));
         }
+        (batches, tiles)
     }
 }
 
@@ -566,6 +599,8 @@ struct Walked {
     pieces: usize,
     unrooted_pieces: usize,
     planes: usize,
+    model_slice_batches: usize,
+    model_tiles: usize,
 }
 
 /// Why the walk cannot be done, as an unverified outcome.
@@ -602,7 +637,7 @@ use walk::run as walk;
 fn anchored(w: &Walked, b: &Birth, depth: f64, support_count: usize) -> bool {
     let held = |planes: &[Plane], from: f64| {
         let mut any = false;
-        for pl in planes.iter().filter(|p| p.z >= from) {
+        for pl in planes.iter().filter(|p| p.support_sample && p.z >= from) {
             any = true;
             let hit = pl.secs.iter().enumerate().any(|(i, (part, s))| {
                 *part < support_count
@@ -814,6 +849,11 @@ pub fn measure(scene: &Scene, patches: &PatchOut) -> Outcome {
             "model_standing_feet_checked",
             Json::Uint(feet_of(scene, patches).len() as u64),
         ),
+        (
+            "model_slice_batches",
+            Json::Uint(walked.model_slice_batches as u64),
+        ),
+        ("model_tiles", Json::Uint(walked.model_tiles as u64)),
         ("layer_height_mm", Json::Num(LAYER_MM)),
         ("layers", Json::Uint(walked.layers.len() as u64)),
         ("sample_planes", Json::Uint(walked.planes as u64)),
@@ -829,7 +869,7 @@ pub fn measure(scene: &Scene, patches: &PatchOut) -> Outcome {
         (
             "model_rooting",
             Json::str(
-                "model-standing feet are rooted only through material sections reached from earlier rooted sections or independently rooted support in the same layer; future model material is not seeded",
+                "model material is rooted only through local sections reached from earlier rooted sections or independently rooted support in the same layer; paths outside the local window remain unverified and future material is not seeded; a local contact does not by itself prove rooting",
             ),
         ),
     ]);

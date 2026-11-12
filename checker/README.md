@@ -60,11 +60,31 @@ Positive drainage/inside certification is future work, not a completed hollow ch
 
 ## H3 model-standing feet
 
-When feet touch the model, H3 tries to slice its material into convex tiles without filling
-holes. Those tiles and support sections enter the same print-order root graph. Model material
-is not a source: it needs rooted support or earlier rooted material. Same-layer cycles cannot
-root themselves. Foot starts and model vertex-height events are included in the plane batch.
-A missing foot section at its first thick height is explicitly unverified.
+H3 does no model slicing when no foot touches the model. Otherwise it batches nearby feet
+into local XY windows (the foot bounds plus a 2 mm neighbourhood, overlapping windows merged
+once). Material is clipped to those windows without filling holes; parity rays still keep
+boundary crossings outside the Y window. Slices stop above the feet. A graph of written support bounding boxes first selects windows reached by overlapping
+support-box paths from the plate. This graph is only a work selector: it does not cover paths
+through model material or every connection accepted across adjacent layers. A window without
+such a source needs only the feet's first-print slices, not a layer-by-layer material walk.
+Bounding boxes never prove rooting; omitted paths leave rooting unverified.
+
+Only independently rooted support or earlier rooted local material can root model material.
+Same-layer cycles cannot root themselves. Every support role may receive proved material
+rooting (FR-27). Model contact alone is not proof: newly unrooted sections are checked in
+local XY batches before a certain air finding. Full-depth or partial material contact without
+proved material rooting is unverified, not a certain violation. A path outside the local
+windows is not proved: feet and dependent parts retain explicit unverified reliance. This is
+a bounded local proof, not a certificate of the whole model's print-order connectivity.
+
+Foot starts and local model vertex events add proof planes, but do not change the existing
+support sample planes, their reported locations, or the island anchoring test. A foot that
+first prints clear of all material is a violation even if it touches the model later or has a
+separate support under it. A partial overlap, an overlap split across tiles, or a missing foot
+section at its first thick height is explicitly unverified, not proved air. H3 reports `model_slice_batches` (region/plane slice calls) and `model_tiles`
+(material tiles produced across those calls, including the local air/contact checks),
+separately from the original support-only
+`pieces` and `sample_planes` counts. None of these counts is a print-candidate count.
 
 If the model is open, slicing is unresolved, or a scene-local model-slicing budget is exceeded,
 H3 falls back to the old support-only walk: model-standing feet and dependent parts remain
@@ -75,6 +95,11 @@ requirement. The load audit has not been replaced by an inside load ledger.
 
 ## Known blind spots and pending decisions
 
+- Global model-material rooting is future work for the planner stage that introduces
+  model-rooted feet, and must fit the checker's time budget. Bounded local unverified is
+  accepted for this merge: Round 25 has 29 support parts unverified because their model
+  rooting is not proved within the local window. This is not proof that they float and is
+  never a pass. Direct local contact findings for other parts are reported separately.
 - An **undeclared hollow receives the old topology-only H5**, as before this change. A
   one-hole hollow can therefore be called not applicable. This applicability blind spot must
   be made sound before hollow files may become print candidates.

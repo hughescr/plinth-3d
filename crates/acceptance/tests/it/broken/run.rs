@@ -40,6 +40,7 @@ pub(crate) fn check_bytes(
         stl: &stl_path,
         report: &report,
         written: bytes,
+        declared_hollow: false,
     })
 }
 

@@ -961,6 +961,124 @@ fn threads_checker_report_is_identical_at_one_thread_and_the_allocation() {
 }
 
 #[test]
+fn native_round25_h3_distinguishes_model_contact_from_clear_air_and_bounds_work() {
+    use plinth_check::json::Json;
+    let scene = sample_scene("03-round25-supports", 0);
+    let out = plinth_check::h3::measure(&scene, &patch::measure(&scene));
+    assert_eq!(
+        out.reason,
+        "33 support part(s) or model island(s) have no connection to the plate or to support printed in that layer or below"
+    );
+    for (key, value) in [
+        ("pieces", 7593),
+        ("sample_planes", 610),
+        ("unrooted_pieces", 1883),
+        ("model_standing_feet_checked", 7),
+    ] {
+        assert_eq!(out.detail.get(key), Some(&Json::Uint(value)), "{key}");
+    }
+    let records: Vec<_> = out
+        .located
+        .iter()
+        .filter(|l| l.reason.contains("has no connection"))
+        .filter_map(|l| l.location.record)
+        .collect();
+    assert_eq!(records, [6, 32, 24, 21, 94]);
+    let Some(Json::Arr(unknown)) = out.detail.get("unverified_items") else {
+        panic!("unverified items")
+    };
+    let unknown: Vec<_> = unknown.iter().map(Json::render).collect();
+    for (record, layer, evidence) in [
+        (9, 77, "partly overlaps"),
+        (12, 79, "partly overlaps"),
+        (18, 83, "partly overlaps"),
+        (72, 99, "overlaps local model material by the strict depth"),
+        (91, 124, "partly overlaps"),
+    ] {
+        assert!(
+            unknown.iter().any(
+                |s| s.contains(&format!("record {record} (tip ball) {evidence}"))
+                    && s.contains(&format!("in layer {layer};"))
+            ),
+            "record {record}: {unknown:?}"
+        );
+    }
+    let Some(Json::Uint(batches)) = out.detail.get("model_slice_batches") else {
+        panic!("slice work missing")
+    };
+    assert!(
+        *batches == 17,
+        "seven foot starts plus ten local air/contact checks: {batches}"
+    );
+    let Some(Json::Uint(tiles)) = out.detail.get("model_tiles") else {
+        panic!("tile work missing")
+    };
+    assert!(
+        *tiles > 0 && *tiles < 2000,
+        "local tiles, not whole-model slices: {tiles}"
+    );
+}
+
+#[test]
+fn native_connected_raft_keeps_the_same_model_contact_classification() {
+    use plinth_check::json::Json;
+    let scene = sample_scene("04-round25-supports-raft-connected", 0);
+    let out = plinth_check::h3::measure(&scene, &patch::measure(&scene));
+    assert!(out.reason.starts_with("33 support part(s)"));
+    let records: Vec<_> = out
+        .located
+        .iter()
+        .filter(|l| l.reason.contains("has no connection"))
+        .filter_map(|l| l.location.record)
+        .collect();
+    assert_eq!(records, [6, 32, 24, 21, 64]);
+    let Some(Json::Arr(unknown)) = out.detail.get("unverified_items") else {
+        panic!("unverified items")
+    };
+    for (record, evidence) in [
+        (9, "partly overlaps"),
+        (12, "partly overlaps"),
+        (18, "partly overlaps"),
+        (42, "overlaps local model material by the strict depth"),
+        (61, "partly overlaps"),
+    ] {
+        assert!(unknown.iter().any(|s| {
+            s.render()
+                .contains(&format!("record {record} (tip ball) {evidence}"))
+        }));
+    }
+    assert_eq!(out.detail.get("model_slice_batches"), Some(&Json::Uint(17)));
+}
+
+#[test]
+fn native_on_edge_foot_partial_material_contact_is_not_certain_air() {
+    use plinth_check::json::Json;
+    let scene = sample_scene("07-round25-on-edge-braced", 0);
+    let patches = patch::measure(&scene);
+    assert!(patches.mesh().comps.iter().any(|c| c.parts.contains(&17)));
+    let out = plinth_check::h3::measure(&scene, &patches);
+    assert_eq!(
+        out.reason,
+        "22 support part(s) or model island(s) have no connection to the plate or to support printed in that layer or below"
+    );
+    assert!(out.located.iter().all(|l| l.location.record != Some(17)));
+    let Some(Json::Arr(unknown)) = out.detail.get("unverified_items") else {
+        panic!("unverified items")
+    };
+    assert!(unknown.iter().any(|s| s.render().contains("record 17 model-standing foot partly overlaps model material at its first printable section")));
+    assert_eq!(
+        out.detail.get("model_standing_feet_checked"),
+        Some(&Json::Uint(2))
+    );
+    assert_eq!(out.detail.get("model_slice_batches"), Some(&Json::Uint(15)));
+    for record in [24, 53, 123, 69, 65, 12, 19, 3, 50] {
+        assert!(unknown.iter().any(|s| s.render().contains(&format!(
+            "record {record} (tip ball) overlaps local model material by the strict depth"
+        ))));
+    }
+}
+
+#[test]
 fn native_h9_records_the_thin_native_arms_as_a_finding_not_a_limit_change() {
     // Design section 12, point 4: ChituBox's own r 0.05 parts are 0.098 mm across flats.
     let scene = sample_scene("03-round25-supports", 0);
