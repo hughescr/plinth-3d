@@ -261,6 +261,7 @@ fn broken_a_stale_file_hash_is_refused_for_every_rule() {
             stl: &dir.join("f.stl"),
             report: &dir.join("r.json"),
             written: &other,
+            declared_hollow: false,
         });
         let err = answer.expect_err("an answer about other bytes must be refused");
         assert!(err.contains("another file"), "{id}: {err}");

@@ -11,18 +11,24 @@ pub struct Limits {
     pub h6_gap_mm: f64,
     pub h9_thickness_mm: f64,
     pub region_length_mm: f64,
+    pub drain_min_mm: f64,
+    pub mouth_clearance_mm: f64,
+    /// Compatibility defaults because the file omitted the entire optional section.
+    pub hollow_defaults_used: bool,
 }
 
 impl Limits {
     /// The values with their names, in file order (for the report).
     #[must_use]
-    pub fn named(&self) -> [(&'static str, f64); 5] {
+    pub fn named(&self) -> [(&'static str, f64); 7] {
         [
             ("h1_patch_area_mm2", self.h1_patch_area_mm2),
             ("h4_lift_mm", self.h4_lift_mm),
             ("h6_gap_mm", self.h6_gap_mm),
             ("h9_thickness_mm", self.h9_thickness_mm),
             ("region_length_mm", self.region_length_mm),
+            ("drain_min_mm", self.drain_min_mm),
+            ("mouth_clearance_mm", self.mouth_clearance_mm),
         ]
     }
 }
@@ -87,17 +93,67 @@ pub fn parse(text: &str) -> Res<Limits> {
         };
         Ok(values.remove(i).1)
     };
+    let hollow = hollow_values(text)?;
     let limits = Limits {
         h1_patch_area_mm2: take("h1_patch_area_mm2")?,
         h4_lift_mm: take("h4_lift_mm")?,
         h6_gap_mm: take("h6_gap_mm")?,
         h9_thickness_mm: take("h9_thickness_mm")?,
         region_length_mm: take("region_length_mm")?,
+        drain_min_mm: hollow.0[0],
+        mouth_clearance_mm: hollow.0[1],
+        hollow_defaults_used: hollow.1,
     };
     match values.first() {
         Some((k, _)) => fail(format!("limits: unknown key {k}")),
         None => Ok(limits),
     }
+}
+
+fn hollow_values(text: &str) -> Res<([f64; 2], bool)> {
+    let names = ["drain_min_mm", "mouth_clearance_mm"];
+    let mut values = [3.0, 5.0];
+    let (mut active, mut section_seen, mut seen) = (false, false, [false; 2]);
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') || line.ends_with(']') {
+            match line {
+                "[limits]" => active = false,
+                "[hollow]" if !section_seen => {
+                    active = true;
+                    section_seen = true;
+                }
+                _ => {
+                    return fail(format!(
+                        "limits: unknown, duplicate or malformed section {line}"
+                    ));
+                }
+            }
+            continue;
+        }
+        if !active || line.is_empty() {
+            continue;
+        }
+        let (key, value) = line.split_once('=').ok_or_else(|| {
+            crate::bytes::ReadError("hollow limits: expected key = number".to_owned())
+        })?;
+        let Some(i) = names.iter().position(|k| *k == key.trim()) else {
+            return fail(format!("unknown hollow limit {key}"));
+        };
+        let Ok(v) = value.trim().parse::<f64>() else {
+            return fail("invalid hollow limit");
+        };
+        if seen[i] || !v.is_finite() || v <= 0.0 {
+            return fail("duplicate or nonpositive hollow limit");
+        }
+        seen[i] = true;
+        values[i] = v;
+    }
+    if section_seen && seen.iter().any(|v| !v) {
+        return fail("hollow limits: both drain_min_mm and mouth_clearance_mm are required");
+    }
+    // Old producer limits omit this whole section. Report that provenance for hollow runs.
+    Ok((values, !section_seen))
 }
 
 #[cfg(test)]
@@ -142,9 +198,89 @@ mod tests {
     }
 
     #[test]
+    fn hollow_defaults_and_explicit_overrides_are_independent_and_strict() {
+        let defaults = parse(GOOD).expect("legacy limits remain supported");
+        assert_eq!(
+            [
+                defaults.drain_min_mm.to_bits(),
+                defaults.mouth_clearance_mm.to_bits()
+            ],
+            [3.0_f64.to_bits(), 5.0_f64.to_bits()]
+        );
+        let explicit = parse(&format!(
+            "{GOOD}[hollow]\ndrain_min_mm = 3.2\nmouth_clearance_mm = 10\n"
+        ))
+        .expect("override");
+        assert_eq!(
+            [
+                explicit.drain_min_mm.to_bits(),
+                explicit.mouth_clearance_mm.to_bits()
+            ],
+            [3.2_f64.to_bits(), 10.0_f64.to_bits()]
+        );
+        for bad in [
+            "unknown = 3",
+            "drain_min_mm = NaN",
+            "mouth_clearance_mm = 0",
+            "drain_min_mm = 3\ndrain_min_mm = 4",
+            "broken",
+        ] {
+            assert!(parse(&format!("{GOOD}[hollow]\n{bad}")).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn hollow_headers_cannot_silently_default_and_missing_section_is_reported() {
+        for header in [
+            "[holow]",
+            "[hollow",
+            "hollow]",
+            "[[hollow]]",
+            "[hollow] trailing",
+        ] {
+            assert!(
+                parse(&format!(
+                    "{GOOD}{header}\ndrain_min_mm = 2\nmouth_clearance_mm = 5\n"
+                ))
+                .is_err(),
+                "{header}"
+            );
+        }
+        assert!(parse(&format!("{GOOD}[hollow]\n")).is_err());
+        let limits = parse(GOOD).expect("absent section has documented defaults");
+        assert!(limits.hollow_defaults_used);
+        let explicit = parse(&format!(
+            "{GOOD}[hollow]\ndrain_min_mm = 3\nmouth_clearance_mm = 5\n"
+        ))
+        .unwrap();
+        assert!(!explicit.hollow_defaults_used);
+        let input = crate::report::Input {
+            path: "unreadable".to_owned(),
+            data: Err("test".to_owned()),
+        };
+        for declared in [false, true] {
+            let report = crate::report::build_posed_declared(
+                &limits,
+                &input,
+                None,
+                1,
+                &crate::h7::Pose::default(),
+                declared,
+            );
+            assert_eq!(
+                report
+                    .json
+                    .get("settings")
+                    .and_then(|s| s.get("hollow_limits_defaults_used")),
+                Some(&crate::json::Json::Bool(declared))
+            );
+        }
+    }
+
+    #[test]
     fn the_committed_limits_file_has_the_prd_values() {
         // PRD section 6: H1 0.50 mm2, H4 5.0 mm, H6 0.3 mm, H9 0.1 mm, region length 3.0 mm.
-        let text = std::fs::read_to_string("../limits.toml").expect("../limits.toml exists");
+        let text = std::fs::read_to_string("limits.toml").expect("checker limits.toml exists");
         let l = parse(&text).expect("parses");
         let want = [
             ("h1_patch_area_mm2", 0.50),
@@ -152,6 +288,8 @@ mod tests {
             ("h6_gap_mm", 0.3),
             ("h9_thickness_mm", 0.1),
             ("region_length_mm", 3.0),
+            ("drain_min_mm", 3.0),
+            ("mouth_clearance_mm", 5.0),
         ];
         assert_eq!(l.named(), want);
     }

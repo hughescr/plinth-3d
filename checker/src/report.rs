@@ -344,6 +344,19 @@ pub fn build_posed(
     threads: usize,
     pose: &h7::Pose,
 ) -> Report {
+    build_posed_declared(limits, chitubox, stl, threads, pose, false)
+}
+
+/// Explicit hollow applicability; the declaration never supplies geometric evidence.
+#[must_use]
+pub fn build_posed_declared(
+    limits: &Limits,
+    chitubox: &Input,
+    stl: Option<&Input>,
+    threads: usize,
+    pose: &h7::Pose,
+    declared_hollow: bool,
+) -> Report {
     let read = chitubox_input(chitubox);
     let stl_read = stl.map(stl_input);
     let structure_ok = read.ok && stl_read.as_ref().is_none_or(|(_, ok, _)| *ok);
@@ -352,9 +365,12 @@ pub fn build_posed(
         .and_then(|i| i.data.as_ref().ok())
         .map(|d| sha256::hex(d));
     let (rules, load_audit) = match (&read.file, chitubox.data.as_ref()) {
-        (Some(file), Ok(buf)) if structure_ok => measure::run_full(
+        (Some(file), Ok(buf)) if structure_ok => measure::run_full_declared(
             limits,
-            threads,
+            measure::Options {
+                threads,
+                declared_hollow,
+            },
             file,
             buf,
             stl_read.as_ref().and_then(|(_, _, m)| m.as_ref()),
@@ -392,6 +408,11 @@ pub fn build_posed(
         (
             "settings",
             Json::obj([
+                ("declared_hollow", Json::Bool(declared_hollow)),
+                (
+                    "hollow_limits_defaults_used",
+                    Json::Bool(declared_hollow && limits.hollow_defaults_used),
+                ),
                 ("layer_height_mm", Json::Num(crate::scene::LAYER_MM)),
                 ("threads", Json::Uint(crate::bytes::wide(threads))),
             ]),
@@ -432,6 +453,9 @@ mod tests {
             h6_gap_mm: 0.3,
             h9_thickness_mm: 0.1,
             region_length_mm: 3.0,
+            drain_min_mm: 3.0,
+            mouth_clearance_mm: 5.0,
+            hollow_defaults_used: false,
         }
     }
 

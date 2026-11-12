@@ -151,6 +151,9 @@ fn find_regions(scene: &Scene, patches: &PatchOut) -> Regions {
         with_cone: Vec::new(),
     };
     for (ci, chain) in scene.chains.chains.iter().enumerate() {
+        if chain.parts.iter().all(|&pi| scene.wholly_inside(pi)) {
+            continue;
+        }
         let Some(b) = chain.contact else { continue };
         // The ball is a contact if its written mesh touches the model.
         let touches = patches
@@ -215,6 +218,9 @@ fn incidental_in_regions(scene: &Scene, patches: &PatchOut, reg: &Regions) -> In
     };
     let rep = patches.mesh();
     for (ci, chain) in scene.chains.chains.iter().enumerate() {
+        if chain.parts.iter().all(|&pi| scene.wholly_inside(pi)) {
+            continue;
+        }
         let Some(b) = chain.contact else { continue };
         if !reg.exempt.contains(&b) {
             continue;
@@ -489,7 +495,7 @@ fn test_parts(scene: &Scene, reg: &Regions) -> Tally {
         tested: 0,
     };
     for (pi, part) in scene.parts.iter().enumerate() {
-        if reg.exempt.contains(&pi) {
+        if reg.exempt.contains(&pi) || scene.wholly_inside(pi) {
             continue;
         }
         if let Some(why) = &part.invalid {

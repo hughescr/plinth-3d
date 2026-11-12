@@ -30,6 +30,10 @@ pub struct Scene {
     /// The model mesh is closed and consistently oriented, so a ray's crossing parity says
     /// inside or outside.
     pub model_closed: bool,
+    /// Explicit applicability input, not evidence of cavities or drainage.
+    pub declared_hollow: bool,
+    pub(crate) model_slice_budget: crate::h3::model::Budget,
+    hollow: std::sync::OnceLock<crate::hollow::Hollow>,
 }
 
 /// Is the mesh (nine f32 per triangle) closed and consistently oriented?
@@ -47,6 +51,29 @@ fn closed_and_oriented(model: &[Tri]) -> bool {
 }
 
 impl Scene {
+    /// Declare applicability before any measurement; geometry remains independently checked.
+    #[must_use]
+    pub fn with_declared_hollow(mut self) -> Self {
+        self.declared_hollow = true;
+        self
+    }
+
+    /// No hollow search or allocation for undeclared scenes.
+    pub fn wholly_inside(&self, pi: usize) -> bool {
+        self.declared_hollow && self.hollow().wholly_inside(self, pi)
+    }
+
+    /// One batched hollow search, reused by H1/H2/H5/H6 for declared scenes only.
+    pub fn hollow(&self) -> &crate::hollow::Hollow {
+        self.hollow
+            .get_or_init(|| crate::hollow::Hollow::analyze(self))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hollow_analysis_unused(&self) -> bool {
+        self.hollow.get().is_none()
+    }
+
     /// Is `p` inside the model? `None` when no ray direction gives a clean answer or the
     /// model is not a closed, oriented mesh.
     #[must_use]
@@ -128,6 +155,9 @@ impl Scene {
             parts: parts_vec,
             chains,
             model_closed,
+            declared_hollow: false,
+            model_slice_budget: crate::h3::model::Budget::default(),
+            hollow: std::sync::OnceLock::new(),
         })
     }
 
@@ -152,6 +182,9 @@ impl Scene {
             parts,
             chains,
             model_closed,
+            declared_hollow: false,
+            model_slice_budget: crate::h3::model::Budget::default(),
+            hollow: std::sync::OnceLock::new(),
         }
     }
 

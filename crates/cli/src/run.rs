@@ -713,6 +713,7 @@ fn write_check_publish(
         stl: &named.input,
         report: &report,
         written: bytes,
+        declared_hollow: m.hollow.is_some(),
     };
     let (checked, raw) = timed(&mut m.steps, "check", || match cfg.review {
         Some(r) => check::run_bounded(&job, r.checker_timeout).map(|(c, raw)| (c, Some(raw))),

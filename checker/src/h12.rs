@@ -21,7 +21,7 @@
 
 use crate::json::Json;
 use crate::outcome::{MAX_LOCATED, MEASURED_ON, Outcome, VERDICT_SCOPE, at};
-use crate::patch::{FUSE_MM, PatchOut, RepOut};
+use crate::patch::{Comp, FUSE_MM, PatchOut, RepOut};
 use crate::scene::Scene;
 use crate::status::Located;
 
@@ -64,6 +64,15 @@ fn rep_json(scene: &Scene, r: &RepOut) -> Json {
     ])
 }
 
+fn inside_patch(scene: &Scene, c: &Comp) -> bool {
+    !c.parts.is_empty() && c.parts.iter().all(|&pi| scene.wholly_inside(pi))
+}
+
+fn inside_chain(scene: &Scene, ci: usize) -> bool {
+    let parts = &scene.chains.chains[ci].parts;
+    !parts.is_empty() && parts.iter().all(|&pi| scene.wholly_inside(pi))
+}
+
 /// H1.
 #[must_use]
 pub fn h1(scene: &Scene, p: &PatchOut) -> Outcome {
@@ -82,7 +91,8 @@ pub fn h1(scene: &Scene, p: &PatchOut) -> Outcome {
         ("analytic_information", rep_json(scene, p.analytic())),
     ]);
     let mut located: Vec<Located> = Vec::new();
-    for c in r.comps.iter().filter(|c| c.certain_lo > limit) {
+    let outside: Vec<_> = r.comps.iter().filter(|c| !inside_patch(scene, c)).collect();
+    for c in outside.iter().filter(|c| c.certain_lo > limit) {
         located.push(at(
             Some(rec_of(scene, c.chain)),
             Some(scene.world(c.at)),
@@ -102,7 +112,7 @@ pub fn h1(scene: &Scene, p: &PatchOut) -> Outcome {
         .with_located(located)
         .with_detail(detail);
     }
-    let upper = r.max_hi;
+    let upper = outside.iter().map(|c| c.hi).fold(0.0, f64::max);
     if !p.unverified.is_empty() {
         return Outcome::unverified(format!(
             "{} part(s) or chain(s) could not be measured; first: {}",
@@ -120,8 +130,7 @@ pub fn h1(scene: &Scene, p: &PatchOut) -> Outcome {
     // Every patch interval must be narrow enough to mean something: a pass rests on the
     // upper end, and an upper end far above the lower end is a measurement that did not
     // resolve the patch (a coplanar cap, say), whatever the limit.
-    let widest = r
-        .comps
+    let widest = outside
         .iter()
         .map(|c| (c.hi - c.certain_lo, c))
         .max_by(|a, b| a.0.total_cmp(&b.0));
@@ -168,8 +177,15 @@ pub fn h2(scene: &Scene, p: &PatchOut) -> Outcome {
     let r = p.mesh();
     // A patch that may be one or several (its pieces touch only by their outer polygons) is
     // not read as one.
-    maybe += r.comps.iter().filter(|c| c.split).count();
+    maybe += r
+        .comps
+        .iter()
+        .filter(|c| c.split && !inside_patch(scene, c))
+        .count();
     for g in &r.pairs {
+        if inside_chain(scene, g.a) && inside_chain(scene, g.b) {
+            continue;
+        }
         closest_lb = closest_lb.min(g.dlb);
         if g.dub < FUSE_MM {
             located.push(at(

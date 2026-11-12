@@ -48,6 +48,36 @@ pub fn run_full(
     stl: Option<&Stl>,
     pose: &h7::Pose,
 ) -> (Vec<RuleResult>, Json) {
+    run_full_declared(
+        limits,
+        Options {
+            threads,
+            declared_hollow: false,
+        },
+        file,
+        buf,
+        stl,
+        pose,
+    )
+}
+
+/// Explicit measurement applicability and execution settings.
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
+    pub threads: usize,
+    pub declared_hollow: bool,
+}
+
+/// Run with explicit hollow applicability, preserving the undeclared API's old behaviour.
+#[must_use]
+pub fn run_full_declared(
+    limits: &Limits,
+    options: Options,
+    file: &ChituFile,
+    buf: &[u8],
+    stl: Option<&Stl>,
+    pose: &h7::Pose,
+) -> (Vec<RuleResult>, Json) {
     if file.models.len() != 1 {
         return (
             rules_unverified(&format!(
@@ -57,7 +87,7 @@ pub fn run_full(
             Json::Null,
         );
     }
-    let scene = match Scene::build(limits, threads, file, buf, 0) {
+    let mut scene = match Scene::build(limits, options.threads, file, buf, 0) {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -66,6 +96,7 @@ pub fn run_full(
             );
         }
     };
+    scene.declared_hollow = options.declared_hollow;
     if scene.model.is_empty() || scene.translate.iter().any(|x| !x.is_finite()) {
         return (
             rules_unverified("the model has no triangles or a translate that is not finite"),
